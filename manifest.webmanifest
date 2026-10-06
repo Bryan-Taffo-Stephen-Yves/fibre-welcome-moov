@@ -1,0 +1,12 @@
+{
+  "name": "Fibre Welcome — Moov Africa Côte d'Ivoire",
+  "short_name": "Fibre Welcome",
+  "description": "Suivi de l'installation fibre, du paiement à l'activation.",
+  "lang": "fr-CI",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f3f2f2",
+  "theme_color": "#ef3a4a",
+  "icons": [{ "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }]
+}
