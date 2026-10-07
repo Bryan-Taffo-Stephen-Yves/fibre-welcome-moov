@@ -229,12 +229,12 @@ export function assistantAnswer(ws, order, question, docs) {
       blocks.push({ kind: 'doc', title: 'Procédure', text: 'Le jour J : une personne majeure présente, l’accès au logement, une prise électrique libre près de l’emplacement de la box. Si le câble traverse des parties communes, l’accord du propriétaire ou du syndic.', doc: doc('PR-03') });
       blocks.push({ kind: 'action', title: 'Action possible', text: 'Ouvrir votre liste de préparation.', action: { go: 'prep' } }); break;
     case 'appt':
-      if (appt) blocks.push({ kind: 'fact', title: 'Dans votre dossier', text: 'Rendez-vous ' + APPT_STATES[appt.status].toLowerCase() + ' le ' + fmtDate(appt.date) + ', ' + (appt.slot === 'm' ? '08h – 12h' : '13h – 17h') + '.', source: 'Service de réservation (simulé)', fresh });
+      if (appt) blocks.push({ kind: 'fact', title: 'Dans votre dossier', text: 'Rendez-vous ' + APPT_STATES[appt.status].toLowerCase() + ' le ' + fmtDate(appt.date) + ', ' + (appt.slot === 'm' ? '8 h – 12 h' : '13 h – 17 h') + '.', source: 'Service de réservation (simulé)', fresh });
       else blocks.push({ kind: 'fact', title: 'Dans votre dossier', text: 'Aucun rendez-vous n’est réservé pour l’instant.', source: 'Service de réservation (simulé)', fresh });
       blocks.push({ kind: 'doc', title: 'Procédure', text: 'Vous pouvez modifier ou annuler depuis l’onglet Rendez-vous. L’ancien créneau est libéré et reste visible dans l’historique.', doc: doc('PR-04') });
       blocks.push({ kind: 'action', title: 'Action possible', text: 'Ouvrir la page Rendez-vous (vous confirmerez vous-même).', action: { go: 'rdv' } }); break;
     case 'when':
-      if (appt && appt.status === 'confirme') blocks.push({ kind: 'fact', title: 'Engagement confirmé', text: 'Visite confirmée le ' + fmtDate(appt.date) + ', ' + (appt.slot === 'm' ? '08h – 12h' : '13h – 17h') + '.', source: 'Service de réservation (simulé)', fresh });
+      if (appt && appt.status === 'confirme') blocks.push({ kind: 'fact', title: 'Engagement confirmé', text: 'Visite confirmée le ' + fmtDate(appt.date) + ', ' + (appt.slot === 'm' ? '8 h – 12 h' : '13 h – 17 h') + '.', source: 'Service de réservation (simulé)', fresh });
       est(); break;
     case 'payment':
       blocks.push({ kind: 'fact', title: 'Dans votre dossier', text: 'Paiement : ' + PAYMENT_STATES[order.payment.status] + '. Référence ' + order.payment.ref + '.', source: 'Connecteur Moov Money (simulé)', fresh });

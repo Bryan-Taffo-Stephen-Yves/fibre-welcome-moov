@@ -1,0 +1,38 @@
+/* Parcours en direct : bannières de notification et carte du trajet (partagés par tous les espaces). */
+.npop { position: fixed; z-index: 70; display: flex; flex-direction: column; gap: 8px; pointer-events: none; }
+.npop-desk { top: 76px; right: 16px; width: min(360px, calc(100vw - 32px)); }
+/* Ordinateur : sous la rangée « Vous jouez » (puces des personnages), pour ne jamais les recouvrir. */
+@media (min-width: 900px) { .npop-desk { top: 176px; } }
+/* Salle « côte à côte » : chaque volet a ses bannières, dans son propre cadre (elles ne se cachent plus l'une l'autre). */
+.pane-main { position: relative; display: flex; flex-direction: column; min-height: 0; }
+.pane .npop-desk { position: absolute; top: 8px; left: 10px; right: 10px; width: auto; z-index: 40; }
+.npop-who { font-size: 11px; font-weight: 700; letter-spacing: .02em; text-transform: uppercase; color: var(--ink-3); }
+/* Appel entrant visible depuis n'importe quel écran de l'ordinateur. */
+.call-ring { position: fixed; z-index: 85; left: 0; right: 0; margin: 0 auto; top: 14px; width: min(620px, calc(100vw - 32px)); display: flex; align-items: center; gap: 12px; padding: 12px 14px; border-radius: 22px; background: var(--dark); color: var(--on-dark); box-shadow: var(--shadow-lg); animation: npop-in .28s cubic-bezier(.2,.9,.3,1.2); }
+.call-ring-ic { flex: none; width: 40px; height: 40px; border-radius: 50%; display: grid; place-items: center; background: #17915a; color: #fff; animation: npop-ring 1s infinite; }
+.call-ring-ic svg { width: 20px; height: 20px; }
+.call-ring-t { display: flex; flex-direction: column; min-width: 0; }
+.call-ring-t .small { color: var(--on-dark-2); }
+.call-ring .btn.call-ring-yes { flex: none; background: #17915a; color: #fff; border: 0; font-weight: 700; display: inline-flex; align-items: center; gap: 6px; }
+.call-ring .btn.call-ring-yes svg { width: 16px; height: 16px; }
+@media (max-width: 640px) { .call-ring { flex-wrap: wrap; } .call-ring .btn.call-ring-yes { width: 100%; justify-content: center; } }
+/* Dans le cadre du téléphone client : la bannière descend du haut de l'écran, comme une notification système. */
+.npop-phone { position: absolute; top: 10px; left: 10px; right: 10px; z-index: 30; }
+.npop-item { pointer-events: auto; display: flex; align-items: flex-start; gap: 10px; padding: 10px 8px 10px 12px; border-radius: 18px; background: var(--surface); color: var(--ink); box-shadow: var(--shadow-lg); border: 1px solid var(--line); animation: npop-in .28s cubic-bezier(.2,.9,.3,1.2); }
+.npop-ic { flex: none; width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center; background: var(--surface-2); color: var(--ink); }
+.npop-ic svg { width: 18px; height: 18px; }
+.npop-rdv .npop-ic { background: var(--info-soft); color: var(--info); }
+.npop-succes .npop-ic { background: var(--ok-soft); color: var(--ok); }
+.npop-alerte .npop-ic, .npop-action .npop-ic { background: var(--warn-soft); color: var(--warn); }
+.npop-appel .npop-ic { background: var(--ok); color: #fff; animation: npop-ring 1s infinite; }
+.npop-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; text-align: left; background: none; border: 0; padding: 0; cursor: pointer; }
+.npop-body b { font-size: 14px; line-height: 1.25; }
+.npop-body span { font-size: 12.5px; color: var(--ink-2); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.npop-x { flex: none; width: 26px; height: 26px; border-radius: 50%; border: 0; background: transparent; color: var(--ink-3); display: grid; place-items: center; cursor: pointer; }
+.npop-x svg { width: 14px; height: 14px; }
+@keyframes npop-in { from { transform: translateY(-12px) scale(.97); opacity: 0; } to { transform: none; opacity: 1; } }
+@keyframes npop-ring { 0%, 100% { transform: rotate(0); } 10%, 30% { transform: rotate(-14deg); } 20%, 40% { transform: rotate(14deg); } 50% { transform: rotate(0); } }
+@media (prefers-reduced-motion: reduce) { .npop-item, .npop-appel .npop-ic, .call-ring, .call-ring-ic { animation: none; } }
+.track-map { display: block; border-radius: var(--r-md); background: var(--map-ctx); }
+.track-pin-label { fill: var(--surface, #fff); stroke: var(--line); stroke-width: 1; }
+.track-van { transition: transform 1s linear; }

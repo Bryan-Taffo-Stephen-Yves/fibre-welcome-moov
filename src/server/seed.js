@@ -32,13 +32,14 @@ export function buildWorkspace({ id, name, seed, realNow, generation = 1, owner 
     sim: { failNextActivation: false, saturation: false, equipmentShortage: false, degraded: false },
     ports: {},
     config: {
-      holdMinutes: 5, autoConfirm: false, policyEquipment: 'conditionnel', holidays: [],
+      holdMinutes: 5, autoConfirm: false, dossierDeadlineH: 24, travelMin: 4, policyEquipment: 'conditionnel', holidays: [],
       slaH: { DOSSIER_RECU: 24, PAIEMENT_CONFIRME: 12, PREPARATION: 72, PRET_A_PLANIFIER: 48, RDV_CONFIRME: 168, INTERVENTION_EN_COURS: 8, INSTALLATION_TERMINEE: 4, ACTIVATION_EN_ATTENTE: 24, SERVICE_ACTIF: 168 },
       contractDays: 10,
       templates: {
         rdv_confirme: 'Moov Fibre : votre installation est confirmée le {date} ({slot}). Préparez l’accès au logement.',
         rappel: 'Moov Fibre : rappel, le technicien passe demain ({slot}).',
         actif: 'Moov Fibre : votre ligne est active. Bienvenue !',
+        rdv_heure: 'Moov Fibre : {tech} viendra le {date} à {heure}. Préparez l’accès au logement.',
       },
       webhookSecret: 'demo-secret-' + Math.floor(r() * 1e6), // secret de démonstration, jamais un secret réel
     },
@@ -71,7 +72,7 @@ export function buildWorkspace({ id, name, seed, realNow, generation = 1, owner 
   U('auditeur', { name: 'Fatou Touré' });
 
   ws.teams = [
-    { id: 'T1', name: 'Équipe Cocody 1', techUserId: techs[0].id, zones: ['cocody', 'bingerville'], skills: ['pose', 'immeuble'], available: true, contractor: null, quality: 4.6 },
+    { id: 'T1', name: 'Équipe Cocody 1', techUserId: techs[0].id, zones: ['cocody', 'bingerville', 'yopougon', 'marcory'], skills: ['pose', 'immeuble'], available: true, contractor: null, quality: 4.6 },
     { id: 'T2', name: 'Équipe Sud', techUserId: techs[1].id, zones: ['marcory', 'yopougon', 'cocody'], skills: ['pose'], available: true, contractor: null, quality: 4.3 },
     { id: 'T3', name: 'FibreBat (sous-traitant)', techUserId: techs[2].id, zones: ['abobo', 'yopougon', 'bingerville'], skills: ['pose', 'immeuble'], available: true, contractor: 'FibreBat SARL', quality: 3.9 },
   ];

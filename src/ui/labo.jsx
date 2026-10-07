@@ -1,8 +1,9 @@
 // Accueil explicatif et laboratoire public (CDC 7) : présentation, espaces de test, scénarios, simulateur, journal.
-import { useQ, call, api, toast, tokenFor, refresh, cloud, useCloud } from './platform.js';
-import { Btn, AsyncBtn, Tag, Sim, Explain, Field, Modal, Empty, Icon, Avatar, AvatarStack, HouseScene, CAST, Ring, Bars, lookFor, firstName, fmtDateTime, STATE_INFO, ORDER_STATES, BLOCKER_TYPES, ROLES } from './kit.jsx';
+import { useQ, call, api, toast, tokenFor, refresh, cloud, useCloud, tabGet, tabSet } from './platform.js';
+import { Btn, AsyncBtn, Tag, Sim, Explain, Field, Modal, Empty, Icon, Avatar, AvatarStack, Say, HouseScene, CAST, Ring, Bars, lookFor, firstName, fmtDateTime, STATE_INFO, ORDER_STATES, BLOCKER_TYPES, ROLES } from './kit.jsx';
 import { GLOSSARY, ZONES } from '../server/model.js';
 import { inviteLink } from './admin.jsx';
+import { QR } from './app.jsx';
 const React = window.React;
 const { useState } = React;
 
@@ -39,7 +40,59 @@ const REAL = [
   ['warn', Icon.alert, 'À valider avec Moov', 'La précision de l’IA (apprise sur des données inventées), les délais, les règles de remboursement.'],
 ];
 
-export function Home({ go, startTour, hasWs, createWs, users = [], pick }) {
+// Démo en direct (SC-17) : les cinq moments forts, du téléphone de la cliente à l'ordinateur de l'équipe Moov.
+const LIVE_STEPS = [
+  [['Awa Kouassi'], 'Awa paie et envoie son dossier', 'Téléphone'],
+  [['Nadia Konan'], 'Nadia vérifie les photos', 'Ordinateur'],
+  [['Hervé Ouattara'], 'Hervé choisit le technicien et l’heure', 'Ordinateur'],
+  [['Brice Yao', 'Awa Kouassi'], 'Le technicien part, Awa suit le trajet', 'Les deux'],
+  [['Awa Kouassi'], 'Awa note la visite', 'Téléphone'],
+];
+function LiveDemo({ go, owner, openRoom }) {
+  const cs = useCloud();
+  const [phone, setPhone] = useState(false);
+  const base = cs.mode === 'server' && cs.status === 'on' ? cloud.roomLink() : null;
+  const link = base ? base + '&vue=client#offres' : null;
+  const guide = async () => { const r = await call(owner, 'demo.scenario', { code: 'SC-17' }); if (r.ok) { tabSet('fw:laboOpen', 'SC-17'); toast('Guide SC-17 prêt : suivez les étapes.'); go('labo'); } };
+  return <section className="card-strong lb-live" aria-labelledby="lb-live-t">
+    <div className="lb-live-head">
+      <div className="stack-s">
+        <span className="lb-live-kicker"><i />Démo en direct</span>
+        <h2 id="lb-live-t" className="lb-live-title">Un téléphone pour la cliente, un ordinateur pour l’équipe Moov.</h2>
+        <p className="small muted">Chaque action d’un côté apparaît tout de suite de l’autre, avec une notification.</p>
+      </div>
+      <div className="lb-live-devices" aria-hidden="true"><span className="lb-live-ph">{Icon.phone}</span><span className="lb-live-link" /><span className="lb-live-pc">{Icon.columns}</span></div>
+    </div>
+    <ol className="lb-live-steps">{LIVE_STEPS.map(([faces, t, where], i) => <li key={t} className="lb-live-step">
+      <span className="lb-live-faces">{faces.map(n => <Avatar key={n} name={n} size={faces.length > 1 ? 40 : 48} ring />)}</span>
+      <span className="lb-live-n num">{i + 1}</span>
+      <b>{t}</b>
+      <span className={'lb-live-where lb-live-' + (where === 'Téléphone' ? 'ph' : where === 'Ordinateur' ? 'pc' : 'both')}>{where === 'Téléphone' ? Icon.phone : where === 'Ordinateur' ? Icon.columns : Icon.users}{where}</span>
+    </li>)}</ol>
+    <div className="lb-live-btns">
+      <Btn kind="accent" onClick={() => go('offres')}>{Icon.box}Ouvrir le site des offres</Btn>
+      <Btn onClick={() => setPhone(true)}>{Icon.phone}Ouvrir sur le téléphone</Btn>
+      <Btn onClick={() => openRoom && openRoom(['conseiller', 'planificateur', 'technicien'])}>{Icon.columns}Nadia, Hervé et le technicien côte à côte</Btn>
+      {owner && <AsyncBtn kind="ghost" onClick={guide}>{Icon.compass}Suivre le guide pas à pas</AsyncBtn>}
+    </div>
+    {phone && <Modal title="Ouvrir sur le téléphone" onClose={() => setPhone(false)} actions={<Btn kind="primary" onClick={() => setPhone(false)}>Compris</Btn>}>
+      {link ? <>
+        <Say name="Awa Kouassi">Scannez ce carré avec l’appareil photo du téléphone : le <b>site des offres</b> s’ouvre, comme chez un vrai client.</Say>
+        <div className="room-share"><QR text={link} /><div className="stack-s grow" style={{ minWidth: 0 }}><span className="tiny muted">Ou ouvrez ce lien sur le téléphone :</span><code className="room-link">{link}</code></div></div>
+      </> : cs.mode === 'artifact' && cs.status === 'on' ? <>
+        <Say name="Awa Kouassi">Sur le téléphone, ouvrez <b>le même lien d’aperçu</b> que sur cet ordinateur. L’espace partagé s’ouvre tout seul.</Say>
+        <ol className="small stack-s lb-live-ol"><li>Sur l’accueil du téléphone, touchez <b>« Ouvrir le site des offres »</b>.</li><li>Choisissez une offre et payez (paiement simulé).</li><li>Sur l’ordinateur, ouvrez <b>« Nadia, Hervé et le technicien côte à côte »</b>.</li></ol>
+        <p className="tiny muted">La personne qui tient le téléphone doit avoir accès à l’aperçu (bouton Partager de claude.ai).</p>
+      </> : <>
+        <Say name="Aya">Pour l’instant, cet espace reste <b>sur cet appareil</b> : un téléphone ne verrait pas les mêmes dossiers. {cs.status === 'connecting' ? 'Je me connecte au partage, réessayez dans un instant.' : 'Le partage s’active avec une connexion Internet (pastille « Partagé » en haut).'}</Say>
+        <ol className="small stack-s lb-live-ol"><li>En attendant, jouez les deux côtés ici : ouvrez <b>le site des offres</b> dans un onglet…</li><li>… et <b>Nadia, Hervé et le technicien côte à côte</b> dans un autre onglet de ce navigateur.</li></ol>
+      </>}
+      <div><Sim what="paiement simulé : aucun argent ne circule" /></div>
+    </Modal>}
+  </section>;
+}
+
+export function Home({ go, startTour, hasWs, createWs, users = [], pick, owner, openRoom }) {
   const cs = useCloud();
   const [step, setStep] = useState(5);
   const playAs = c => { const u = users.find(x => x.name === c.name); if (u && pick) pick(c.space, u.id); go(c.space); };
@@ -47,6 +100,7 @@ export function Home({ go, startTour, hasWs, createWs, users = [], pick }) {
   const people = users.length ? users.map(u => u.name) : CAST.map(c => c.name);
   const term = ([t, d]) => <div key={t} className="lb-term"><dt>{t}</dt><dd>{d}</dd></div>;
   return <div className="page lb-home">
+    {hasWs && <LiveDemo go={go} owner={owner} openRoom={openRoom} />}
     <section className="lb-hero">
       <div className="card-strong lb-hero-main">
         <div className="lb-hero-text">
@@ -89,7 +143,7 @@ export function Home({ go, startTour, hasWs, createWs, users = [], pick }) {
           <span className="lb-player-body">
             <span className="lb-player-role">Bac à sable</span>
             <b className="lb-player-name">Laboratoire</b>
-            <span className="lb-player-line">16 scénarios guidés et des pannes à provoquer</span>
+            <span className="lb-player-line">17 scénarios guidés et des pannes à provoquer</span>
           </span>
           <span className="arrow-btn lb-player-go" aria-hidden="true">{Icon.arrow}</span>
         </button>
@@ -150,7 +204,10 @@ const evLabel = t => (STATE_INFO[t] && STATE_INFO[t].label) || EV_LABEL[t] || (B
 export function Labo({ owner, setOwner, go, openRoom }) {
   const st = useQ(owner, 'labo.state');
   const [confirm, setConfirm] = useState(null);
-  const [open, setOpen] = useState(null);
+  // Scénario demandé depuis l'accueil (« Suivre le guide pas à pas ») : affiché d'emblée.
+  const [open, setOpen] = useState(() => { const c = tabGet('fw:laboOpen', null); if (c) tabSet('fw:laboOpen', null); return c; });
+  const asked = React.useRef(open);
+  React.useEffect(() => { if (asked.current) setTimeout(() => { const el = document.getElementById('lb-feat'); if (el) el.scrollIntoView({ block: 'start' }); window.scrollBy(0, -80); }, 80); }, []);
   const [orderId, setOrderId] = useState(null);
   const [roleInv, setRoleInv] = useState('U6');
   const [lastInv, setLastInv] = useState(null);
@@ -259,6 +316,7 @@ export function Labo({ owner, setOwner, go, openRoom }) {
           </div>
           <div className="lb-feat-actions">
             {featured.active ? <Btn className="lb-lime" onClick={() => roomFor(featured)}>{Icon.columns}Ouvrir les rôles utiles côte à côte</Btn> : <AsyncBtn className="lb-lime" onClick={() => launch(featured)}>Lancer {featured.code}</AsyncBtn>}
+            {featured.code === 'SC-17' && <Btn onClick={() => go('offres')}>{Icon.box}Ouvrir le site des offres</Btn>}
             {featured.code === 'SC-05' && featured.run && <AsyncBtn kind="sim" onClick={() => race(featured.run)}>Lancer les deux demandes simultanées</AsyncBtn>}
             {featured.active && <AsyncBtn onClick={() => launch(featured)}>Relancer</AsyncBtn>}
           </div>

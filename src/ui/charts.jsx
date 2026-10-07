@@ -46,7 +46,7 @@ export function Stacked({ parts = [], height = 10 }) {
 }
 
 // Carte stylisée d'Abidjan. zones = { cocody: { count, tone }, ... }. Les communes hors périmètre restent grises.
-const COMMUNES = [
+export const COMMUNES = [
   { id: 'abobo', name: 'Abobo', d: 'M140 14L262 8L282 40L270 78L204 84L150 80L132 50Z', c: [208, 46] },
   { id: 'yopougon', name: 'Yopougon', d: 'M20 70L132 50L150 80L146 112L128 150L60 160L18 132Z', c: [82, 108] },
   { id: 'adjame', name: 'Adjamé', d: 'M150 80L204 84L206 118L160 122L146 112Z', c: [176, 102], ctx: 1 },
@@ -74,5 +74,53 @@ export function AbidjanMap({ zones = {}, onPick, selected, height = 240 }) {
       <path d="M0 10c-7-8-11-12-11-18a11 11 0 0122 0c0 6-4 10-11 18z" fill={z.tone === 'bad' ? 'var(--bad)' : 'var(--ink)'} />
       <text y="-5" textAnchor="middle" className="map-pin" style={{ fill: z.tone === 'bad' ? '#fff' : 'var(--bg)' }}>{n}</text>
     </g> : null; })}
+  </svg>;
+}
+
+// Centre d'une commune sur la carte (pour placer l'agence, le client, le technicien).
+export const communeCenter = id => { const c = COMMUNES.find(x => x.id === id); return c ? c.c : [200, 130]; };
+const WATER = 'M0 150c40 4 80 10 130 6s70-6 100-2 70 6 110 0 50-4 60-2v36c-30-2-70 6-110 4s-60-6-100-4-70 8-110 6S30 184 0 188z';
+const lerp = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+
+// Suivi du trajet du technicien, façon application de taxi : agence → domicile du client.
+// p : avancement de 0 à 1 (calculé par l'appelant à partir de l'heure de départ et de la durée prévue).
+export function TrackMap({ from = 'plateau', to = 'cocody', p = 0, arrived = false, height = 200, fromLabel = 'Agence', toLabel = 'Chez vous', label }) {
+  const A = communeCenter(from), B = communeCenter(to);
+  const dx = B[0] - A[0], dy = B[1] - A[1], len = Math.hypot(dx, dy) || 1;
+  // Une route légèrement courbe plutôt qu'une ligne droite.
+  const C = [(A[0] + B[0]) / 2 - dy / len * len * 0.28, (A[1] + B[1]) / 2 + dx / len * len * 0.28];
+  const t = arrived ? 1 : Math.max(0, Math.min(1, p));
+  const Q1 = lerp(A, C, t), P = lerp(Q1, lerp(C, B, t), t);
+  const route = `M${A[0]} ${A[1]}Q${C[0]} ${C[1]} ${B[0]} ${B[1]}`;
+  const done = `M${A[0]} ${A[1]}Q${Q1[0]} ${Q1[1]} ${P[0]} ${P[1]}`;
+  // Cadrage : on zoome sur le trajet (avec une marge), sans sortir de la carte.
+  const xs = [A[0], B[0], C[0]], ys = [A[1], B[1], C[1]];
+  const pad = 46;
+  let x0 = Math.max(0, Math.min(...xs) - pad), x1 = Math.min(400, Math.max(...xs) + pad), y0 = Math.max(0, Math.min(...ys) - pad), y1 = Math.min(260, Math.max(...ys) + pad);
+  const ratio = 400 / 260; if ((x1 - x0) / (y1 - y0) < ratio) { const w = (y1 - y0) * ratio; const cx = (x0 + x1) / 2; x0 = Math.max(0, cx - w / 2); x1 = Math.min(400, x0 + w); } else { const h = (x1 - x0) / ratio; const cy = (y0 + y1) / 2; y0 = Math.max(0, cy - h / 2); y1 = Math.min(260, y0 + h); }
+  return <svg className="map track-map" viewBox={`${x0} ${y0} ${x1 - x0} ${y1 - y0}`} style={{ height, width: '100%' }} role="img" aria-label={label || ('Trajet du technicien : ' + Math.round(t * 100) + ' % du chemin parcouru')}>
+    <rect x="0" y="0" width="400" height="260" fill="var(--map-ctx)" />
+    <path d={WATER} fill="var(--map-water)" />
+    {COMMUNES.map(c => <path key={c.id} d={c.d} fill={c.id === to ? 'color-mix(in srgb, var(--accent) 22%, var(--map-land))' : c.ctx ? 'var(--map-ctx)' : 'var(--map-land)'} stroke="var(--map-stroke)" strokeWidth="2.5" strokeLinejoin="round" />)}
+    {/* Les communes de départ et d'arrivée portent déjà leur étiquette (agence, client) : leur nom ne s'y superpose pas. */}
+    {/* Seulement les noms entièrement dans le cadre (pas de « B » coupé au bord). */}
+    {COMMUNES.filter(c => c.name && c.id !== from && c.id !== to && c.c[0] - c.name.length * 2.7 >= x0 + 2 && c.c[0] + c.name.length * 2.7 <= x1 - 2 && c.c[1] + 18 <= y1 - 2 && c.c[1] + 10 >= y0).map(c => <text key={c.id} x={c.c[0]} y={c.c[1] + 18} textAnchor="middle" className="map-label" style={{ fontSize: 9, opacity: 0.7 }} pointerEvents="none">{c.name}</text>)}
+    <path d={route} fill="none" stroke="var(--ink)" strokeOpacity=".25" strokeWidth="4" strokeLinecap="round" strokeDasharray="1 7" />
+    <path d={done} fill="none" stroke="var(--accent)" strokeWidth="4" strokeLinecap="round" />
+    <g transform={`translate(${A[0]} ${A[1]})`}><circle r="5" fill="var(--surface, #fff)" stroke="var(--ink)" strokeWidth="2" /><text y="17" textAnchor="middle" className="map-label" style={{ fontSize: 9, fontWeight: 700 }}>{fromLabel}</text></g>
+    <g transform={`translate(${B[0]} ${B[1]})`}>
+      <path d="M0 2c-7-8-11-12-11-18a11 11 0 0122 0c0 6-4 10-11 18z" fill="var(--ink)" />
+      <path d="M-5 -15l5-4.5 5 4.5v5h-10z" fill="var(--bg, #fff)" />
+    </g>
+    {/* Étiquette de la destination au-dessus de l'épingle, sur une pastille : ni la route ni la camionnette ne la cachent. */}
+    <g transform={`translate(${B[0]} ${B[1] - 34})`} pointerEvents="none">
+      <rect className="track-pin-label" x={-(String(toLabel).length * 2.9 + 7)} y="-8" width={String(toLabel).length * 5.8 + 14} height="15" rx="7.5" />
+      <text y="3" textAnchor="middle" className="map-label" style={{ fontSize: 9, fontWeight: 700 }}>{toLabel}</text>
+    </g>
+    <g transform={`translate(${P[0]} ${P[1]})`} className="track-van">
+      {!arrived && <circle r="13" fill="var(--accent)" opacity=".18"><animate attributeName="r" values="9;16;9" dur="1.8s" repeatCount="indefinite" /></circle>}
+      <circle r="9" fill="var(--accent)" stroke="#fff" strokeWidth="2" />
+      <path d="M-5 1.5v-4.5h6l2.5 2.5v2h-8.5zM-3 3a1.2 1.2 0 100-.01M2 3a1.2 1.2 0 100-.01" fill="#fff" stroke="#fff" strokeWidth=".8" strokeLinejoin="round" />
+    </g>
   </svg>;
 }

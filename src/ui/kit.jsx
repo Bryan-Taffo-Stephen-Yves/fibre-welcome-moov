@@ -1,15 +1,27 @@
 // Petits composants partagés par tous les espaces.
-import { STATE_INFO, ORDER_STATES, BLOCKER_TYPES, APPT_STATES, ROLES } from '../server/model.js';
+import { STATE_INFO, ORDER_STATES, BLOCKER_TYPES, APPT_STATES, ROLES, hourLabel } from '../server/model.js';
 import { fmtDate, fmtDateTime, fmtAgo, fmtDur, fmtRange } from '../server/ai.js';
 import { Avatar, AvatarStack, Say, lookFor, HouseScene, VanScene, CAST } from './people.jsx';
-import { Sparkline, Bars, Ring, Stacked, AbidjanMap } from './charts.jsx';
-import { useImage, useQ, call } from './platform.js';
+import { Sparkline, Bars, Ring, Stacked, AbidjanMap, TrackMap, COMMUNES, communeCenter } from './charts.jsx';
+import { useImage, useQ, call, liveClock } from './platform.js';
 const React = window.React;
 const { useState } = React;
 
 export { fmtDate, fmtDateTime, fmtAgo, fmtDur, fmtRange, STATE_INFO, ORDER_STATES, BLOCKER_TYPES, APPT_STATES, ROLES };
-export { Avatar, AvatarStack, Say, lookFor, HouseScene, VanScene, CAST, Sparkline, Bars, Ring, Stacked, AbidjanMap };
-export const slotLabel = s => (s === 'm' ? '08h – 12h' : '13h – 17h');
+export { Avatar, AvatarStack, Say, lookFor, HouseScene, VanScene, CAST, Sparkline, Bars, Ring, Stacked, AbidjanMap, TrackMap, COMMUNES, communeCenter };
+export const slotLabel = s => (s === 'm' ? '8 h – 12 h' : '13 h – 17 h');
+// « 09:00 » → « 9 h », plus naturel à lire.
+export { hourLabel };
+// « d’Awa », « de Koffi » (élision devant une voyelle).
+export const deName = n => (/^[aeiouyhâàéèêîôûAEIOUYHÂÀÉÈÊÎÔÛ]/.test(n || '') ? 'd’' : 'de ') + n;
+// Avancement du trajet simulé du technicien (0 à 1) et minutes restantes, à partir de l'horloge de l'espace.
+export function trackInfo(track, ws) {
+  if (!track) return null;
+  const now = liveClock(ws);
+  const p = Math.max(0, Math.min(1, (now - track.departAt) / track.durMs));
+  const leftMs = Math.max(0, track.departAt + track.durMs - now);
+  return { p: track.arrivedAt ? 1 : p, leftMin: Math.ceil(leftMs / 60e3), leftMs, arrived: !!track.arrivedAt, late: !track.arrivedAt && p >= 1 };
+}
 // Durée de garde d'un créneau (réglage de l'administrateur, 5 minutes par défaut).
 export const minutes = h => { const n = Number(h) > 0 ? Number(h) : 5; return n + (n > 1 ? ' minutes' : ' minute'); };
 export const money = n => n.toLocaleString('fr-FR') + ' F CFA';
@@ -117,6 +129,45 @@ export function NotifBell({ token, onOpen, dark }) {
   </span>;
 }
 
+// Bannières qui apparaissent quand une notification arrive (comme sur un téléphone), pour la personne affichée.
+// Seules les notifications arrivées après l'ouverture de l'écran apparaissent ; elles restent aussi dans la cloche.
+// Exception : quand on prend un personnage pour la première fois (démo : Nadia passe la main à Hervé), sa dernière
+// notification non lue des 3 dernières minutes apparaît aussi.
+const seenNotif = new Map();
+export function NotifPopups({ token, onOpen, variant = 'desk', max = 3 }) {
+  const r = useQ(token, 'notifications');
+  const me = useQ(token, 'me');
+  const adv = !!me.data && ['conseiller', 'superviseur'].includes(me.data.user.role);
+  const calls = useQ(token, adv ? 'ops.calls' : 'me');
+  const [shown, setShown] = useState([]);
+  const list = r.data || [];
+  React.useEffect(() => {
+    if (!token || !r.data) return;
+    let seen = seenNotif.get(token);
+    const first = !seen;
+    if (first) { const now = liveClock(me.data && me.data.ws); seen = new Set(list.filter(n => n.read || n.at < now - 180e3).map(n => n.id)); seenNotif.set(token, seen); }
+    let fresh = list.filter(n => !seen.has(n.id) && !n.read);
+    if (first) fresh = fresh.slice(0, 1);
+    for (const n of list) seen.add(n.id);
+    if (!fresh.length) return;
+    setShown(s => [...fresh.slice(0, max).reverse().map(n => ({ ...n, shownAt: Date.now() })), ...s].slice(0, max));
+    for (const n of fresh) setTimeout(() => setShown(s => s.filter(x => x.id !== n.id)), n.kind === 'appel' ? 12000 : 7000);
+  }, [token, list.map(n => n.id).join(',')]);
+  // Une bannière « Appel entrant » disparaît dès que l'appel ne sonne plus (décroché, refusé, raccroché, manqué).
+  const ringing = adv && Array.isArray(calls.data) ? calls.data.filter(c => c.status === 'sonne').map(c => c.orderId) : null;
+  const list2 = shown.filter(n => n.kind !== 'appel' || !ringing || ringing.includes(n.orderId));
+  if (!list2.length) return null;
+  // Sur l'ordinateur, plusieurs personnages peuvent recevoir des bannières : on dit pour qui elle est.
+  const who = variant === 'desk' && me.data ? firstName(me.data.user.name) : null;
+  return <div className={'npop npop-' + variant} aria-live="polite">{list2.map(n => <div key={n.id} className={'npop-item npop-' + (n.kind || 'info')} role="status">
+    <span className="npop-ic" aria-hidden="true">{NOTIF_IC[n.kind] || Icon.bell}</span>
+    <button type="button" className="npop-body" onClick={() => { call(token, 'notif.read', { id: n.id }, { silent: true }); setShown(s => s.filter(x => x.id !== n.id)); if (onOpen) onOpen(n); }}>
+      {who && <small className="npop-who">Pour {who}</small>}<b>{n.title}</b><span>{n.body}</span>
+    </button>
+    <button type="button" className="npop-x" aria-label="Fermer" onClick={() => setShown(s => s.filter(x => x.id !== n.id))}>{Icon.x}</button>
+  </div>)}</div>;
+}
+
 export function Empty({ children, who = 'Aya' }) { return <div className="row" style={{ padding: '10px 0', flexWrap: 'nowrap' }}><Avatar name={who} size={30} /><p className="muted small">{children}</p></div>; }
 
 // Indicateur chiffré, avec une petite courbe si on en donne une.
@@ -138,6 +189,7 @@ export function PersonChip({ name, role, pressed, onClick, size = 28 }) {
   return <button type="button" className="persona-chip" aria-pressed={pressed} onClick={onClick}><Avatar name={name} size={size} />{firstName(name)}{role && <small>{role}</small>}</button>;
 }
 
+const NOTIF_IC = {};
 const I = (d, extra) => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" {...extra}>{d}</svg>;
 export const Icon = {
   home: I(<><path d="M4 10.5L12 4l8 6.5V19a1 1 0 01-1 1h-4.5v-5.5h-5V20H5a1 1 0 01-1-1z" /></>),
@@ -168,6 +220,8 @@ export const Icon = {
   clock: I(<><circle cx="12" cy="12" r="8.5" /><path d="M12 7.5V12l3 2" /></>),
   pin: I(<><path d="M12 21s-6.5-6-6.5-11a6.5 6.5 0 0113 0c0 5-6.5 11-6.5 11z" /><circle cx="12" cy="10" r="2.3" /></>),
   phone: I(<><rect x="7" y="2.5" width="10" height="19" rx="2.5" /><path d="M11 18.5h2" /></>),
+  handset: I(<><path d="M6.5 3.5h3l1.5 4.5-2.2 1.4a11 11 0 005.8 5.8l1.4-2.2 4.5 1.5v3a1.5 1.5 0 01-1.5 1.5A16.5 16.5 0 015 5a1.5 1.5 0 011.5-1.5z" /></>),
+  star: I(<><path d="M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8L12 16.9l-5.2 2.7 1-5.8-4.3-4.1 5.9-.9z" /></>),
   search: I(<><circle cx="11" cy="11" r="6.5" /><path d="M16 16l4.5 4.5" /></>),
   settings: I(<><circle cx="12" cy="12" r="3" /><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1" /></>),
   box: I(<><path d="M3.5 7.5L12 3l8.5 4.5v9L12 21l-8.5-4.5z" /><path d="M3.5 7.5L12 12l8.5-4.5M12 12v9" /></>),
@@ -177,3 +231,4 @@ export const Icon = {
   plug: I(<><path d="M9 3v5M15 3v5M6.5 8h11v3a5.5 5.5 0 01-11 0zM12 16.5V21" /></>),
   logo: I(<><path d="M4 16c3-6 5-9 8-9s5 3 8 9" /><circle cx="12" cy="16.5" r="2" fill="currentColor" stroke="none" /></>, { strokeWidth: 2.4 }),
 };
+Object.assign(NOTIF_IC, { rdv: Icon.cal, message: Icon.chat, alerte: Icon.alert, tache: Icon.list, action: Icon.doc, succes: Icon.check, info: Icon.bell, appel: Icon.handset });

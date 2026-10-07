@@ -339,6 +339,12 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 .pane { border-radius: var(--r-xl); background: var(--surface-2); display: flex; flex-direction: column; min-width: 0; box-shadow: var(--shadow); overflow: hidden; }
 .pane-head { padding: 10px 12px; background: var(--surface); display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .pane-body { padding: 14px; max-height: 920px; overflow: auto; }
+/* Grand écran : trois volets côte à côte, chacun défile dans son cadre (tout reste au-dessus du pli). */
+@media (min-width: 1200px) {
+  .room { grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); }
+  .pane-body { max-height: calc(100vh - 190px); min-height: 480px; }
+  .pane .phone { min-height: 0; max-height: calc(100vh - 220px); }
+}
 .pane .phone { box-shadow: none; min-height: 660px; max-height: 820px; }
 .pane .page { padding: 0; }
 
