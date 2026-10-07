@@ -309,3 +309,5 @@
 .ad-keep { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
 .ad-keep .ad-st { font-weight: 500; font-size: 13.5px; white-space: normal; }
 .ad-degr-sw { margin-top: auto; }
+/* Réglages du parcours en direct : libellés longs, champs alignés en bas */
+.ad-form2-end { align-items: end; }

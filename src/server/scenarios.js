@@ -8,6 +8,8 @@ import { H, DAY, startOfDay } from './seed.js';
 const O = (ws, run, i = 0) => ws.orders.find(o => o.id === run.orderIds[i]) || {};
 const evs = (ws, run, type, i = 0) => ws.events.filter(e => e.orderId === run.orderIds[i] && e.type === type);
 const atLeast = (ws, run, st, i = 0) => stateRank(O(ws, run, i).state) >= stateRank(st);
+// Démo en direct : le dossier acheté sur le site des offres après le lancement du scénario.
+const liveOrder = (ws, run) => ws.orders.filter(o => o.dossier && o.dossier.openedAt != null && o.createdAt >= run.startedAt).at(-1) || null;
 const blk = (ws, run, type, status, i = 0) => ws.blockers.some(b => b.orderId === run.orderIds[i] && b.type === type && (!status || b.status === status));
 
 export const SCENARIOS = [
@@ -101,6 +103,16 @@ export const SCENARIOS = [
     { role: 'labo', text: 'Créer un second espace (B) depuis la liste des espaces.', check: () => null },
     { role: 'labo', text: 'Réinitialiser l’espace A : l’espace B garde ses dossiers et sa génération.', check: () => null },
   ] },
+  { code: 'SC-17', title: 'Démo en direct : du site des offres à la note du technicien', goal: 'Un client achète en ligne, envoie son dossier, Moov le vérifie et planifie, le technicien vient et le client le note. Téléphone et ordinateur en même temps.', steps: [
+    { role: 'client', text: 'Client : sur le site des offres, choisir une offre et payer (Moov Money simulé).', check: (ws, r) => !!liveOrder(ws, r) },
+    { role: 'client', text: 'Client : remplir le dossier (3 photos, repère, créneau) et l’envoyer avant la fin du compte à rebours.', check: (ws, r) => { const o = liveOrder(ws, r); return !!(o && o.dossier.submittedAt); } },
+    { role: 'conseiller', text: 'Conseillère : regarder les photos et les valider (ou dire au client ce qui manque).', check: (ws, r) => { const o = liveOrder(ws, r); return !!o && o.requiredDocs.every(t => (ws.documents.filter(d => d.orderId === o.id && d.type === t && d.status !== 'remplace').at(-1) || {}).status === 'valide'); } },
+    { role: 'planificateur', text: 'Planificateur : choisir un technicien libre et l’heure, puis valider.', check: (ws, r) => { const o = liveOrder(ws, r); return !!o && stateRank(o.state) >= stateRank('RDV_CONFIRME'); } },
+    { role: 'technicien', text: 'Technicien : toucher « Départ » : le client suit le trajet sur la carte.', check: (ws, r) => { const o = liveOrder(ws, r); return !!o && ws.workOrders.some(w => w.orderId === o.id && w.track); } },
+    { role: 'technicien', text: 'Technicien : arriver, installer et terminer la mission.', check: (ws, r) => { const o = liveOrder(ws, r); return !!o && stateRank(o.state) >= stateRank('INSTALLATION_TERMINEE'); } },
+    { role: 'client', text: 'Client : noter la visite du technicien.', check: (ws, r) => { const o = liveOrder(ws, r); return !!o && (ws.techRatings || []).some(x => x.orderId === o.id); } },
+    { role: 'client', text: 'Bonus : appeler le service client depuis l’application (la conseillère décroche).', check: (ws, r) => { const o = liveOrder(ws, r); return !!o && (ws.calls || []).some(c => c.orderId === o.id && ['en_cours', 'termine'].includes(c.status)); } },
+  ] },
 ];
 
 function mk(ws, cmds, { zone = 'cocody', customerId = 'U1', to = 'PREPARATION', scenario }) {
@@ -156,7 +168,7 @@ export function runScenarioSetup(ws, code, { realNow, cmds }) {
       D.woAction(ws, wo, 'finish', {}, tech); run.orderIds.push(o.id); break; }
     case 'SC-13': { const o = mk(ws, cmds, { to: 'PRET', scenario: code }); run.orderIds.push(o.id); break; }
     case 'SC-14': { const a = mk(ws, cmds, { to: 'PRET', scenario: code }); const b = mk(ws, cmds, { to: 'PRET', scenario: code }); book(ws, b, 'T1', rn); run.orderIds.push(a.id, b.id); break; }
-    case 'SC-15': case 'SC-16': break;
+    case 'SC-15': case 'SC-16': case 'SC-17': break;
   }
   (ws.scenarioRuns ||= []).push(run);
   for (const n of ws.notifications) if (run.orderIds.includes(n.orderId) && n.at <= ws.clock) n.read = true;

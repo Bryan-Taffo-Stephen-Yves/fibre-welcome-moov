@@ -1,12 +1,13 @@
 // Coquille de l'application : rail d'icônes, barre du haut en pilules, choix du personnage,
 // salle « côte à côte », visite guidée avec Aya, invitations.
-import { api, useQ, useTick, tokenFor, tabGet, tabSet, useToasts, toast, refresh, useOnline, storage, cloud, useCloud, tabLock, localImage } from './platform.js';
+import { api, useQ, call, useTick, tokenFor, tabGet, tabSet, useToasts, toast, refresh, useOnline, storage, cloud, useCloud, tabLock, localImage } from './platform.js';
 import { Btn, AsyncBtn, Tag, Modal, Icon, Avatar, AvatarStack, Say, PersonChip, CAST, firstName, fmtDateTime, minutes, ROLES } from './kit.jsx';
 import { ClientApp } from './client.jsx';
 import { FieldApp } from './field.jsx';
 import { OpsConsole } from './ops.jsx';
 import { AdminConsole } from './admin.jsx';
 import { Home, Labo } from './labo.jsx';
+import { Shop } from './shop.jsx';
 import { GLOSSARY } from '../server/model.js';
 import qrcode from './vendor/qrcode.js';
 const React = window.React;
@@ -15,7 +16,10 @@ const { useState, useEffect, useLayoutEffect, useRef } = React;
 const SPACE_ROLES = { client: ['client', 'representant'], terrain: ['technicien'], ops: ['conseiller', 'planificateur', 'superviseur'], admin: ['admin', 'auditeur'] };
 // Navigation principale (pilules) ; la salle « côte à côte » est dans le rail.
 const NAV = [['accueil', 'Accueil'], ['client', 'Client'], ['terrain', 'Technicien'], ['ops', 'Équipe Moov'], ['admin', 'Admin'], ['labo', 'Labo']];
-const ROUTES = [...NAV, ['salle', 'Côte à côte']];
+const ROUTES = [...NAV, ['salle', 'Côte à côte'], ['offres', 'Offres']];
+// Mode « téléphone du client » (?vue=client) : seulement le site des offres et l'application du client.
+const KIOSK_ROUTES = ['offres', 'client'];
+const isKiosk = () => { try { return new URLSearchParams(location.search).get('vue') === 'client'; } catch { return false; } };
 const spaceOfRole = r => Object.keys(SPACE_ROLES).find(k => SPACE_ROLES[k].includes(r));
 const lsGet = (k, d) => { try { const v = window.localStorage.getItem(k); return v == null ? d : v; } catch { return d; } };
 const lsSet = (k, v) => { try { window.localStorage.setItem(k, v); } catch {} };
@@ -27,7 +31,9 @@ export function App() {
   const toasts = useToasts();
   const [owner, setOwnerState] = useState(() => tabGet('fw:owner', null));
   const [guest, setGuest] = useState(() => tabGet('fw:guest', null));
-  const [route, setRoute] = useState(() => { const h = readHash(); return ROUTES.some(r => r[0] === h) ? h : 'accueil'; });
+  const [kiosk] = useState(isKiosk);
+  const okRoute = r => (kiosk ? KIOSK_ROUTES.includes(r) : ROUTES.some(x => x[0] === r));
+  const [route, setRoute] = useState(() => { const h = readHash(); return okRoute(h) ? h : kiosk ? 'offres' : 'accueil'; });
   const [picks, setPicks] = useState(() => tabGet('fw:picks', {}));
   const [room, setRoom] = useState(() => tabGet('fw:room', null));
   const [tour, setTour] = useState(null);
@@ -58,7 +64,7 @@ export function App() {
       loadImage: (id, img) => localImage(id, img),
     });
   }, []);
-  const go = r => { setRoute(r); try { history.replaceState(null, '', '#' + r); } catch {} window.scrollTo(0, 0); };
+  const go = r => { if (!okRoute(r)) r = kiosk ? 'offres' : 'accueil'; setRoute(r); try { history.replaceState(null, '', '#' + r); } catch {} window.scrollTo(0, 0); };
 
   useEffect(() => { if (theme) document.documentElement.setAttribute('data-theme', theme); else document.documentElement.removeAttribute('data-theme'); tabSet('fw:theme', theme); try { theme ? localStorage.setItem('fw:theme', theme) : localStorage.removeItem('fw:theme'); } catch {} }, [theme]);
 
@@ -69,7 +75,7 @@ export function App() {
       const [, wsId, tok] = h.split('.');
       api.join(wsId, tok).then(t => { tabSet('fw:guest', t); setGuest(t); const s = api.session(t); go(spaceOfRole(s.role)); }).catch(e => setJoinErr(e.message));
     }
-    const f = () => { const x = readHash(); if (ROUTES.some(r => r[0] === x)) setRoute(x); };
+    const f = () => { const x = readHash(); if (okRoute(x)) setRoute(x); };
     window.addEventListener('hashchange', f); return () => window.removeEventListener('hashchange', f);
   }, []);
 
@@ -93,15 +99,39 @@ export function App() {
 
   const me = useQ(ownerOk, 'me');
   const users = (me.data && me.data.users) || [];
-  const userFor = space => { const id = picks[space]; const ok = users.find(u => u.id === id && SPACE_ROLES[space].includes(u.role)); return ok ? ok.id : (users.find(u => SPACE_ROLES[space].includes(u.role)) || {}).id; };
+  // Téléphone du client (kiosque) : le dernier client qui a acheté dans cette salle est gardé dans le navigateur,
+  // pour qu'un nouvel onglet ou un QR code rescanné le retrouve.
+  const kioskKey = wsId ? 'fw:kioskClient:' + wsId : null;
+  const userFor = space => { const id = picks[space] || (kiosk && space === 'client' && kioskKey ? lsGet(kioskKey, null) : null); const ok = users.find(u => u.id === id && SPACE_ROLES[space].includes(u.role)); return ok ? ok.id : (users.find(u => SPACE_ROLES[space].includes(u.role)) || {}).id; };
   const pick = (space, id) => { const p = { ...picks, [space]: id }; setPicks(p); tabSet('fw:picks', p); };
   const tok = space => guestInfo && !guestInfo.error ? guest : tokenFor(ownerOk, userFor(space));
   const openRoom = roles => {
-    const panes = roles.map(r => { const u = users.find(x => x.role === r); return { space: spaceOfRole(r), userId: u && u.id }; }).filter(p => p.userId);
+    const panes = roles.map(r => { const u = r === 'technicien' ? users.find(x => x.id === userFor('terrain')) : users.find(x => x.role === r); return { space: spaceOfRole(r), userId: u && u.id }; }).filter(p => p.userId);
     const r = panes.length ? panes : null; setRoom(r); tabSet('fw:room', r); go('salle');
   };
   const cloudOn = useCloud().status === 'on';
-  const shellProps = { toasts, theme, setTheme, route, go, onTour: () => setTour(0), onGloss: () => setGloss(true) };
+  const shellProps = { toasts, theme, setTheme, route, go, kiosk, onTour: () => setTour(0), onGloss: () => setGloss(true) };
+  const dark = theme === 'dark' || (theme == null && osDark());
+  // Après le paiement sur le site des offres : on ouvre l'application du client sur le nouveau dossier.
+  const shopDone = r => { pick('client', r.userId); if (kioskKey) lsSet(kioskKey, r.userId); tabSet('fw:focusOrder', r.id); go('client'); };
+  // Une mission vient d'être confiée à un technicien : l'espace Technicien et le volet de la salle passent sur lui.
+  const seenWo = useRef(null);
+  useEffect(() => {
+    if (!ownerOk || kiosk || !users.length) return;
+    const open = [];
+    for (const t of users.filter(u => u.role === 'technicien' && u.active !== false)) { try { for (const w of api.q(tokenFor(ownerOk, t.id), 'tech.missions')) if (w.status === 'affectee') open.push(w.id + ':' + t.id); } catch {} }
+    if (!seenWo.current) { seenWo.current = new Set(open); return; }
+    const fresh = open.filter(k => !seenWo.current.has(k));
+    for (const k of open) seenWo.current.add(k);
+    if (!fresh.length) return;
+    const techId = fresh.at(-1).split(':')[1];
+    const u = users.find(x => x.id === techId);
+    const inRoom = (room || []).some(p => p.space === 'terrain');
+    if (userFor('terrain') === techId && !(inRoom && !room.some(p => p.userId === techId))) return;
+    pick('terrain', techId);
+    if (inRoom) { const r = room.map(p => p.space === 'terrain' ? { ...p, userId: techId } : p); setRoom(r); tabSet('fw:room', r); }
+    if (u) toast('Nouvelle mission pour ' + firstName(u.name) + ' : l’espace Technicien passe sur ' + firstName(u.name) + '.');
+  });
 
   if (guest) {
     if (guestInfo.error) return <Shell {...shellProps} guestMode><div className="page stack"><div className="alert alert-bad">{guestInfo.error}</div><div><Btn onClick={() => { tabSet('fw:guest', null); setGuest(null); go('accueil'); }}>Revenir à mon propre espace</Btn></div></div></Shell>;
@@ -114,17 +144,23 @@ export function App() {
 
   const ws = me.data && me.data.ws;
   const steps = TOUR;
+  // Site des offres : plein écran, sans la coquille de l'application.
+  if (route === 'offres') return <>
+    {ownerOk ? <Shop owner={ownerOk} onDone={shopDone} onBack={kiosk ? null : () => go('accueil')} dark={dark} onTheme={() => setTheme(dark ? 'light' : 'dark')} /> : <div className="page"><Say>Je prépare le site des offres…</Say></div>}
+    <Toasts list={toasts} />
+  </>;
   return <Shell {...shellProps} ws={ws}>
     {joinErr && <div className="page" style={{ paddingBottom: 0 }}><div className="alert alert-warn spread"><span><b>Ce lien d’invitation ne marche pas ici.</b> {joinErr} {cloudOn ? 'Vos appareils partagent déjà le même espace : choisissez simplement votre personnage.' : 'Une invitation ne fonctionne que dans le navigateur où l’espace de test a été créé (les données restent sur cet ordinateur). Ouvrez le lien dans un autre onglet de ce même navigateur.'}</span><Btn size="s" onClick={() => { setJoinErr(null); try { history.replaceState(null, '', location.pathname); } catch {} }}>Fermer</Btn></div></div>}
     {!ownerOk ? <div className="page"><Say>Je prépare votre espace de test…</Say></div>
-      : route === 'accueil' ? <Home go={go} hasWs={!!ownerOk} startTour={() => setTour(0)} createWs={() => { const { token } = api.createWorkspace({}); setOwner(token); }} users={users} pick={pick} />
+      : kiosk ? <div className="page"><SpaceView space="client" token={tok('client')} /></div>
+      : route === 'accueil' ? <Home go={go} hasWs={!!ownerOk} startTour={() => setTour(0)} createWs={() => { const { token } = api.createWorkspace({}); setOwner(token); }} users={users} pick={pick} owner={ownerOk} openRoom={openRoom} />
       : route === 'labo' ? <Labo owner={ownerOk} setOwner={setOwner} go={go} openRoom={openRoom} />
-      : route === 'salle' ? <Room owner={ownerOk} users={users} room={room} setRoom={r => { setRoom(r); tabSet('fw:room', r); }} />
+      : route === 'salle' ? <Room owner={ownerOk} users={users} room={room} techId={userFor('terrain')} setRoom={r => { setRoom(r); tabSet('fw:room', r); }} />
       : <div className="page">
         <SpaceHead space={route} users={users} current={userFor(route)} onPick={id => pick(route, id)} />
         <SpaceView space={route} token={tok(route)} />
       </div>}
-    {welcome && ownerOk && <Modal title="Bienvenue dans Fibre Welcome" onClose={() => { lsSet('fw:welcomed', '1'); setWelcome(false); }} actions={<><Btn kind="primary" onClick={() => { lsSet('fw:welcomed', '1'); setWelcome(false); setTour(0); }}>Faire la visite (3 min)</Btn><Btn onClick={() => { lsSet('fw:welcomed', '1'); setWelcome(false); }}>Explorer seul</Btn></>}>
+    {welcome && ownerOk && !kiosk && <Modal title="Bienvenue dans Fibre Welcome" onClose={() => { lsSet('fw:welcomed', '1'); setWelcome(false); }} actions={<><Btn kind="primary" onClick={() => { lsSet('fw:welcomed', '1'); setWelcome(false); setTour(0); }}>Faire la visite (3 min)</Btn><Btn onClick={() => { lsSet('fw:welcomed', '1'); setWelcome(false); }}>Explorer seul</Btn></>}>
       <Say name="Aya" size={44}>Bonjour, je suis <b>Aya</b>, votre guide. Cette application suit une installation de fibre Moov, <b>du paiement jusqu’à la connexion qui marche</b>.</Say>
       <div className="card-soft stack-s">
         <div className="row"><AvatarStack names={CAST.map(c => c.name)} size={34} max={6} /><span className="small muted">Vous pouvez jouer chacun de ces personnages.</span></div>
@@ -135,9 +171,25 @@ export function App() {
         <li>Les petits <b>« ? En clair »</b> expliquent les mots techniques.</li>
       </ul>
     </Modal>}
+    {ownerOk && !kiosk && <CallRing owner={ownerOk} users={users} hidden={nadia => (route === 'ops' && userFor('ops') === nadia) || (route === 'salle' && (room || []).some(p => p.userId === nadia))} onAnswer={nadia => { pick('ops', nadia); go('ops'); }} />}
     {gloss && <Modal title="Lexique" onClose={() => setGloss(false)}><dl className="gloss">{GLOSSARY.map(([t, d]) => <React.Fragment key={t}><dt>{t}</dt><dd>{d}</dd></React.Fragment>)}</dl></Modal>}
-    {tour != null && <Tour step={tour} steps={steps} hold={ws && ws.holdMinutes} onStep={i => { const s = steps[i]; if (s.pick) for (const [sp, role] of Object.entries(s.pick)) { const u = users.find(x => x.role === role); if (u) pick(sp, u.id); } if (s.route && s.route !== route) go(s.route); setTour(i); }} onEnd={() => setTour(null)} />}
+    {tour != null && !kiosk && <Tour step={tour} steps={steps} hold={ws && ws.holdMinutes} onStep={i => { const s = steps[i]; if (s.pick) for (const [sp, role] of Object.entries(s.pick)) { const u = users.find(x => x.role === role); if (u) pick(sp, u.id); } if (s.route && s.route !== route) go(s.route); setTour(i); }} onEnd={() => setTour(null)} />}
   </Shell>;
+}
+
+// Appel simulé du client : il sonne aussi quand l'ordinateur montre un autre écran (technicien, labo…),
+// avec un bouton pour décrocher en tant que la conseillère.
+function CallRing({ owner, users, hidden, onAnswer }) {
+  const adv = users.find(u => u.role === 'conseiller' && u.active !== false);
+  const tok = adv ? tokenFor(owner, adv.id) : null;
+  const calls = useQ(tok, 'ops.calls');
+  const c = Array.isArray(calls.data) ? calls.data.find(x => x.status === 'sonne') : null;
+  if (!c || hidden(adv.id)) return null;
+  return <div className="call-ring" role="alertdialog" aria-label={'Appel entrant de ' + c.fromName}>
+    <span className="call-ring-ic" aria-hidden="true">{Icon.handset}</span>
+    <div className="grow call-ring-t"><b>Appel entrant : {c.fromName}</b><span className="small">{c.ref}{c.reason ? ' · ' + c.reason : ''} · pour {firstName(adv.name)}, service client (appel simulé)</span></div>
+    <AsyncBtn className="call-ring-yes" onClick={async () => { const r = await call(tok, 'call.answer', { id: c.id }); if (r.ok) onAnswer(adv.id); }}>{Icon.handset} Décrocher en tant que {firstName(adv.name)}</AsyncBtn>
+  </div>;
 }
 
 function ThemeToggle({ theme, setTheme }) {
@@ -148,11 +200,15 @@ function ThemeToggle({ theme, setTheme }) {
 }
 
 const osDark = () => { try { return window.matchMedia('(prefers-color-scheme: dark)').matches; } catch { return false; } };
-function Shell({ children, toasts, theme, setTheme, ws, route, go, onTour, onGloss, sub, guestMode }) {
+const Toasts = ({ list }) => <div className="toasts" aria-live="polite">{list.map(t => <div key={t.id} className={'toast' + (t.err ? ' err' : '')}>{t.msg}</div>)}</div>;
+
+// kiosk : téléphone du client (?vue=client), sans rail ni pilules ni visite guidée.
+function Shell({ children, toasts, theme, setTheme, ws, route, go, onTour, onGloss, sub, guestMode, kiosk }) {
   const dark = theme === 'dark' || (theme == null && osDark());
   const online = useOnline();
-  return <div className="app">
-    <aside className="rail" aria-label="Outils">
+  const bare = guestMode || kiosk;
+  return <div className={'app' + (kiosk ? ' app-kiosk' : '')}>
+    {!kiosk && <aside className="rail" aria-label="Outils">
       <button type="button" className="rail-logo" onClick={() => !guestMode && go('accueil')} aria-label="Accueil de Fibre Welcome">{Icon.logo}</button>
       {!guestMode && <>
         <button type="button" className="rail-btn" onClick={onTour} data-tour="tour-btn" aria-label="Visite guidée">{Icon.compass}<span className="tip">Visite guidée</span></button>
@@ -161,19 +217,21 @@ function Shell({ children, toasts, theme, setTheme, ws, route, go, onTour, onGlo
       </>}
       <span className="rail-sp" />
       <button type="button" className="rail-btn" onClick={() => setTheme(dark ? 'light' : 'dark')} aria-label="Changer le thème">{dark ? Icon.sun : Icon.moon}<span className="tip">Thème clair ou sombre</span></button>
-    </aside>
+    </aside>}
     <div className="main">
       <header className="topbar">
         <div className="topbar-in">
-          <button type="button" className="brand" onClick={() => !guestMode && go('accueil')}><span className="brand-mark mobile-only">{Icon.logo}</span>Fibre Welcome</button>
-          {!guestMode && <nav className="pills" aria-label="Espaces">{NAV.map(([k, l]) => <button key={k} type="button" aria-current={route === k ? 'page' : undefined} onClick={() => go(k)} data-tour={'nav-' + k}>{l}</button>)}</nav>}
+          {kiosk ? <button type="button" className="brand" onClick={() => go('offres')}><span className="brand-mark">{Icon.logo}</span>Moov Fibre</button>
+            : <button type="button" className="brand" onClick={() => !guestMode && go('accueil')}><span className="brand-mark mobile-only">{Icon.logo}</span>Fibre Welcome</button>}
+          {!bare && <nav className="pills" aria-label="Espaces">{NAV.map(([k, l]) => <button key={k} type="button" aria-current={route === k ? 'page' : undefined} onClick={() => go(k)} data-tour={'nav-' + k}>{l}</button>)}</nav>}
           <div className="top-actions">
             {!online && <Tag tone="warn">Hors ligne</Tag>}
             {ws && <span className="clock hide-narrow num" title="Heure simulée de l’espace (Abidjan)">{Icon.clock && <span style={{ verticalAlign: '-3px', display: 'inline-block', width: 15, height: 15, marginRight: 5 }}>{Icon.clock}</span>}{fmtDateTime(ws.clock)}{ws.degraded ? ' · mode dégradé' : ''}</span>}
             <span className="env hide-narrow" title="Démonstration : données inventées, systèmes Moov simulés">◇ Démo</span>
             {ws && <SyncPill wsId={ws.id} />}
             {sub}
-            {!guestMode && <>
+            {kiosk && <Btn size="s" onClick={() => go('offres')}>Site des offres</Btn>}
+            {!bare && <>
               <button type="button" className="icon-btn mobile-only" onClick={onTour} aria-label="Visite guidée">{Icon.compass}</button>
               <button type="button" className="icon-btn mobile-only" onClick={() => go('salle')} aria-label="Côte à côte">{Icon.columns}</button>
               <button type="button" className="icon-btn mobile-only" onClick={onGloss} aria-label="Lexique">{Icon.book}</button>
@@ -185,7 +243,7 @@ function Shell({ children, toasts, theme, setTheme, ws, route, go, onTour, onGlo
       </header>
       <main>{children}</main>
     </div>
-    <div className="toasts" aria-live="polite">{toasts.map(t => <div key={t.id} className={'toast' + (t.err ? ' err' : '')}>{t.msg}</div>)}</div>
+    <Toasts list={toasts} />
   </div>;
 }
 
@@ -245,7 +303,7 @@ function RoomShare({ c, shared }) {
     <p className="tiny muted">Les données sont gardées sur le serveur de démonstration de Fibre Welcome. Toute personne qui a ce code voit cet espace : n’y mettez pas de vraies données personnelles. Un espace sans activité pendant 14 jours est effacé.</p>
   </>;
 }
-function QR({ text, size = 168 }) {
+export function QR({ text, size = 168 }) {
   const q = React.useMemo(() => {
     try { const qr = qrcode(0, 'M'); qr.addData(text); qr.make(); const n = qr.getModuleCount(); let d = ''; for (let r = 0; r < n; r++) for (let x = 0; x < n; x++) if (qr.isDark(r, x)) d += 'M' + x + ' ' + r + 'h1v1h-1z'; return { n, d }; } catch { return null; }
   }, [text]);
@@ -268,7 +326,7 @@ function SpaceHead({ space, users, current, onPick }) {
       <span className="eyebrow">Vous jouez</span>
       <div className="persona-list" role="group" aria-label="Choisir le personnage">
         {opts.map(u => <button key={u.id} type="button" className="persona-chip" data-user={u.id} aria-pressed={u.id === cur.id} onClick={() => onPick(u.id)} title={ROLES[u.role].clear}>
-          <Avatar name={u.name} size={30} />{firstName(u.name)}<small>{ROLES[u.role].label}</small>
+          <Avatar name={u.name} size={30} />{opts.filter(x => firstName(x.name) === firstName(u.name)).length > 1 ? firstName(u.name) + ' ' + (u.name.split(' ')[1] || '').charAt(0) + '.' : firstName(u.name)}<small>{ROLES[u.role].label}</small>
         </button>)}
       </div>
       {cur.role && <span className="tiny muted">{ROLES[cur.role].clear}</span>}
@@ -284,8 +342,8 @@ function SpaceView({ space, token }) {
   return <AdminConsole token={token} />;
 }
 
-function Room({ owner, users, room, setRoom }) {
-  const def = [{ space: 'client', userId: 'U1' }, { space: 'ops', userId: (users.find(u => u.role === 'planificateur') || {}).id }, { space: 'terrain', userId: (users.find(u => u.role === 'technicien') || {}).id }];
+function Room({ owner, users, room, setRoom, techId }) {
+  const def = [{ space: 'client', userId: 'U1' }, { space: 'ops', userId: (users.find(u => u.role === 'planificateur') || {}).id }, { space: 'terrain', userId: techId || (users.find(u => u.role === 'technicien') || {}).id }];
   const panes = room && room.length ? room : def;
   const setPane = (i, p) => { const n = [...panes]; n[i] = p; setRoom(n); };
   return <div className="page stack">
@@ -302,7 +360,7 @@ function Room({ owner, users, room, setRoom }) {
           </select>
           {panes.length > 1 && <button type="button" className="icon-btn" aria-label="Fermer ce volet" onClick={() => setRoom(panes.filter((_, k) => k !== i))}>{Icon.x}</button>}
         </div>
-        <div className="pane-body cq"><SpaceView space={p.space} token={t} /></div>
+        <div className="pane-main"><div className="pane-body cq"><SpaceView space={p.space} token={t} /></div></div>
       </div>;
     })}</div>
   </div>;
@@ -321,7 +379,7 @@ const TOUR = [
   { route: 'terrain', sel: 'field-network', title: 'Brice, même sans réseau', text: 'Ce bouton coupe le réseau de cet onglet. Les actions de Brice restent sur son téléphone et partent une seule fois au retour du réseau.' },
   { route: 'admin', sel: 'admin-audit-panel', click: 'admin-audit', pick: { admin: 'admin' }, title: 'Tout est tracé', text: 'Le journal garde chaque action, chaque accès refusé et chaque décision de l’IA. L’auditrice peut le lire sans rien modifier.' },
   { route: 'salle', sel: 'room', title: 'Plusieurs rôles à la fois', text: 'Ici, la cliente, le planificateur et le technicien sont côte à côte. Agissez dans un volet : les autres se mettent à jour.' },
-  { route: 'labo', sel: 'labo-scenarios', title: 'À vous de jouer', text: 'Lancez « SC-01 Installation nominale » : le guide vous dit quoi faire et coche chaque étape quand elle est vraiment faite. Il y a 16 scénarios.' },
+  { route: 'labo', sel: 'labo-scenarios', title: 'À vous de jouer', text: 'Lancez « SC-01 Installation nominale » : le guide vous dit quoi faire et coche chaque étape quand elle est vraiment faite. Il y a 17 scénarios.' },
   { route: 'labo', sel: 'labo-sim', title: 'Provoquer des pannes', text: 'Le simulateur envoie des paiements, les double, coupe un système Moov ou fait échouer une activation, pour voir comment l’application réagit.' },
 ];
 

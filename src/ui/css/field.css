@@ -270,5 +270,54 @@
 .fd-doc .grow { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
 .fd-ph .pic { border-radius: inherit; }
 .fd-top .nbell { margin-left: auto; margin-right: 6px; }
+/* Avec la cloche, « Bonjour, » passe au-dessus du prénom : le prénom n’est jamais coupé */
+.fd-top .fd-hello { flex: 1 1 auto; }
+.fd-top .fd-hello-t b { overflow: hidden; text-overflow: ellipsis; }
 .fd-top .nbell-btn { width: 38px; height: 38px; }
 .fd-ph-wait { opacity: .75; outline: 2px dashed var(--warn); outline-offset: -2px; }
+
+/* ---------- Parcours en direct : trajet, préparation du client, note ---------- */
+.fd-trip { display: flex; flex-direction: column; gap: 10px; }
+.fd-trip .track-map { box-shadow: inset 0 0 0 1px var(--line); }
+.fd-trip-eta { display: flex; align-items: center; gap: 10px; font-size: 13px; line-height: 1.35; color: var(--ink-2); }
+.fd-trip-eta b { color: var(--ink); font-weight: 700; }
+.fd-trip-ic { width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; flex: none; background: var(--info-soft); color: var(--info); }
+.fd-trip-ic svg { width: 15px; height: 15px; }
+.fd-trip.is-there .fd-trip-ic { background: var(--ok-soft); color: var(--ok); }
+/* Dans la carte sombre de la mission */
+.fd-flow .fd-trip-eta { color: var(--on-dark-2); }
+.fd-flow .fd-trip-eta b { color: var(--on-dark); }
+.fd-flow .fd-trip-ic { background: var(--dark-2); color: var(--lime); }
+.fd-flow .fd-trip.is-there .fd-trip-eta { background: color-mix(in srgb, var(--lime) 16%, transparent); border-radius: 14px; padding: 8px 10px; }
+.fd-flow .fd-trip.is-there .fd-trip-ic { background: var(--lime); color: var(--lime-ink); }
+.fd-trip-off { display: flex; gap: 10px; align-items: center; font-size: 13px; color: var(--on-dark); background: var(--dark-2); border-radius: 14px; padding: 10px 12px; }
+.fd-trip-off .fd-ic { background: color-mix(in srgb, var(--warn) 22%, transparent); color: #ffd28a; }
+.fd-trip-open { align-self: flex-start; display: inline-flex; align-items: center; gap: 6px; }
+.fd-trip-open svg { width: 14px; height: 14px; }
+.btn.fd-pulse { animation: fd-pulse 1.6s ease-out infinite; }
+@keyframes fd-pulse { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--lime) 55%, transparent); } 70%, 100% { box-shadow: 0 0 0 12px transparent; } }
+@media (prefers-reduced-motion: reduce) { .btn.fd-pulse { animation: none; } }
+
+.fd-prep { display: flex; flex-direction: column; gap: 8px; padding: 12px; border-radius: 16px; background: var(--surface-2); }
+.fd-prep.ready { background: color-mix(in srgb, var(--ok-soft) 70%, var(--surface-2)); }
+.fd-prep-h { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.fd-ready { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 700; color: #fff; background: var(--ok); border-radius: 999px; padding: 3px 10px 3px 7px; }
+.fd-ready svg { width: 13px; height: 13px; stroke-width: 2.6; }
+.fd-prep-l { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.fd-prep-l li { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--ink-2); line-height: 1.3; }
+.fd-prep-l li.on { color: var(--ink); }
+.fd-prep-l em { font-style: normal; color: var(--ink-3); font-size: 12px; }
+.fd-prep-ck { width: 20px; height: 20px; border-radius: 6px; flex: none; display: grid; place-items: center; border: 2px solid var(--line); background: var(--surface); }
+.fd-prep-l li.on .fd-prep-ck { background: var(--ok); border-color: var(--ok); color: #fff; }
+.fd-prep-ck svg { width: 12px; height: 12px; stroke-width: 3; }
+
+.fd-rate { display: flex; flex-direction: column; gap: 10px; padding: 12px; border-radius: 16px; background: var(--surface-2); margin-top: 4px; }
+.fd-rate-none { flex-direction: row; align-items: center; }
+.fd-rate-h { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.fd-stars { display: inline-flex; gap: 1px; flex: none; }
+.fd-stars span { color: var(--ink-3); display: grid; }
+.fd-stars span.on { color: #f0b14a; }
+.fd-stars span.on svg { fill: currentColor; }
+.fd-stars svg { width: 17px; height: 17px; }
+.fd-rate-tags { display: flex; flex-wrap: wrap; gap: 6px; }
+.fd-rate-c { margin: 0; color: var(--ink); background: var(--surface); border-radius: 12px; padding: 8px 12px; }

@@ -182,7 +182,7 @@ export function prepareImage(file) {
           let full = draw(1280, 0.72);
           if (full.length > 230000) full = draw(1024, 0.62);
           if (full.length > 230000) full = draw(800, 0.55);
-          resolve({ full, thumb: draw(72, 0.55), width: img.width, height: img.height, bytes: Math.round(full.length * 0.75) });
+          resolve({ full, thumb: draw(72, 0.55), width: img.width, height: img.height, bytes: Math.round(full.length * 0.75), quality: measure(img) });
         } catch { resolve(null); }
       };
       img.onerror = () => resolve(null);
@@ -192,6 +192,42 @@ export function prepareImage(file) {
     r.readAsDataURL(file);
   });
 }
+// Mesures simples d'une photo, faites sur le téléphone : taille, lumière moyenne (0 à 255) et netteté (0 à 100,
+// d'après les contours : une photo floue a des contours doux). Le serveur en tire « floue », « trop sombre »…
+export function measure(img) {
+  try {
+    const k = Math.min(1, 320 / Math.max(img.width, img.height));
+    const w = Math.max(3, Math.round(img.width * k)), h = Math.max(3, Math.round(img.height * k));
+    const c = document.createElement('canvas'); c.width = w; c.height = h;
+    const g = c.getContext('2d'); g.drawImage(img, 0, 0, w, h);
+    const d = g.getImageData(0, 0, w, h).data;
+    const y = new Float32Array(w * h); let sum = 0;
+    for (let i = 0; i < w * h; i++) { const v = 0.299 * d[i * 4] + 0.587 * d[i * 4 + 1] + 0.114 * d[i * 4 + 2]; y[i] = v; sum += v; }
+    let n = 0, m = 0, m2 = 0;
+    for (let r = 1; r < h - 1; r++) for (let x = 1; x < w - 1; x++) { const i = r * w + x; const l = 4 * y[i] - y[i - 1] - y[i + 1] - y[i - w] - y[i + w]; n++; m += l; m2 += l * l; }
+    const v = n ? m2 / n - (m / n) * (m / n) : 0;
+    return { w: img.width, h: img.height, bright: Math.round(sum / (w * h)), sharp: Math.round(Math.min(100, Math.sqrt(Math.max(0, v)) * 2)) };
+  } catch { return null; }
+}
+// Mêmes règles que le serveur (domain.js, photoCheck), pour prévenir le client avant l'envoi.
+export function photoIssues(q) {
+  if (!q) return [];
+  const out = [];
+  if (Math.min(q.w, q.h) < 480) out.push('trop petite');
+  if (q.bright < 55) out.push('trop sombre'); else if (q.bright > 235) out.push('trop claire (reflet)');
+  if (q.sharp < 12) out.push('floue');
+  return out;
+}
+
+// Heure de l'espace « maintenant » : l'horloge simulée avance au rythme réel entre deux écritures.
+export const liveClock = ws => (ws ? ws.clock + Math.max(0, Date.now() - (ws.lastReal || Date.now())) : Date.now());
+// Re-rendu régulier (compte à rebours, trajet du technicien, durée d'un appel).
+export function useNow(ms = 1000) {
+  const [n, setN] = React.useState(() => Date.now());
+  React.useEffect(() => { const i = setInterval(() => setN(Date.now()), ms); return () => clearInterval(i); }, [ms]);
+  return n;
+}
+
 const imgMem = new Map();
 let idbP = null;
 function idb() {

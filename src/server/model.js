@@ -63,15 +63,38 @@ export const ZONES = [
 ];
 
 export const SLOTS = [
-  { id: 'm', label: '08h – 12h', start: 8, end: 12 },
-  { id: 'a', label: '13h – 17h', start: 13, end: 17 },
+  { id: 'm', label: '8 h – 12 h', start: 8, end: 12 },
+  { id: 'a', label: '13 h – 17 h', start: 13, end: 17 },
 ];
 
 export const DOC_TYPES = {
   cni: { label: 'Pièce d’identité', why: 'Pour vérifier que c’est bien vous le titulaire.' },
   justif_domicile: { label: 'Justificatif de domicile', why: 'Facture CIE/SODECI ou attestation, pour confirmer l’adresse.' },
   autorisation_syndic: { label: 'Autorisation du propriétaire ou du syndic', why: 'Demandée seulement si le passage du câble traverse des parties communes.' },
+  // Pièces du dossier rempli après un achat en ligne (site des offres) : trois photos prises avec le téléphone.
+  cni_recto: { label: 'Pièce d’identité (recto)', short: 'Recto', why: 'Le côté avec votre photo et votre nom.' },
+  cni_verso: { label: 'Pièce d’identité (verso)', short: 'Verso', why: 'L’autre côté de la même pièce.' },
+  selfie_cni: { label: 'Photo de vous avec la pièce', short: 'Selfie', why: 'Votre visage et la pièce dans la même photo : on vérifie que c’est bien vous.' },
 };
+export const DOSSIER_DOCS = ['cni_recto', 'cni_verso', 'selfie_cni'];
+// Pièces que le technicien peut consulter pendant une mission ouverte (besoin d'en connaître).
+export const TECH_DOCS = ['cni', 'cni_recto', 'autorisation_syndic'];
+
+// Offres du site de démonstration. Tarifs inventés pour la démo : ce ne sont pas les prix de Moov.
+export const OFFERS = [
+  { id: 'essentiel', name: 'Fibre Essentiel', speed: '100 Mb/s', monthly: 15000, pay: 25000, perks: ['Wi-Fi pour toute la maison', 'Appels illimités vers les fixes', 'Installation comprise'] },
+  { id: 'confort', name: 'Fibre Confort', speed: '300 Mb/s', monthly: 25000, pay: 35000, best: true, perks: ['Idéal pour le télétravail et la télé', 'Box Wi-Fi 6', 'Installation comprise'] },
+  { id: 'premium', name: 'Fibre Premium', speed: '1 Gb/s', monthly: 45000, pay: 55000, perks: ['Le plus rapide pour toute la famille', 'Box Wi-Fi 6 + répéteur', 'Assistance prioritaire'] },
+];
+// Communes ouvertes à la vente en ligne (les autres sont annoncées « bientôt »).
+export const SHOP_ZONES = ['cocody', 'yopougon', 'marcory', 'bingerville'];
+// Heures de passage proposées au planificateur dans chaque demi-journée.
+// « 09:00 » → « 9 h » : une seule façon d'écrire l'heure partout (écrans et notifications).
+export const hourLabel = t => { const m = /^(\d{2}):(\d{2})$/.exec(t || ''); return m ? Number(m[1]) + ' h' + (m[2] !== '00' ? ' ' + m[2] : '') : t || ''; };
+export const SLOT_HOURS = { m: ['08:00', '09:00', '10:00', '11:00'], a: ['13:00', '14:00', '15:00', '16:00'] };
+// Point de départ des équipes (agence), pour la simulation du trajet.
+export const TEAM_BASE = { T1: 'plateau', T2: 'treichville', T3: 'adjame' };
+export const BASE_NAMES = { plateau: 'Agence du Plateau', treichville: 'Dépôt de Treichville', adjame: 'Dépôt d’Adjamé' };
 
 export const REPORT_TYPES = {
   bloque: 'Mon dossier n’avance pas',
@@ -93,7 +116,7 @@ export const PREP_CHECKLIST = [
   { id: 'acces', label: 'Le technicien pourra entrer (gardien, portail, badge)', need: true },
   { id: 'prise', label: 'Une prise électrique est libre près de l’emplacement de la box', need: true },
   { id: 'passage', label: 'Le propriétaire ou le syndic autorise le passage du câble', need: false, when: 'immeuble' },
-  { id: 'animaux', label: 'Les animaux seront tenus à l’écart', need: false },
+  { id: 'animaux', label: 'Les chiens et autres animaux seront enfermés pendant la visite', need: false },
 ];
 
 export const GLOSSARY = [

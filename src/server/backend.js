@@ -4,7 +4,7 @@
 import { buildWorkspace, startOfDay, H, DAY } from './seed.js';
 import * as D from './domain.js';
 import { AppError, SYS, byId, getOrder, audit, emit, notify, addMessage, openBlocker, resolveBlocker, openBlockers, transition } from './domain.js';
-import { STATE_INFO, BLOCKER_TYPES, ROLES, DOC_TYPES, REPORT_TYPES, APPT_STATES, PAYMENT_STATES, ZONES, CHECKLIST_TECH, stateRank, ORDER_STATES } from './model.js';
+import { STATE_INFO, BLOCKER_TYPES, ROLES, DOC_TYPES, REPORT_TYPES, APPT_STATES, PAYMENT_STATES, ZONES, CHECKLIST_TECH, stateRank, ORDER_STATES, OFFERS, SHOP_ZONES, DOSSIER_DOCS, TECH_DOCS, SLOT_HOURS, PREP_CHECKLIST, hourLabel } from './model.js';
 import { estimate, risk, assistantAnswer, summarize, evaluate, fmtDate, fmtDateTime } from './ai.js';
 import { SCENARIOS, runScenarioSetup } from './scenarios.js';
 
@@ -120,6 +120,9 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
     pay(O(11), 30); ready(O(11), 10);
     at(40, () => emit(ws, O(6), 'DOSSIER_RECU', { source: 'Moov Prospect (simulé)', publicText: STATE_INFO.DOSSIER_RECU.client }));
     ws.clock = real;
+    // Démo en direct : Brice (Équipe Cocody 1), le technicien présenté partout, garde une place sur les premiers créneaux.
+    const firstDays = [...new Set(ws.capacity.map(c => c.date))].sort((x, y) => x - y).slice(0, 3);
+    for (const c of ws.capacity) if (c.teamId === 'T1' && firstDays.includes(c.date) && c.cap <= c.used) c.cap = Math.min(6, c.used + 1);
     for (const n of ws.notifications) n.read = true;
     ws.outbox = []; ws.jobs = [];
   }
@@ -157,7 +160,10 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
 
   // Pièces demandées encore sans version envoyée valable (validée ou en cours de vérification).
   const missingDocs = (ws, o) => (o.requiredDocs || []).filter(t => !ws.documents.some(d => d.orderId === o.id && d.type === t && ['analyse', 'a_valider', 'valide'].includes(d.status)));
-  const unvalidatedDocs = (ws, o) => (o.requiredDocs || []).filter(t => !ws.documents.some(d => d.orderId === o.id && d.type === t && d.status === 'valide'));
+  // Chaque pièce est jugée sur sa dernière version : une ancienne photo validée ne couvre pas une nouvelle à relire ou refusée.
+  const lastDoc = (ws, o, t) => ws.documents.filter(d => d.orderId === o.id && d.type === t && d.status !== 'remplace').at(-1);
+  const unvalidatedDocs = (ws, o) => (o.requiredDocs || []).filter(t => (lastDoc(ws, o, t) || {}).status !== 'valide');
+  const draftDossier = o => !!(o.dossier && !o.dossier.submittedAt);
   const advisorFor = (ws, o) => ws.users.find(u => u.role === 'conseiller' && u.active && (u.zones || []).includes(o.zone)) || null;
   const activeWo = (ws, orderId, techId) => ws.workOrders.find(w => w.orderId === orderId && w.techUserId === techId && !['terminee', 'annulee', 'echec'].includes(w.status));
 
@@ -214,14 +220,15 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
     D.docCheck(args);
     for (const d of ws.documents.filter(d => d.orderId === order.id && d.type === args.type && ['analyse', 'a_valider', 'refuse'].includes(d.status))) d.status = 'remplace';
     const suspicious = /(ignore|instruction|admin|valide automatiquement)/i.test(args.name);
-    const doc = { id: 'DOC' + (++ws.seq), orderId: order.id, type: args.type, name: String(args.name).slice(0, 120), size: args.size, mime: args.mime, thumb: D.smallThumb(args.thumb), img: D.imgRef(args.img), status: 'analyse', reason: null, suspicious, at: ws.clock, by: user.name };
+    const doc = { id: 'DOC' + (++ws.seq), orderId: order.id, type: args.type, name: String(args.name).slice(0, 120), size: args.size, mime: args.mime, thumb: D.smallThumb(args.thumb), img: D.imgRef(args.img), status: 'analyse', reason: null, suspicious, at: ws.clock, by: user.name, check: String(args.mime || '').startsWith('image/') ? D.photoCheck(args.quality) : null };
     ws.documents.push(doc);
     order.updatedAt = ws.clock; order.version++;
     { const b = openBlockers(ws, order.id).find(b => b.type === 'PIECE_MANQUANTE'); if (b) { const m = missingDocs(ws, order); b.detail = m.length ? m.map(t => DOC_TYPES[t].label).join(', ') : 'Pièce(s) reçue(s), vérification par le conseiller'; } }
     ws.jobs.push({ id: 'J' + (++ws.seq), kind: 'scan', ref: doc.id, due: ws.clock + 6e3, generation: ws.generation, attempts: 0 });
     emit(ws, order, 'PIECE_DEPOSEE', { actor: user, payload: { type: args.type }, publicText: 'Pièce envoyée : ' + DOC_TYPES[args.type].label + '. Vérification en cours.' });
-    const adv = advisorFor(ws, order);
-    if (adv) notify(ws, adv.id, { title: 'Nouvelle pièce reçue', body: order.ref + ' : ' + DOC_TYPES[args.type].label + ' (contrôle automatique en cours, quelques secondes)', orderId: order.id, kind: 'tache' });
+    // Dossier en ligne pas encore envoyé : la conseillère sera prévenue une seule fois, à l'envoi du dossier complet.
+    const adv = draftDossier(order) ? null : advisorFor(ws, order);
+    if (adv) notify(ws, adv.id, { title: 'Nouvelle pièce reçue', body: order.ref + ' : ' + DOC_TYPES[args.type].label + (doc.check && !doc.check.ok ? ' (photo ' + doc.check.issues.join(', ') + ' selon le contrôle automatique)' : ' (contrôle automatique en cours, quelques secondes)'), orderId: order.id, kind: 'tache' });
     return doc;
   }, { order: true });
 
@@ -236,7 +243,15 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
     if (!a) throw new AppError('introuvable', 'Aucun rendez-vous.');
     D.cancelAppointment(ws, order, a, user, args.reason || 'Annulé par ' + ROLES[user.role].label.toLowerCase(), { force: ['conseiller', 'planificateur'].includes(user.role) });
   }, { order: true, scope: 'rdv' });
-  cmd('prep.toggle', ['client', 'representant'], ({ ws, order, args }) => { order.prep[args.id] = !!args.value; order.updatedAt = ws.clock; }, { order: true, scope: 'rdv' });
+  const prepReady = o => PREP_CHECKLIST.filter(i => i.need).every(i => o.prep[i.id]);
+  cmd('prep.toggle', ['client', 'representant'], ({ ws, user, order, args }) => {
+    if (!PREP_CHECKLIST.some(i => i.id === args.id)) throw new AppError('prep', 'Point de préparation inconnu.');
+    const before = prepReady(order);
+    order.prep[args.id] = !!args.value; order.updatedAt = ws.clock;
+    // Toute la liste indispensable vient d'être cochée : le technicien de la visite est prévenu.
+    const wo = ws.workOrders.find(w => w.orderId === order.id && ['affectee', 'en_route'].includes(w.status));
+    if (!before && prepReady(order) && wo) notify(ws, wo.techUserId, { title: 'Le client est prêt pour la visite', body: order.ref + ' : ' + user.name.split(' ')[0] + ' a coché la préparation (présence, accès, prise libre' + (order.prep.animaux ? ', animaux enfermés' : '') + ').', orderId: order.id, kind: 'tache' });
+  }, { order: true, scope: 'rdv' });
 
   cmd('msg.send', ['client', 'representant'], ({ ws, user, order, args }) => {
     const text = String(args.text || '').trim().slice(0, 1000);
@@ -345,6 +360,184 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
     emit(ws, getOrder(ws, d.orderId), 'DELEGATION_REVOQUEE', { actor: user, publicText: 'Délégation révoquée.' });
   });
 
+  // ----- Parcours en ligne : site des offres, dossier sous 24 h, appel, note du technicien -----
+  // Achat sur le site de démonstration : le paiement Moov Money est simulé (code affiché à l'écran, aucun vrai
+  // paiement), puis passe par le connecteur de paiement comme un vrai webhook signé. Le dossier est créé tout de suite.
+  cmd('shop.purchase', ['client'], ({ ws, user, s, args }) => {
+    if (!s.owner) throw new AppError('interdit', 'Le site des offres de démonstration est réservé au propriétaire de l’espace.');
+    const offer = OFFERS.find(x => x.id === args.offerId);
+    if (!offer) throw new AppError('offre', 'Choisissez une offre.');
+    const zone = String(args.zone || '');
+    if (!SHOP_ZONES.includes(zone)) throw new AppError('zone', ZONES.some(z => z.id === zone) ? 'La fibre n’est pas encore ouverte à la vente en ligne dans cette commune.' : 'Choisissez votre commune.');
+    const name = String(args.name || '').trim().replace(/\s+/g, ' ').slice(0, 60);
+    if (name.length < 3 || !/[a-zà-ÿ]/i.test(name)) throw new AppError('nom', 'Indiquez votre prénom et votre nom.');
+    const digits = String(args.phone || '').replace(/\D/g, '');
+    if (digits.length < 8 || digits.length > 15) throw new AppError('tel', 'Numéro de téléphone incomplet.');
+    const street = String(args.street || '').trim().slice(0, 120);
+    if (street.length < 3) throw new AppError('adresse', 'Indiquez votre quartier et votre rue.');
+    // Même nom qu'un client de l'espace : c'est lui qui achète. Sinon, un nouveau client est créé (personnage jouable).
+    let cust = ws.users.find(u => u.role === 'client' && u.name.toLowerCase() === name.toLowerCase());
+    if (!cust) {
+      if (ws.users.filter(u => u.role === 'client').length >= 20) throw new AppError('limite', 'Cet espace compte déjà 20 clients : réutilisez un nom existant ou réinitialisez l’espace.');
+      const n = Math.max(0, ...ws.users.map(u => Number(String(u.id).slice(1)) || 0)) + 1;
+      const fmt = digits.length === 10 ? '+225 ' + digits.replace(/(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})/, '$1 $2 $3 $4 $5') : '+' + digits;
+      cust = { id: 'U' + n, role: 'client', name, phone: fmt, active: true, zones: ZONES.map(z => z.id), prefs: { sms: true, whatsapp: false, push: true }, fromShop: true };
+      ws.users.push(cust);
+    }
+    const id = 'O' + (ws.seq + 1000); ws.seq++;
+    const o = {
+      id, ref: nextRef(ws), customerId: cust.id, claimed: true, contactPhone: cust.phone, contactName: cust.name,
+      offer: offer.name + ' ' + offer.speed, offerId: offer.id, equipmentModel: 'ONT ZTE F670L', zone,
+      address: { commune: ZONES.find(z => z.id === zone).name, street, landmark: String(args.landmark || '').trim().slice(0, 200), building: args.building === 'immeuble' ? 'immeuble' : 'maison', floor: '', lat: null, lng: null, accessNotes: '', verified: false },
+      state: 'DOSSIER_RECU', stateSince: ws.clock, version: 1, createdAt: ws.clock, updatedAt: ws.clock, source: 'Site des offres (démo)',
+      payment: { ref: 'MM-' + (600000000 + ws.seq), amount: offer.pay, currency: 'XOF', status: 'en_attente', payer: '•••• ' + digits.slice(-2) },
+      apptId: null, woId: null, cancelled: false, prep: {}, scenario: null, linkedTo: null, portReserved: false, clientCheck: null, paidAt: null,
+      requiredDocs: [...DOSSIER_DOCS], docNotes: {}, dossier: { openedAt: null, dueAt: null, submittedAt: null },
+    };
+    ws.orders.push(o);
+    emit(ws, o, 'DOSSIER_RECU', { source: 'Site des offres (démo)', actor: cust, publicText: 'Commande reçue : ' + offer.name + ' ' + offer.speed + '.' });
+    const r = D.ingest(ws, D.makeEnvelope(ws, 'payment.confirmed', o, { reference: o.payment.ref, amount: o.payment.amount, currency: 'XOF' }, { source: 'Moov Money (simulé)' }));
+    if (r.status !== 'traite') throw new AppError('paiement', 'Paiement non confirmé : ' + r.note);
+    o.dossier.openedAt = ws.clock; o.dossier.dueAt = ws.clock + (Number(ws.config.dossierDeadlineH) || 24) * H;
+    notify(ws, cust.id, { title: 'Complétez votre dossier', body: 'Vous avez ' + (Number(ws.config.dossierDeadlineH) || 24) + ' h pour envoyer vos photos et choisir le créneau de la visite.', orderId: o.id, kind: 'action' });
+    D.notifyRole(ws, 'conseiller', o, { title: 'Nouveau client : ' + cust.name, body: o.ref + ' · ' + offer.name + ' payée (' + offer.pay.toLocaleString('fr-FR') + ' F CFA). Dossier attendu sous ' + (Number(ws.config.dossierDeadlineH) || 24) + ' h.', kind: 'info' });
+    audit(ws, cust, 'boutique.achat', o.ref, offer.name + ' · ' + o.address.commune + ' (paiement simulé)');
+    return { id: o.id, ref: o.ref, userId: cust.id, userName: cust.name, amount: offer.pay, offer: offer.name + ' ' + offer.speed, dueAt: o.dossier.dueAt };
+  }, { idem: true, idemFull: true });
+
+  // Envoi du dossier : informations, créneau choisi (réservé dans la même transaction) et photos déjà déposées.
+  // Un dossier incomplet part quand même : ce qui manque est affiché au client et à toute l'équipe Moov.
+  cmd('dossier.submit', ['client'], ({ ws, user, order, args }) => {
+    if (!order.dossier) throw new AppError('etat', 'Ce dossier ne se remplit pas en ligne.');
+    if (order.dossier.submittedAt) throw new AppError('doublon', 'Dossier déjà envoyé. Pour compléter, utilisez l’onglet Dossier.');
+    if (order.cancelled || order.state !== 'PREPARATION') throw new AppError('etat', 'Ce dossier ne peut plus être envoyé.');
+    const info = args.info || {};
+    const a = order.address;
+    for (const k of ['landmark', 'accessNotes', 'floor']) if (info[k] != null) a[k] = String(info[k]).trim().slice(0, 300);
+    if (info.onsiteContact != null) a.onsiteContact = String(info.onsiteContact).trim().slice(0, 80);
+    if (info.building != null) a.building = info.building === 'immeuble' ? 'immeuble' : 'maison';
+    if (!a.landmark || a.landmark.length < 8) throw new AppError('info', 'Indiquez un repère d’au moins 8 caractères (ex. portail bleu après la pharmacie).');
+    const cur = order.apptId && byId(ws.appointments, order.apptId);
+    if (!(cur && cur.status === 'reserve' && cur.date === Number(args.date) && cur.slot === args.slot)) D.reserveSlot(ws, order, { date: Number(args.date), slot: args.slot }, user);
+    order.dossier.submittedAt = ws.clock; order.dossier.late = ws.clock > order.dossier.dueAt;
+    order.version++; order.updatedAt = ws.clock;
+    const st = D.dossierState(ws, order);
+    const docsMissing = st.missing.filter(m => m.kind === 'doc');
+    if (docsMissing.length) D.openBlocker(ws, order, 'PIECE_MANQUANTE', { actor: user, detail: docsMissing.map(m => m.label).join(', '), silent: true });
+    const appt = byId(ws.appointments, order.apptId);
+    const when = fmtDate(appt.date) + ' (' + D.slotLabel(appt.slot) + ')';
+    const nDocs = ws.documents.filter(d => d.orderId === order.id && (order.requiredDocs || []).includes(d.type) && !['remplace', 'refuse'].includes(d.status)).length;
+    emit(ws, order, 'DOSSIER_SOUMIS', { actor: user, payload: { missing: st.missing.map(m => m.label), late: order.dossier.late }, publicText: 'Dossier envoyé' + (docsMissing.length ? ', incomplet : il manque ' + docsMissing.map(m => m.label.toLowerCase()).join(', ') : '') + '.' });
+    const verified = st.status === 'verifie';
+    D.notifyRole(ws, 'conseiller', order, { title: docsMissing.length ? 'Dossier incomplet reçu' : verified ? 'Dossier reçu (pièces déjà validées)' : 'Dossier à vérifier', body: user.name + ' (' + order.ref + ') : ' + nDocs + ' photo' + (nDocs > 1 ? 's' : '') + (docsMissing.length ? ', il manque ' + docsMissing.map(m => m.label.toLowerCase()).join(', ') : '') + (st.flagged ? ', ' + st.flagged + ' à regarder de près' : '') + '. Créneau demandé : ' + when + '.', kind: docsMissing.length ? 'alerte' : verified ? 'info' : 'tache' });
+    // Pièces toutes validées avant l'envoi : le planificateur peut fixer l'heure tout de suite.
+    if (verified) {
+      emit(ws, order, 'DOSSIER_VERIFIE', { actor: user, publicText: 'Toutes vos pièces sont validées. Moov confirme maintenant l’heure de la visite.' });
+      D.notifyRole(ws, 'planificateur', order, { title: 'Dossier vérifié : à planifier', body: order.ref + ' (' + order.contactName + ') · ' + order.address.commune + ' · ' + when + '. Choisissez le technicien et l’heure.', kind: 'tache' });
+    } else D.notifyRole(ws, 'planificateur', order, { title: 'Créneau demandé', body: order.ref + ' · ' + order.address.commune + ' · ' + when + '. À confirmer quand les pièces sont validées.', kind: 'tache' });
+    notify(ws, user.id, docsMissing.length
+      ? { title: 'Dossier envoyé, mais incomplet', body: 'Il manque encore : ' + docsMissing.map(m => m.label.toLowerCase()).join(', ') + '. Ajoutez-les depuis l’onglet Dossier.', orderId: order.id, kind: 'action' }
+      : { title: 'Dossier envoyé', body: (verified ? 'Vos photos sont déjà validées.' : 'Votre conseillère vérifie vos photos.') + ' Vous recevrez une notification dès que l’heure de la visite est confirmée.', orderId: order.id, kind: 'succes' });
+    return st;
+  }, { order: true });
+
+  // La conseillère dit au client ce qui manque (ou ce qui n'est pas lisible), avec un mot si elle veut.
+  cmd('dossier.ask', ['conseiller', 'superviseur'], ({ ws, user, order, args }) => {
+    if (!order.dossier) throw new AppError('etat', 'Ce dossier n’a pas été rempli en ligne.');
+    const miss = D.dossierMissing(ws, order).filter(m => m.kind !== 'slot');
+    const note = String(args.text || '').trim().slice(0, 400);
+    if (!miss.length && note.length < 5) throw new AppError('motif', 'Rien ne manque : écrivez au client ce que vous attendez de lui.');
+    // « Bonjour Awa, il manque encore : … » : la salutation en tête, puis la liste, puis le mot de la conseillère.
+    const hi = /^((?:bonjour|bonsoir)[^,.!?]{0,40}[,!]\s*)/i.exec(note);
+    const greet = hi ? hi[1] : 'Bonjour ' + String(order.contactName || '').split(' ')[0] + ', ';
+    const rest = hi ? note.slice(hi[1].length) : note;
+    const comma = /,\s*$/.test(greet);
+    const list = miss.length ? (comma ? 'il' : 'Il') + ' manque encore : ' + miss.map(m => m.label.toLowerCase() + ', ' + m.why.replace(/^refusée : (.)/, (x, c) => 'refusée : ' + c.toLowerCase())).join(' ; ') + '. ' : '';
+    const up = x => x.charAt(0).toUpperCase() + x.slice(1);
+    const text = greet + list + (list || !comma ? up(rest) : rest.charAt(0).toLowerCase() + rest.slice(1));
+    addMessage(ws, order, { from: 'staff', author: user, text: text.trim() });
+    notify(ws, order.customerId, { title: 'Votre dossier est incomplet', body: text.trim().slice(0, 220), orderId: order.id, kind: 'action' });
+    order.updatedAt = ws.clock;
+    return { sent: true };
+  }, { order: true });
+
+  // Le planificateur choisit l'équipe et l'heure : le dossier passe « prêt » et le rendez-vous est confirmé d'un coup.
+  cmd('dossier.validate', ['planificateur'], ({ ws, user, order, args }) => {
+    if (!order.dossier || !order.dossier.submittedAt) throw new AppError('etat', 'Le client n’a pas encore envoyé son dossier.');
+    const appt = byId(ws.appointments, order.apptId);
+    if (!appt || appt.status !== 'reserve') throw new AppError('etat', 'Aucun créneau en attente de validation sur ce dossier.');
+    if (!args.time) throw new AppError('heure', 'Choisissez l’heure de passage du technicien.');
+    const notOk = unvalidatedDocs(ws, order);
+    if (notOk.length) throw new AppError('pieces', 'Pièces pas encore validées par la conseillère : ' + notOk.map(t => DOC_TYPES[t].label.toLowerCase()).join(', ') + '.');
+    if (order.state === 'PREPARATION') D.markReady(ws, order, user, { quiet: true });
+    return D.confirmAppointment(ws, order, appt, user, { teamId: args.teamId, time: String(args.time) });
+  }, { order: true });
+
+  // Appel simulé au service client : il sonne chez la conseillère du dossier (aucun son, aucun vrai appel).
+  const LIVE_CALL = ['sonne', 'en_cours'];
+  cmd('call.start', CLIENTISH, ({ ws, user, order, args }) => {
+    const calls = (ws.calls ||= []);
+    if (calls.some(c => c.orderId === order.id && LIVE_CALL.includes(c.status))) throw new AppError('doublon', 'Un appel est déjà en cours.');
+    const adv = advisorFor(ws, order);
+    if (!adv) throw new AppError('indispo', 'Aucun conseiller disponible : demandez plutôt à être rappelé.');
+    const c = { id: 'APL' + (++ws.seq), orderId: order.id, fromId: user.id, fromName: user.name, toId: adv.id, toName: adv.name, reason: String(args.reason || '').trim().slice(0, 200), status: 'sonne', startedAt: ws.clock, answeredAt: null, endedAt: null, note: '' };
+    calls.push(c);
+    if (calls.length > 60) calls.splice(0, calls.length - 60);
+    ws.jobs.push({ id: 'J' + (++ws.seq), kind: 'call', ref: c.id, due: ws.clock + 45e3, generation: ws.generation, attempts: 0 });
+    notify(ws, adv.id, { title: 'Appel entrant : ' + user.name, body: order.ref + (c.reason ? ' · ' + c.reason : '') + '. Décrochez depuis l’Équipe Moov.', orderId: order.id, kind: 'appel' });
+    emit(ws, order, 'APPEL_CLIENT', { actor: user, payload: { to: adv.name } });
+    return c;
+  }, { order: true, scope: 'messages' });
+  const findCall = (ws, id) => { const c = (ws.calls || []).find(x => x.id === id); if (!c) throw new AppError('introuvable', 'Appel introuvable.'); return c; };
+  cmd('call.answer', ['conseiller'], ({ ws, user, args }) => {
+    const c = findCall(ws, args.id);
+    if (c.toId !== user.id) throw new AppError('introuvable', 'Appel introuvable.');
+    if (c.status !== 'sonne') throw new AppError('etat', c.status === 'en_cours' ? 'Vous êtes déjà en ligne.' : 'Cet appel est terminé : le client a raccroché ou un rappel a été créé.');
+    c.status = 'en_cours'; c.answeredAt = ws.clock;
+    audit(ws, user, 'appel.decrocher', (byId(ws.orders, c.orderId) || {}).ref || '', c.fromName);
+    return c;
+  }, { noAudit: true });
+  cmd('call.end', ['conseiller', 'client', 'representant'], ({ ws, user, args }) => {
+    const c = findCall(ws, args.id);
+    const mine = user.role === 'conseiller' ? c.toId === user.id : c.fromId === user.id;
+    if (!mine) throw new AppError('introuvable', 'Appel introuvable.');
+    if (!LIVE_CALL.includes(c.status)) return c;
+    const o = byId(ws.orders, c.orderId);
+    if (c.status === 'sonne') {
+      if (user.role === 'conseiller') missedCall(ws, c, 'Conseillère occupée', ws.clock);
+      else { c.status = 'annule'; c.endedAt = ws.clock; }
+      return c;
+    }
+    c.status = 'termine'; c.endedAt = ws.clock; c.endedBy = user.role === 'conseiller' ? 'conseiller' : 'client';
+    if (user.role === 'conseiller' && args.note) c.note = String(args.note).trim().slice(0, 500);
+    const sec = Math.max(1, Math.round((c.endedAt - c.answeredAt) / 1000));
+    if (o) emit(ws, o, 'APPEL_TERMINE', { actor: user, payload: { sec }, publicText: 'Appel avec ' + c.toName.split(' ')[0] + ' (' + (sec >= 60 ? Math.floor(sec / 60) + ' min ' : '') + (sec % 60) + ' s).' });
+    if (o && c.note) addMessage(ws, o, { from: 'staff', author: byId(ws.users, c.toId) || user, text: 'Note d’appel : ' + c.note, visibility: 'interne' });
+    return c;
+  }, { noAudit: true });
+
+  // Note du technicien juste après la visite (différente de l'avis sur le service, demandé après l'activation).
+  cmd('tech.rate', ['client'], ({ ws, user, order, args }) => {
+    const wo = ws.workOrders.filter(w => w.orderId === order.id && w.status === 'terminee').at(-1);
+    if (!wo) throw new AppError('etat', 'Vous pourrez noter le technicien après sa visite.');
+    const list = (ws.techRatings ||= []);
+    if (list.some(r => r.woId === wo.id)) throw new AppError('doublon', 'Vous avez déjà noté cette visite. Merci !');
+    const score = Math.round(Number(args.score));
+    if (!(score >= 1 && score <= 5)) throw new AppError('note', 'Choisissez une note de 1 à 5 étoiles.');
+    const r = { id: 'NT' + (++ws.seq), orderId: order.id, woId: wo.id, techUserId: wo.techUserId, teamId: wo.teamId, score, clear: args.clear == null ? null : !!args.clear, problem: !!args.problem, comment: String(args.comment || '').trim().slice(0, 500), at: ws.clock };
+    list.push(r);
+    const team = byId(ws.teams, wo.teamId);
+    if (team) team.quality = Math.round(((Number(team.quality) || 4) * 9 + score) / 10 * 10) / 10;
+    const tech = byId(ws.users, wo.techUserId);
+    emit(ws, order, 'NOTE_TECHNICIEN', { actor: user, payload: { score, clear: r.clear, problem: r.problem }, publicText: 'Vous avez noté la visite de ' + (tech ? tech.name.split(' ')[0] : 'votre technicien') + ' : ' + score + '/5.' });
+    notify(ws, wo.techUserId, { title: 'Note du client : ' + score + '/5', body: order.ref + (r.comment ? ' : « ' + r.comment.slice(0, 120) + ' »' : r.clear === false ? ' : explications pas assez claires' : ''), orderId: order.id, kind: score >= 4 ? 'succes' : 'info' });
+    if (score <= 2 || r.problem || r.clear === false) {
+      ws.tickets.push({ id: 'TK' + (++ws.seq), orderId: order.id, type: 'visite', text: score + '/5' + (r.problem ? ', souci pendant le rendez-vous' : '') + (r.clear === false ? ', explications pas claires' : '') + (r.comment ? ' : ' + r.comment : ''), status: 'ouvert', ownerRole: 'superviseur', at: ws.clock, by: user.name });
+      D.notifyRole(ws, 'superviseur', order, { title: 'Visite à revoir', body: order.ref + ' : ' + (tech ? tech.name : 'technicien') + ' noté ' + score + '/5' + (r.problem ? ', souci signalé' : '') + '.', kind: 'alerte' });
+    }
+    return r;
+  }, { order: true });
+
   // ----- Équipes Moov -----
   cmd('msg.reply', ['conseiller', 'superviseur'], ({ ws, user, order, args }) => {
     const text = String(args.text || '').trim(); if (!text) throw new AppError('vide', 'Message vide.');
@@ -383,8 +576,12 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
       if (b && !still.length) resolveBlocker(ws, b, { actor: user, resolution: 'Pièces validées : ' + (order.requiredDocs || [doc.type]).map(t => DOC_TYPES[t].label).join(', ') });
       else if (b) { b.detail = still.map(t => DOC_TYPES[t].label).join(', '); }
       notify(ws, order.customerId, { title: 'Pièce validée', body: DOC_TYPES[doc.type].label + ' acceptée. Merci !', orderId: order.id, kind: 'succes' });
+      if (order.dossier && order.dossier.submittedAt && order.state === 'PREPARATION' && !still.length) {
+        emit(ws, order, 'DOSSIER_VERIFIE', { actor: user, publicText: 'Toutes vos pièces sont validées. Moov confirme maintenant l’heure de la visite.' });
+        D.notifyRole(ws, 'planificateur', order, { title: 'Dossier vérifié : à planifier', body: order.ref + ' (' + order.contactName + ') : pièces validées par ' + user.name.split(' ')[0] + '. Choisissez le technicien et l’heure.', kind: 'tache' });
+      }
       const wo = ws.workOrders.find(w => w.orderId === order.id && !['terminee', 'annulee', 'echec'].includes(w.status));
-      if (wo && ['cni', 'autorisation_syndic'].includes(doc.type)) notify(ws, wo.techUserId, { title: 'Pièce validée pour votre mission', body: order.ref + ' : ' + DOC_TYPES[doc.type].label + ' consultable dans la mission.', orderId: order.id, kind: 'tache' });
+      if (wo && TECH_DOCS.includes(doc.type)) notify(ws, wo.techUserId, { title: 'Pièce validée pour votre mission', body: order.ref + ' : ' + DOC_TYPES[doc.type].label + ' consultable dans la mission.', orderId: order.id, kind: 'tache' });
     } else {
       if (!args.reason) throw new AppError('motif', 'Indiquez le motif du refus : le client doit comprendre quoi corriger.');
       doc.status = 'refuse'; doc.reason = String(args.reason).slice(0, 200);
@@ -395,7 +592,11 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
     audit(ws, user, 'piece.' + args.decision, order.ref, doc.name);
   });
   cmd('address.requestPrecision', ['conseiller', 'planificateur'], ({ ws, user, order, args }) => openBlocker(ws, order, 'ADRESSE_AMBIGUE', { actor: user, detail: args.detail || '' }), { order: true });
-  cmd('order.markReady', ['planificateur'], ({ ws, user, order }) => D.markReady(ws, order, user), { order: true });
+  cmd('order.markReady', ['planificateur'], ({ ws, user, order }) => {
+    // Dossier rempli en ligne : il passe par « Valider le dossier » (pièces vérifiées par la conseillère).
+    if (order.dossier) throw new AppError('etat', 'Dossier en ligne : utilisez « Choisir le technicien et l’heure » une fois les pièces validées par la conseillère.');
+    return D.markReady(ws, order, user);
+  }, { order: true });
   cmd('blocker.assign', ['conseiller', 'planificateur', 'superviseur'], ({ ws, user, args }) => {
     const b = byId(ws.blockers, args.blockerId); if (!b) throw new AppError('introuvable', 'Blocage introuvable.');
     const order = scopedOrder(ws, user, b.orderId);
@@ -437,7 +638,10 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
   });
   cmd('ticket.close', ['conseiller', 'planificateur', 'superviseur'], ({ ws, user, args }) => { const t = byId(ws.tickets, args.id); if (!t) throw new AppError('introuvable', 'Ticket introuvable.'); scopedOrder(ws, user, t.orderId); if (t.ownerRole && t.ownerRole !== user.role && user.role !== 'superviseur') throw new AppError('interdit', 'Ce ticket est suivi par le ' + (ROLES[t.ownerRole] || {}).label.toLowerCase() + '.'); t.status = 'traite'; t.closedBy = user.name; t.note = args.note || ''; });
 
-  cmd('appt.confirm', ['planificateur'], ({ ws, user, order, args }) => D.confirmAppointment(ws, order, byId(ws.appointments, order.apptId) || {}, user, { teamId: args.teamId }), { order: true });
+  cmd('appt.confirm', ['planificateur'], ({ ws, user, order, args }) => {
+    if (order.dossier) { const notOk = unvalidatedDocs(ws, order); if (notOk.length) throw new AppError('pieces', 'Pièces pas encore validées par la conseillère : ' + notOk.map(t => DOC_TYPES[t].label.toLowerCase()).join(', ') + '.'); }
+    return D.confirmAppointment(ws, order, byId(ws.appointments, order.apptId) || {}, user, { teamId: args.teamId });
+  }, { order: true });
   cmd('appt.reassign', ['planificateur'], ({ ws, user, order, args }) => {
     if (!args.reason || args.reason.length < 5) throw new AppError('motif', 'Une réaffectation doit être justifiée.');
     const appt = byId(ws.appointments, order.apptId);
@@ -448,6 +652,8 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
     if (!(user.zones || []).includes(order.zone)) throw new AppError('interdit', 'Hors de votre périmètre.');
     const cap = ws.capacity.find(c => c.teamId === team.id && c.date === appt.date && c.slot === appt.slot);
     if (!cap || D.remaining(ws, cap) <= 0) throw new AppError('complet', team.name + ' n’a plus de place sur ce créneau.');
+    // Heure déjà fixée : le nouveau technicien ne doit pas être attendu ailleurs au même moment.
+    if (appt.time) { const clash = D.teamBusyAt(ws, team.id, appt.date, appt.time, appt.id); if (clash) throw new AppError('heure', ((byId(ws.users, team.techUserId) || {}).name || team.name) + ' a déjà une visite à ' + hourLabel(appt.time) + ' (' + clash + '). Choisissez une autre équipe.'); }
     const oldTeam = byId(ws.teams, appt.teamId);
     D.releaseCap(ws, appt); cap.used++; appt.capId = cap.id; appt.teamId = team.id;
     const wo = byId(ws.workOrders, appt.woId);
@@ -459,8 +665,11 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
     audit(ws, user, 'mission.reaffecter', order.ref, oldTeam.name + ' → ' + team.name + ' : ' + args.reason);
     for (const b of openBlockers(ws, order.id).filter(b => ['TECHNICIEN_ABSENT', 'SOUS_TRAITANT'].includes(b.type))) resolveBlocker(ws, b, { actor: user, resolution: 'Réaffecté à ' + team.name });
     notify(ws, prevTech, { title: 'Mission retirée', body: order.ref + ' réaffectée : ' + args.reason, orderId: order.id, kind: 'tache' });
-    notify(ws, team.techUserId, { title: 'Nouvelle mission', body: order.ref + ' — ' + fmtDate(appt.date) + ' ' + D.slotLabel(appt.slot), orderId: order.id, kind: 'tache' });
-    notify(ws, order.customerId, { title: 'Changement d’équipe', body: 'Une autre équipe viendra au même créneau (' + fmtDate(appt.date) + ', ' + D.slotLabel(appt.slot) + ').', orderId: order.id, kind: 'rdv' });
+    notify(ws, team.techUserId, { title: 'Nouvelle mission', body: order.ref + ' — ' + fmtDate(appt.date) + ' ' + (appt.time ? 'à ' + hourLabel(appt.time) : D.slotLabel(appt.slot)), orderId: order.id, kind: 'tache' });
+    const newFirst = String((byId(ws.users, team.techUserId) || {}).name || team.name).split(' ')[0];
+    notify(ws, order.customerId, appt.time
+      ? { title: 'Changement de technicien : ' + newFirst + ' viendra le ' + fmtDate(appt.date) + ' à ' + hourLabel(appt.time), body: (ws.config.templates.rdv_heure || 'Moov Fibre : {tech} viendra le {date} à {heure}.').replace('{tech}', newFirst).replace('{date}', fmtDate(appt.date)).replace('{heure}', hourLabel(appt.time)).replace('{slot}', D.slotLabel(appt.slot)), orderId: order.id, kind: 'rdv' }
+      : { title: 'Changement d’équipe', body: 'Une autre équipe viendra au même créneau (' + fmtDate(appt.date) + ', ' + D.slotLabel(appt.slot) + ').', orderId: order.id, kind: 'rdv' });
   }, { order: true });
   cmd('team.setAvailable', ['planificateur'], ({ ws, user, args }) => {
     const t = byId(ws.teams, args.teamId); if (!t) throw new AppError('introuvable', 'Équipe inconnue.');
@@ -595,6 +804,8 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
     }
     else if (args.key === 'holdMinutes') ws.config.holdMinutes = num(1, 60, 'Durée de garde du créneau (minutes)');
     else if (args.key === 'contractDays') ws.config.contractDays = num(1, 120, 'Délai de référence (jours)');
+    else if (args.key === 'dossierDeadlineH') ws.config.dossierDeadlineH = num(1, 72, 'Délai pour envoyer le dossier (heures)');
+    else if (args.key === 'travelMin') ws.config.travelMin = num(1, 30, 'Durée du trajet simulé (minutes)');
     else if (args.key === 'policyEquipment') { if (!['bloquer', 'avertir', 'ignorer'].includes(String(args.value))) throw new AppError('valeur', 'Politique inconnue.'); ws.config.policyEquipment = String(args.value); }
     else if (allowed.includes(args.key)) ws.config[args.key] = args.key === 'autoConfirm' ? !!args.value : Number(args.value);
     else throw new AppError('cle', 'Paramètre non modifiable.');
@@ -705,7 +916,7 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
         const order = c.order ? scopedOrder(ws, user, args.orderId, c.scope) : null;
         if (order && opts.expectedVersion != null && opts.expectedVersion !== order.version) throw new AppError('conflit', 'Le dossier a changé entre-temps (version ' + opts.expectedVersion + ' → ' + order.version + '). Rechargez puis réessayez.');
         const data = c.fn({ ws, user, s, order, args, realNow: rn });
-        if (c.idem && opts.idemKey) ws.idem[opts.idemKey] = { at: ws.clock, data: data && data.id ? { id: data.id, status: data.status } : null };
+        if (c.idem && opts.idemKey) ws.idem[opts.idemKey] = { at: ws.clock, data: c.idemFull ? clone(data) : data && data.id ? { id: data.id, status: data.status } : null };
         if (!c.noAudit && !name.startsWith('demo.') && !['assistant.ask'].includes(name)) audit(ws, user, name, order ? order.ref : (args.id || args.blockerId || args.userId || ''), '');
         if (name.startsWith('demo.')) audit(ws, { id: 'OWNER', name: 'Simulateur', role: 'testeur' }, name, args.orderId ? (byId(ws.orders, args.orderId) || {}).ref : '', JSON.stringify(args).slice(0, 120));
         runJobs(ws);
@@ -744,7 +955,22 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
           else { o.status = 'nouvel essai prévu'; j.due = now + o.attempts * 60e3; }
         } else { o.status = 'livré (accusé simulé)'; j.done = true; }
       } else if (j.kind === 'scan') {
-        const d = byId(ws.documents, j.ref); if (d && d.status === 'analyse') { d.status = 'a_valider'; d.scanNote = d.suspicious ? 'Nom de fichier contenant des instructions : ignorées, aucun droit accordé.' : 'Aucun contenu dangereux détecté (analyse simulée).'; const o = byId(ws.orders, d.orderId); const adv = advisorFor(ws, o); if (adv) notify(ws, adv.id, { title: 'Pièce à valider', body: o.ref + ' : ' + DOC_TYPES[d.type].label, orderId: o.id, kind: 'tache' }); }
+        // Photo d'un dossier en ligne déposée avant l'envoi : la conseillère a déjà été prévenue par « Dossier à vérifier ».
+        const d = byId(ws.documents, j.ref); if (d && d.status === 'analyse') { d.status = 'a_valider'; d.scanNote = (d.suspicious ? 'Nom de fichier contenant des instructions : ignorées, aucun droit accordé.' : 'Aucun contenu dangereux détecté (analyse simulée).') + (d.check ? (d.check.ok ? ' Photo nette et lisible.' : ' Photo ' + d.check.issues.join(', ') + ' : à regarder de près.') : ''); const o = byId(ws.orders, d.orderId); const adv = draftDossier(o) || (o.dossier && o.dossier.submittedAt && d.at <= o.dossier.submittedAt) ? null : advisorFor(ws, o); if (adv) notify(ws, adv.id, { title: 'Pièce à valider', body: o.ref + ' : ' + DOC_TYPES[d.type].label + (d.check && !d.check.ok ? ' (photo ' + d.check.issues.join(', ') + ')' : ''), orderId: o.id, kind: 'tache' }); }
+        j.done = true;
+      } else if (j.kind === 'track') {
+        // Trajet simulé du technicien : on prévient le client à 2 minutes, puis à l'arrivée prévue.
+        const wo = byId(ws.workOrders, j.ref);
+        if (wo && wo.track && wo.track.id === j.trackId && wo.status === 'en_route') {
+          const o = byId(ws.orders, wo.orderId); const f = String((byId(ws.users, wo.techUserId) || {}).name || 'Le technicien').split(' ')[0];
+          if (j.step === 'near' && !wo.track.near) { wo.track.near = true; notify(ws, o.customerId, { title: f + ' arrive dans 2 minutes', body: 'Préparez-vous à lui ouvrir. Votre code de réception (' + wo.receptionCode + ') se donne seulement à la fin.', orderId: o.id, kind: 'rdv' }); }
+          if (j.step === 'there' && !wo.track.there) { wo.track.there = true; notify(ws, o.customerId, { title: f + ' est tout près de chez vous', body: 'Gardez votre téléphone à portée de main : il vous cherche peut-être.', orderId: o.id, kind: 'rdv' }); notify(ws, wo.techUserId, { title: 'Arrivé chez le client ?', body: o.ref + ' : touchez « Arrivé » une fois devant le logement.', orderId: o.id, kind: 'tache' }); }
+        }
+        j.done = true;
+      } else if (j.kind === 'call') {
+        // Personne n'a décroché : l'appel devient une demande de rappel, suivie comme les autres.
+        const c = (ws.calls || []).find(x => x.id === j.ref);
+        if (c && c.status === 'sonne') missedCall(ws, c, 'Appel manqué', now);
         j.done = true;
       } else if (j.kind === 'refund') {
         const r = byId(ws.refunds, j.ref); if (r && r.status === 'valide') { r.status = 'rembourse'; r.steps.push({ at: now, by: 'Moov Money (simulé)', what: 'Remboursement exécuté (simulé, aucun transfert réel)' }); const o = byId(ws.orders, r.orderId); o.payment.status = 'rembourse'; emit(ws, o, 'REMBOURSEMENT_SIMULE', { source: 'Moov Money (simulé)', publicText: 'Remboursement effectué (simulation : aucun argent n’a circulé).' }); }
@@ -789,8 +1015,18 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
     // Rappel la veille du rendez-vous.
     for (const a of ws.appointments) if (a.status === 'confirme' && !a.reminded && a.date - now < 24 * H && a.date > now) {
       a.reminded = true; const o = byId(ws.orders, a.orderId);
-      notify(ws, o.customerId, { title: 'Rappel : visite demain', body: ws.config.templates.rappel.replace('{slot}', D.slotLabel(a.slot)), orderId: o.id, kind: 'rdv' });
+      notify(ws, o.customerId, { title: 'Rappel : visite demain', body: ws.config.templates.rappel.replace('{slot}', a.time ? hourLabel(a.time) : D.slotLabel(a.slot)), orderId: o.id, kind: 'rdv' });
     }
+  }
+
+  function missedCall(ws, c, why, now) {
+    c.status = why === 'Appel manqué' ? 'manque' : 'refuse'; c.endedAt = now;
+    const o = byId(ws.orders, c.orderId); if (!o) return;
+    const cb = { id: 'CB' + (++ws.seq), orderId: o.id, reason: why + (c.reason ? ' : ' + c.reason : ''), availability: 'Dès que possible', status: 'demande', ownerUserId: c.toId, ownerName: c.toName, at: now, fromCall: c.id };
+    ws.callbacks.push(cb);
+    emit(ws, o, 'RAPPEL_DEMANDE', { publicText: why + ' : ' + c.toName.split(' ')[0] + ' vous rappelle dès que possible.' });
+    notify(ws, c.fromId, { title: c.toName.split(' ')[0] + ' vous rappelle', body: (why === 'Appel manqué' ? 'Votre conseillère n’a pas pu décrocher.' : 'Votre conseillère est occupée.') + ' Elle vous rappelle dès que possible.', orderId: o.id, kind: 'appel' });
+    notify(ws, c.toId, { title: 'Rappel à faire', body: o.ref + ' : ' + c.fromName + ' a appelé (' + why.toLowerCase() + ').', orderId: o.id, kind: 'tache' });
   }
 
   // Y a-t-il quelque chose à faire avancer ? Vérifié sans verrou, pour ne pas réveiller tous les appareils toutes les 2 s.
@@ -851,12 +1087,12 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
       order: { id: o.id, ref: o.ref, state: o.state, stateSince: o.stateSince, updatedAt: o.updatedAt, version: o.version, offer: o.offer, address: o.address, zone: o.zone, contactName: o.contactName, contactPhone: o.contactPhone, payment: o.payment, paidAt: o.paidAt, cancelled: o.cancelled, prep: o.prep, requiredDocs: o.requiredDocs || [], docNotes: o.docNotes || {}, claimed: !!o.customerId, clientCheck: o.clientCheck },
       timeline: ws.events.filter(e => e.orderId === o.id && e.publicText).map(publicEvent),
       blockers: ws.blockers.filter(b => b.orderId === o.id).map(b => ({ id: b.id, type: b.type, label: BLOCKER_TYPES[b.type].label, text: BLOCKER_TYPES[b.type].clientText + (b.type === 'PIECE_MANQUANTE' && b.detail ? ' Pièce(s) attendue(s) : ' + b.detail + '.' : b.type === 'ADRESSE_AMBIGUE' && b.detail ? ' Précision demandée : ' + b.detail + '.' : ''), owner: b.ownerRole === 'client' ? 'vous' : 'Moov (' + (ROLES[b.ownerRole] || {}).label + ')', action: b.action, status: b.status, openedAt: b.openedAt, dueAt: b.dueAt, resolution: b.resolution })),
-      appointments: appts.map(a => ({ id: a.id, date: a.date, slot: a.slot, status: a.status, reason: a.reason, replaces: a.replaces })),
-      appt: appt && { id: appt.id, date: appt.date, slot: appt.slot, status: appt.status },
+      appointments: appts.map(a => ({ id: a.id, date: a.date, slot: a.slot, status: a.status, reason: a.reason, replaces: a.replaces, time: a.time || null })),
+      appt: appt && { id: appt.id, date: appt.date, slot: appt.slot, status: appt.status, time: appt.time || null },
       hold: ws.holds.find(h => h.orderId === o.id && h.status === 'actif' && h.expiresReal > ws.lastReal) || null,
-      mission: wo && wo.status !== 'annulee' ? { status: wo.status, techName: tech ? tech.name.split(' ')[0] + ' ' + tech.name.split(' ').slice(1).map(x => x[0] + '.').join(' ') : '—', company: team && team.contractor ? team.contractor + ' pour Moov' : 'Moov Africa', badge: 'MOOV-' + (tech ? tech.id.replace('U', '') : '') + '7' , times: wo.times, receptionCode: wo.receptionCode, reception: wo.reception, report: wo.status === 'terminee' ? { checklist: CHECKLIST_TECH.map(c => ({ label: c.label, value: wo.checklist[c.id], unit: c.unit })), serial: wo.serial, photos: wo.photos.map(p => ({ id: p.id, name: p.name, thumb: p.thumb, img: p.img, at: p.at })), comment: wo.comment } : null, failure: wo.failure } : null,
+      mission: wo && wo.status !== 'annulee' ? { status: wo.status, techName: tech ? tech.name.split(' ')[0] + ' ' + tech.name.split(' ').slice(1).map(x => x[0] + '.').join(' ') : '—', company: team && team.contractor ? team.contractor + ' pour Moov' : 'Moov Africa', badge: 'MOOV-' + (tech ? tech.id.replace('U', '') : '') + '7' , times: wo.times, receptionCode: wo.receptionCode, reception: wo.reception, track: wo.track || null, woId: wo.id, report: wo.status === 'terminee' ? { checklist: CHECKLIST_TECH.map(c => ({ label: c.label, value: wo.checklist[c.id], unit: c.unit })), serial: wo.serial, photos: wo.photos.map(p => ({ id: p.id, name: p.name, thumb: p.thumb, img: p.img, at: p.at })), comment: wo.comment } : null, failure: wo.failure } : null,
       activation: ws.activations.filter(a => a.orderId === o.id).map(a => ({ ref: a.ref, status: a.status, at: a.requestedAt, confirmedAt: a.confirmedAt })),
-      documents: ws.documents.filter(d => d.orderId === o.id).map(d => ({ id: d.id, type: d.type, name: d.name, mime: d.mime, status: d.status, reason: d.reason, at: d.at, thumb: d.thumb, img: d.img, scanNote: d.scanNote })),
+      documents: ws.documents.filter(d => d.orderId === o.id).map(d => ({ id: d.id, type: d.type, name: d.name, mime: d.mime, status: d.status, reason: d.reason, at: d.at, thumb: d.thumb, img: d.img, scanNote: d.scanNote, check: d.check })),
       messages: ws.messages.filter(m => m.orderId === o.id && m.visibility === 'public'),
       callbacks: ws.callbacks.filter(c => c.orderId === o.id),
       tickets: ws.tickets.filter(t => t.orderId === o.id && (t.type.startsWith('signalement') || t.type === 'question_assistant')).map(t => ({ id: t.id, type: t.type, status: t.status, at: t.at, text: t.text })),
@@ -866,18 +1102,24 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
       delegations: ws.delegations.filter(d => d.orderId === o.id).map(d => ({ ...d, delegate: (byId(ws.users, d.delegateId) || {}).name })),
       stale: !ws.integrations.prospect.up ? ws.integrations.prospect.lastSync : null,
       contractDue: o.paidAt ? o.paidAt + ws.config.contractDays * DAY : null,
+      dossier: D.dossierState(ws, o),
+      // Projection : jamais la note interne de la conseillère ni les identifiants des personnes.
+      calls: (ws.calls || []).filter(c => c.orderId === o.id).slice(-5).map(c => ({ id: c.id, status: c.status, fromName: c.fromName, toName: c.toName, reason: c.reason, startedAt: c.startedAt, answeredAt: c.answeredAt, endedAt: c.endedAt, mine: c.fromId === user.id })),
+      techRating: (ws.techRatings || []).filter(r => r.orderId === o.id).at(-1) || null,
+      lastVisit: (w => w && { woId: w.id, techName: (byId(ws.users, w.techUserId) || {}).name || '—', end: w.times.end })(ws.workOrders.filter(w => w.orderId === o.id && w.status === 'terminee').at(-1)),
     };
   }
 
+  const DOSSIER_ORDER = { a_verifier: 0, incomplet: 1, verifie: 2, en_retard: 3, a_completer: 4 };
   const queries = {
     me: { fn: ({ ws, user, s }) => ({
       user: { id: user.id, name: user.name, role: user.role, phone: user.phone, prefs: user.prefs, zones: user.zones, contractor: user.contractor },
-      ws: { id: ws.id, name: ws.name, env: ws.env, generation: ws.generation, expiresAt: ws.expiresAt, clock: ws.clock, seed: ws.seed, degraded: ws.sim.degraded, integrations: ws.integrations, holdMinutes: ws.config.holdMinutes },
+      ws: { id: ws.id, name: ws.name, env: ws.env, generation: ws.generation, expiresAt: ws.expiresAt, clock: ws.clock, seed: ws.seed, degraded: ws.sim.degraded, integrations: ws.integrations, holdMinutes: ws.config.holdMinutes, lastReal: ws.lastReal, travelMin: ws.config.travelMin || 4, dossierDeadlineH: ws.config.dossierDeadlineH || 24 },
       owner: !!s.owner,
       unread: ws.notifications.filter(n => n.userId === user.id && !n.read).length,
       users: s.owner ? ws.users.map(u => ({ id: u.id, name: u.name, role: u.role, active: u.active })) : null,
     }) },
-    'client.orders': { roles: CLIENTISH, fn: ({ ws, user }) => ws.orders.filter(o => canSee(ws, user, o)).map(o => ({ id: o.id, ref: o.ref, state: o.state, address: o.address, cancelled: o.cancelled, scopes: user.role === 'representant' ? ws.delegations.filter(d => d.orderId === o.id && d.delegateId === user.id && !d.revoked).flatMap(d => d.scopes) : null })) },
+    'client.orders': { roles: CLIENTISH, fn: ({ ws, user }) => ws.orders.filter(o => canSee(ws, user, o)).map(o => ({ id: o.id, ref: o.ref, state: o.state, address: o.address, cancelled: o.cancelled, updatedAt: o.updatedAt, dossier: o.dossier ? (D.dossierState(ws, o) || {}).status || null : null, scopes: user.role === 'representant' ? ws.delegations.filter(d => d.orderId === o.id && d.delegateId === user.id && !d.revoked).flatMap(d => d.scopes) : null })) },
     'client.order': { roles: CLIENTISH, fn: ({ ws, user, args }) => { const v = clientView(ws, user, scopedOrder(ws, user, args.orderId)); return user.role === 'representant' ? forDelegate(v) : v; } },
     'client.availability': { roles: CLIENTISH, fn: ({ ws, user, args }) => D.availability(ws, scopedOrder(ws, user, args.orderId, 'rdv')) },
     'client.document': { roles: ['client'], fn: ({ ws, user, args }) => { const d = byId(ws.documents, args.docId); if (!d) throw new AppError('introuvable', 'Pièce introuvable ou non autorisée.'); scopedOrder(ws, user, d.orderId); return d; } },
@@ -901,7 +1143,8 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
       return {
         sansAction: noNext.sort((a, b) => b.risk.score - a.risk.score),
         enRetard: rows.filter(r => r.overSla).sort((a, b) => b.risk.score - a.risk.score),
-        incomplets: rows.filter(r => r.blockers.some(b => ['PIECE_MANQUANTE', 'ADRESSE_AMBIGUE', 'PAIEMENT_NON_RAPPROCHE'].includes(b.type))),
+        incomplets: rows.filter(r => r.blockers.some(b => ['PIECE_MANQUANTE', 'ADRESSE_AMBIGUE', 'PAIEMENT_NON_RAPPROCHE'].includes(b.type)) || (r.dossier && ['incomplet', 'en_retard'].includes(r.dossier.status))),
+        dossiers: rows.filter(r => r.dossier && ['incomplet', 'a_verifier', 'verifie', 'en_retard', 'a_completer'].includes(r.dossier.status)).sort((a, b) => (DOSSIER_ORDER[a.dossier.status] - DOSSIER_ORDER[b.dossier.status]) || ((b.dossier.submittedAt || 0) - (a.dossier.submittedAt || 0))),
         bloques: rows.filter(r => r.blockers.length).sort((a, b) => b.risk.score - a.risk.score),
         aConfirmer: rows.filter(r => r.apptStatus === 'reserve'),
         aPreparer: rows.filter(r => r.state === 'PREPARATION' && !r.blockers.length),
@@ -923,6 +1166,7 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
         workOrder: (w => w && { ...w, teamName: (byId(ws.teams, w.teamId) || {}).name || null })(byId(ws.workOrders, o.woId)), customer: byId(ws.users, o.customerId), linkedTo: o.linkedTo && byId(ws.orders, o.linkedTo) && byId(ws.orders, o.linkedTo).ref, duplicates: dups,
         tickets: ws.tickets.filter(t => t.orderId === o.id), approvals: (ws.approvals || []).filter(a => a.orderId === o.id), portReserved: o.portReserved, feedback: ws.feedback.find(f => f.orderId === o.id),
         assistantLog: (ws.assistantLog || []).filter(a => a.orderId === o.id),
+        techRatings: (ws.techRatings || []).filter(r => r.orderId === o.id),
       } };
     } },
     // Droit de voir une image (pièce ou photo) : même règle que le dossier, technicien seulement sur sa mission ouverte.
@@ -931,11 +1175,31 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
       const img = D.imgRef(args.img); if (!img) return false;
       if (['admin', 'auditeur'].includes(user.role)) return false;
       const d = ws.documents.find(x => x.img === img);
-      if (d) { const o = byId(ws.orders, d.orderId); if (!o || user.role === 'representant') return false; return user.role === 'technicien' ? !!activeWo(ws, o.id, user.id) && ['cni', 'autorisation_syndic'].includes(d.type) : canSee(ws, user, o); }
+      if (d) { const o = byId(ws.orders, d.orderId); if (!o || user.role === 'representant') return false; return user.role === 'technicien' ? !!activeWo(ws, o.id, user.id) && TECH_DOCS.includes(d.type) : canSee(ws, user, o); }
       const w = ws.workOrders.find(x => (x.photos || []).some(p => p.img === img));
       if (w) { const o = byId(ws.orders, w.orderId); if (!o) return false; return user.role === 'technicien' ? w.techUserId === user.id : user.role === 'representant' ? false : user.role === 'client' ? w.status === 'terminee' && canSee(ws, user, o) : canSee(ws, user, o); }
       return false;
     } },
+    // Qui peut venir à l'heure choisie ? Pour chaque équipe de la zone : place restante sur la demi-journée et heures déjà prises.
+    'ops.techFree': { roles: ['planificateur', 'superviseur', 'conseiller'], fn: ({ ws, user, args }) => {
+      const o = scopedOrder(ws, user, args.orderId);
+      const appt = byId(ws.appointments, o.apptId);
+      const notOk = unvalidatedDocs(ws, o);
+      if (!appt) return { appt: null, hours: [], teams: [], docsOk: !notOk.length, docsMissing: notOk.map(t => DOC_TYPES[t].label) };
+      const hours = SLOT_HOURS[appt.slot] || [];
+      const teams = ws.teams.filter(t => t.zones.includes(o.zone)).map(t => {
+        const cap = ws.capacity.find(c => c.teamId === t.id && c.date === appt.date && c.slot === appt.slot);
+        const own = appt.teamId === t.id && ['reserve', 'confirme'].includes(appt.status);
+        const left = cap ? D.remaining(ws, cap) : 0;
+        const busy = ws.appointments.filter(a => a.id !== appt.id && a.teamId === t.id && a.date === appt.date && a.slot === appt.slot && ['confirme', 'en_cours', 'realise'].includes(a.status)).map(a => ({ time: a.time || null, ref: (byId(ws.orders, a.orderId) || {}).ref }));
+        const tech = byId(ws.users, t.techUserId);
+        const canTake = t.available && (own || left > 0);
+        return { id: t.id, name: t.name, techId: t.techUserId, techName: tech ? tech.name : '—', contractor: t.contractor, quality: t.quality, available: t.available, own, left, busy, canTake,
+          hours: hours.map(h => ({ h, free: canTake && !busy.some(b => b.time === h) })) };
+      });
+      return { appt: { id: appt.id, date: appt.date, slot: appt.slot, status: appt.status, teamId: appt.teamId, time: appt.time || null }, hours, teams, docsOk: !notOk.length, docsMissing: notOk.map(t => DOC_TYPES[t].label), state: o.state };
+    } },
+    'ops.calls': { roles: ['conseiller', 'superviseur'], fn: ({ ws, user }) => (ws.calls || []).filter(c => (c.toId === user.id || user.role === 'superviseur') && (LIVE_CALL.includes(c.status) || ws.clock - c.startedAt < 15 * 60e3)).map(c => ({ ...c, ref: (byId(ws.orders, c.orderId) || {}).ref })).reverse() },
     'ops.summary': { roles: ['conseiller', 'superviseur'], fn: ({ ws, user, args }) => { const o = scopedOrder(ws, user, args.orderId); return summarize(ws, o); } },
     'ops.staff': { roles: STAFF_ALL, fn: ({ ws }) => ws.users.filter(u => !['client', 'representant'].includes(u.role)).map(u => ({ id: u.id, name: u.name, role: u.role })) },
     planning: { roles: ['planificateur', 'superviseur'], fn: ({ ws, user }) => {
@@ -949,9 +1213,9 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
     } },
     'tech.missions': { roles: ['technicien'], fn: ({ ws, user }) => ws.workOrders.filter(w => w.techUserId === user.id).map(w => {
       const o = byId(ws.orders, w.orderId); const a = byId(ws.appointments, w.apptId);
-      return { ...w, ref: o.ref, orderId: o.id, orderVersion: o.version, address: o.address, contactName: o.contactName, offer: o.offer, equipmentModel: o.equipmentModel, appt: a && { date: a.date, slot: a.slot, status: a.status }, prep: o.prep, teamName: (byId(ws.teams, w.teamId) || {}).name || null, notes: ws.messages.filter(m => m.orderId === o.id && m.visibility === 'interne').slice(-3),
+      return { ...w, ref: o.ref, orderId: o.id, orderVersion: o.version, address: o.address, contactName: o.contactName, offer: o.offer, equipmentModel: o.equipmentModel, appt: a && { date: a.date, slot: a.slot, status: a.status, time: a.time || null }, prep: o.prep, rating: (ws.techRatings || []).find(r => r.woId === w.id) || null, teamName: (byId(ws.teams, w.teamId) || {}).name || null, notes: ws.messages.filter(m => m.orderId === o.id && m.visibility === 'interne').slice(-3),
         // Pièces utiles à la visite, visibles seulement tant que la mission est ouverte (besoin d'en connaître).
-        documents: ['terminee', 'annulee', 'echec'].includes(w.status) ? [] : ws.documents.filter(d => d.orderId === o.id && ['cni', 'autorisation_syndic'].includes(d.type) && d.status !== 'remplace').map(d => ({ id: d.id, type: d.type, name: d.name, status: d.status, at: d.at, thumb: d.thumb, img: d.img })) };
+        documents: ['terminee', 'annulee', 'echec'].includes(w.status) ? [] : ws.documents.filter(d => d.orderId === o.id && TECH_DOCS.includes(d.type) && d.status !== 'remplace').map(d => ({ id: d.id, type: d.type, name: d.name, status: d.status, at: d.at, thumb: d.thumb, img: d.img })) };
     }).sort((x, y) => ((x.appt && x.appt.date) || 0) - ((y.appt && y.appt.date) || 0)) },
     dashboard: { roles: ['superviseur', 'admin', 'auditeur'], fn: ({ ws }) => dashboard(ws) },
     'admin.users': { roles: ['admin', 'auditeur'], ownerOk: true, fn: ({ ws }) => ({ users: ws.users, invites: ws.invites.map(i => ({ ...i, user: (byId(ws.users, i.userId) || {}).name })), privacy: ws.privacy }) },
@@ -980,7 +1244,7 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
     const inState = (ws.clock - o.stateSince) / H;
     const appt = byId(ws.appointments, o.apptId);
     const r = risk(ws, o);
-    return { id: o.id, ref: o.ref, zone: o.zone, commune: o.address.commune, state: o.state, contactName: o.contactName, contactPhone: o.contactPhone, ageD: (ws.clock - (o.paidAt || o.createdAt)) / DAY, inStateH: inState, sla, overSla: sla && inState > sla, idleH: lastEv ? (ws.clock - lastEv.effectiveAt) / H : 0, blockers: bl.map(b => ({ id: b.id, type: b.type, label: BLOCKER_TYPES[b.type].label, owner: (byId(ws.users, b.ownerUserId) || {}).name || null, dueAt: b.dueAt, escalated: b.escalated })), apptStatus: appt && appt.status, apptDate: appt && appt.date, risk: r, cancelled: o.cancelled, version: o.version };
+    return { id: o.id, ref: o.ref, zone: o.zone, commune: o.address.commune, state: o.state, contactName: o.contactName, contactPhone: o.contactPhone, ageD: (ws.clock - (o.paidAt || o.createdAt)) / DAY, inStateH: inState, sla, overSla: sla && inState > sla, idleH: lastEv ? (ws.clock - lastEv.effectiveAt) / H : 0, blockers: bl.map(b => ({ id: b.id, type: b.type, label: BLOCKER_TYPES[b.type].label, owner: (byId(ws.users, b.ownerUserId) || {}).name || null, dueAt: b.dueAt, escalated: b.escalated })), apptStatus: appt && appt.status, apptDate: appt && appt.date, apptSlot: appt && appt.slot, apptTime: appt && appt.time || null, risk: r, cancelled: o.cancelled, version: o.version, dossier: D.dossierState(ws, o), offer: o.offer };
   }
 
   function dashboard(ws) {

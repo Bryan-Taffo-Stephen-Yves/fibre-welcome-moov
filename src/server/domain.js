@@ -1,6 +1,6 @@
 // Règles métier du serveur simulé (CDC 3, 4, 5). Aucune fonction ici ne vérifie les droits :
 // c'est backend.js qui contrôle la session, le rôle et le périmètre avant d'appeler ces règles.
-import { stateRank, STATE_INFO, BLOCKER_TYPES, CHECKLIST_TECH, SLOTS, APPT_STATES, DOC_TYPES } from './model.js';
+import { stateRank, STATE_INFO, BLOCKER_TYPES, CHECKLIST_TECH, SLOTS, APPT_STATES, DOC_TYPES, DOSSIER_DOCS, SLOT_HOURS, TEAM_BASE, hourLabel } from './model.js';
 import { estimate, fmtDate, stageOf } from './ai.js';
 import { H, DAY, startOfDay } from './seed.js';
 
@@ -127,7 +127,7 @@ export function availability(ws, order) {
 }
 
 export function holdSlot(ws, order, { date, slot }, actor, realNow) {
-  if (!['PRET_A_PLANIFIER', 'RDV_CONFIRME'].includes(order.state)) throw new AppError('etat', 'Le dossier n’est pas encore prêt à être planifié.');
+  if (!canPlan(order)) throw new AppError('etat', 'Le dossier n’est pas encore prêt à être planifié.');
   if (missionUnderway(ws, order)) throw new AppError('etat', UNDERWAY_MSG);
   if (ws.sim.equipmentShortage && ws.config.policyEquipment === 'bloquer') throw new AppError('materiel', 'Matériel indisponible : la prise de rendez-vous est suspendue selon la politique en vigueur. Aucune date ne vous est promise.');
   // Réservation atomique : la vérification et la prise de capacité se font dans la même transaction verrouillée.
@@ -148,6 +148,9 @@ export function holdSlot(ws, order, { date, slot }, actor, realNow) {
   emit(ws, order, 'CRENEAU_TENU', { actor, payload: { date, slot, expiresInMin: ws.config.holdMinutes } });
   return hold;
 }
+
+// Un dossier rempli en ligne a déjà choisi son créneau à l'envoi : il peut le changer pendant la vérification.
+export const canPlan = order => ['PRET_A_PLANIFIER', 'RDV_CONFIRME'].includes(order.state) || (order.state === 'PREPARATION' && !!(order.dossier && order.dossier.submittedAt));
 
 // Une fois le technicien parti, le rendez-vous ne se change plus depuis l'application : on passe par le conseiller.
 export function missionUnderway(ws, order) {
@@ -174,7 +177,8 @@ export function bookHold(ws, order, holdId, actor, realNow) {
     appt.replaces = old.id;
     const oldWo = old.woId && byId(ws.workOrders, old.woId);
     // Même équipe disponible : le nouveau créneau est confirmé directement et la mission suit (SC-04).
-    if (wasConfirmed && old.teamId === appt.teamId && order.state === 'RDV_CONFIRME') {
+    // Dossier en ligne : l'heure avait été fixée par le planificateur, il doit la refixer pour la nouvelle date.
+    if (wasConfirmed && old.teamId === appt.teamId && order.state === 'RDV_CONFIRME' && !order.dossier) {
       appt.status = 'confirme';
       if (oldWo) { appt.woId = oldWo.id; oldWo.apptId = appt.id; oldWo.version++; }
     } else if (oldWo && !['terminee', 'annulee'].includes(oldWo.status)) { oldWo.status = 'annulee'; oldWo.version++; notify(ws, oldWo.techUserId, { title: 'Mission retirée', body: order.ref + ' : rendez-vous replanifié avec une autre équipe.', orderId: order.id, kind: 'tache' }); }
@@ -190,10 +194,11 @@ export function bookHold(ws, order, holdId, actor, realNow) {
     notify(ws, order.customerId, { title: 'Nouveau rendez-vous confirmé', body: ws.config.templates.rdv_confirme.replace('{date}', fmtDate(appt.date)).replace('{slot}', slotLabel(appt.slot)), orderId: order.id, kind: 'rdv' });
   } else {
     const planner = ws.users.find(u => u.role === 'planificateur' && u.zones.includes(order.zone));
-    if (planner) notify(ws, planner.id, { title: 'Rendez-vous à confirmer', body: order.ref + ' — ' + fmtDate(appt.date) + ' ' + slotLabel(appt.slot), orderId: order.id, kind: 'tache' });
+    const refix = order.dossier && old && old.time;
+    if (planner) notify(ws, planner.id, { title: refix ? 'Heure à refixer' : 'Rendez-vous à confirmer', body: order.ref + ' — ' + (refix ? 'le client a déplacé sa visite au ' : '') + fmtDate(appt.date) + ' ' + slotLabel(appt.slot) + (refix ? '. Choisissez à nouveau le technicien et l’heure.' : ''), orderId: order.id, kind: 'tache' });
     notify(ws, order.customerId, { title: 'Créneau réservé', body: 'Votre créneau du ' + fmtDate(appt.date) + ' (' + slotLabel(appt.slot) + ') est réservé. Moov confirme l’équipe sous peu.', orderId: order.id, kind: 'rdv', channels: false });
   }
-  if (ws.config.autoConfirm && appt.status === 'reserve') confirmAppointment(ws, order, appt, SYS, {});
+  if (ws.config.autoConfirm && appt.status === 'reserve' && order.state === 'PRET_A_PLANIFIER' && !order.dossier) confirmAppointment(ws, order, appt, SYS, {});
   return appt;
 }
 
@@ -204,12 +209,17 @@ export function releaseCap(ws, appt) {
   if (cap && cap.used > 0) cap.used--;
 }
 
-export function confirmAppointment(ws, order, appt, actor, { teamId } = {}) {
+export function confirmAppointment(ws, order, appt, actor, { teamId, time } = {}) {
   if (appt.status !== 'reserve') throw new AppError('etat', 'Ce rendez-vous n’est pas en attente de confirmation.');
   if (order.state !== 'PRET_A_PLANIFIER') throw new AppError('etat', 'Le dossier doit être prêt à planifier.');
   const team = byId(ws.teams, teamId || appt.teamId);
   if (!team || !team.available) throw new AppError('equipe', 'Équipe indisponible.');
   if (!team.zones.includes(order.zone)) throw new AppError('equipe', 'Cette équipe n’intervient pas dans la zone ' + order.address.commune + '.');
+  if (time != null) {
+    if (!(SLOT_HOURS[appt.slot] || []).includes(time)) throw new AppError('heure', 'Choisissez une heure comprise dans le créneau ' + slotLabel(appt.slot) + '.');
+    const clash = teamBusyAt(ws, team.id, appt.date, time, appt.id);
+    if (clash) throw new AppError('heure', userName(ws, team.techUserId) + ' a déjà une visite le ' + fmtDate(appt.date) + ' à ' + hourLabel(time) + ' (' + clash + '). Choisissez une autre heure ou une autre équipe.');
+  }
   if (team.id !== appt.teamId) {
     const cap = ws.capacity.find(c => c.teamId === team.id && c.date === appt.date && c.slot === appt.slot);
     if (!cap || remaining(ws, cap) <= 0) throw new AppError('complet', 'Cette équipe n’a plus de place sur ce créneau.');
@@ -220,6 +230,9 @@ export function confirmAppointment(ws, order, appt, actor, { teamId } = {}) {
     if (!stock) throw new AppError('materiel', 'Aucun équipement ' + order.equipmentModel + ' en stock : confirmation impossible sans fausse promesse.');
   }
   appt.status = 'confirme';
+  if (time != null) appt.time = time;
+  // Visite dans moins de 24 h : la confirmation tient lieu de rappel (pas de « Rappel : visite demain » juste après).
+  if (appt.date - ws.clock < 24 * H) appt.reminded = true;
   let wo = appt.woId && byId(ws.workOrders, appt.woId);
   if (!wo) {
     wo = { id: nid(ws, 'MI'), orderId: order.id, apptId: appt.id, teamId: team.id, techUserId: team.techUserId, status: 'affectee', times: {}, checklist: {}, serial: '', photos: [], comment: '', receptionCode: String(1000 + Math.floor((ws.seq * 7919) % 9000)), reception: null, failure: null, version: 1, createdAt: ws.clock };
@@ -227,10 +240,19 @@ export function confirmAppointment(ws, order, appt, actor, { teamId } = {}) {
   }
   order.woId = wo.id;
   transition(ws, order, 'RDV_CONFIRME', { actor, reason: 'Créneau confirmé, ' + team.name });
-  audit(ws, actor, 'rdv.confirmer', order.ref, fmtDate(appt.date) + ' ' + slotLabel(appt.slot) + ' — ' + team.name);
-  notify(ws, order.customerId, { title: 'Rendez-vous confirmé', body: ws.config.templates.rdv_confirme.replace('{date}', fmtDate(appt.date)).replace('{slot}', slotLabel(appt.slot)), orderId: order.id, kind: 'rdv' });
-  notify(ws, team.techUserId, { title: 'Nouvelle mission', body: order.ref + ' — ' + order.address.commune + ', ' + fmtDate(appt.date) + ' ' + slotLabel(appt.slot), orderId: order.id, kind: 'tache' });
+  audit(ws, actor, 'rdv.confirmer', order.ref, fmtDate(appt.date) + ' ' + (appt.time || slotLabel(appt.slot)) + ' — ' + team.name);
+  const techFirst = String(userName(ws, team.techUserId)).split(' ')[0];
+  const body = appt.time ? (ws.config.templates.rdv_heure || 'Moov Fibre : {tech} viendra le {date} à {heure}.').replace('{tech}', techFirst).replace('{date}', fmtDate(appt.date)).replace('{heure}', hourLabel(appt.time)).replace('{slot}', slotLabel(appt.slot))
+    : ws.config.templates.rdv_confirme.replace('{date}', fmtDate(appt.date)).replace('{slot}', slotLabel(appt.slot));
+  notify(ws, order.customerId, { title: appt.time ? techFirst + ' viendra le ' + fmtDate(appt.date) + ' à ' + hourLabel(appt.time) : 'Rendez-vous confirmé', body, orderId: order.id, kind: 'rdv' });
+  notify(ws, team.techUserId, { title: 'Nouvelle mission', body: order.ref + ' — ' + order.address.commune + ', ' + fmtDate(appt.date) + ' ' + (appt.time ? 'à ' + hourLabel(appt.time) : slotLabel(appt.slot)), orderId: order.id, kind: 'tache' });
   return appt;
+}
+
+// Une équipe est-elle déjà attendue chez un autre client à cette heure-là ? Renvoie la référence du dossier, ou null.
+export function teamBusyAt(ws, teamId, date, time, exceptApptId) {
+  const a = ws.appointments.find(x => x.id !== exceptApptId && x.teamId === teamId && x.date === date && x.time === time && ['confirme', 'en_cours'].includes(x.status));
+  return a ? (byId(ws.orders, a.orderId) || {}).ref || a.id : null;
 }
 
 export function cancelAppointment(ws, order, appt, actor, reason, { force = false } = {}) {
@@ -257,11 +279,20 @@ export function woAction(ws, wo, action, args, actor) {
   const now = ws.clock;
   const need = (ok, msg) => { if (!ok) throw new AppError('etat', msg); };
   switch (action) {
-    case 'depart': need(wo.status === 'affectee', 'Mission déjà démarrée.'); wo.status = 'en_route'; wo.times.depart = now;
+    case 'depart': {
+      need(wo.status === 'affectee', 'Mission déjà démarrée.'); wo.status = 'en_route'; wo.times.depart = now;
+      // Trajet simulé (démo) : de l'agence de l'équipe jusqu'à la commune du client, en quelques minutes réelles.
+      const min = Math.max(1, Math.min(30, Number(ws.config.travelMin) || 4));
+      wo.track = { id: nid(ws, 'TRJ'), from: TEAM_BASE[wo.teamId] || 'plateau', to: order.zone, departAt: now, durMs: min * 60e3, near: false, there: false };
+      if (min > 2) ws.jobs.push({ id: nid(ws, 'J'), kind: 'track', step: 'near', ref: wo.id, trackId: wo.track.id, due: now + (min - 2) * 60e3, generation: ws.generation, attempts: 0 });
+      ws.jobs.push({ id: nid(ws, 'J'), kind: 'track', step: 'there', ref: wo.id, trackId: wo.track.id, due: now + min * 60e3, generation: ws.generation, attempts: 0 });
       emit(ws, order, 'TECH_EN_ROUTE', { actor, publicText: 'Le technicien est en route.' });
-      notify(ws, order.customerId, { title: 'Technicien en route', body: userName(ws, wo.techUserId) + ' est en route vers chez vous.', orderId: order.id, kind: 'rdv' }); break;
+      notify(ws, order.customerId, { title: 'Technicien en route', body: userName(ws, wo.techUserId) + ' est en route vers chez vous. Arrivée dans environ ' + min + ' min.', orderId: order.id, kind: 'rdv' }); break;
+    }
     case 'arrive': need(['affectee', 'en_route'].includes(wo.status), 'Étape impossible.'); wo.status = 'sur_place'; wo.times.arrive = now;
-      emit(ws, order, 'TECH_ARRIVE', { actor, publicText: 'Le technicien est arrivé.' }); break;
+      if (wo.track) wo.track.arrivedAt = now;
+      emit(ws, order, 'TECH_ARRIVE', { actor, publicText: 'Le technicien est arrivé.' });
+      notify(ws, order.customerId, { title: 'Votre technicien est arrivé', body: userName(ws, wo.techUserId) + ' est devant chez vous. Pensez à lui ouvrir.', orderId: order.id, kind: 'rdv' }); break;
     case 'start': need(['sur_place', 'en_route', 'affectee'].includes(wo.status), 'Étape impossible.'); wo.status = 'en_cours'; wo.times.start = now; wo.times.arrive ||= now;
       if (appt) appt.status = 'en_cours';
       transition(ws, order, 'INTERVENTION_EN_COURS', { actor, source: 'Application terrain' }); break;
@@ -431,7 +462,7 @@ export function makeEnvelope(ws, type, order, payload, { source, eventId, occurr
 }
 
 // ---------- Vérification technique (PL-03) ----------
-export function markReady(ws, order, actor) {
+export function markReady(ws, order, actor, { quiet = false } = {}) {
   if (order.state !== 'PREPARATION') throw new AppError('etat', 'Le dossier n’est pas en vérification technique.');
   // Un port s'est libéré (ou a été ajouté) : le blocage « capacité réseau » se lève à la validation.
   const capB = openBlockers(ws, order.id).find(b => b.type === 'CAPACITE_RESEAU');
@@ -445,7 +476,88 @@ export function markReady(ws, order, actor) {
   }
   order.address.verified = true;
   transition(ws, order, 'PRET_A_PLANIFIER', { actor, reason: 'Adresse, accès et port réseau vérifiés' });
-  notify(ws, order.customerId, { title: 'Choisissez votre créneau', body: 'Tout est vérifié : vous pouvez réserver la visite du technicien dans l’application.', orderId: order.id, kind: 'action' });
+  if (!quiet) notify(ws, order.customerId, { title: 'Choisissez votre créneau', body: 'Tout est vérifié : vous pouvez réserver la visite du technicien dans l’application.', orderId: order.id, kind: 'action' });
+}
+
+// ---------- Dossier rempli en ligne après l'achat (site des offres) ----------
+// Prévient toutes les personnes actives d'un rôle qui suivent la zone du dossier.
+export function notifyRole(ws, role, order, msg) {
+  for (const u of ws.users.filter(u => u.role === role && u.active !== false && (!order || !u.zones || u.zones.includes(order.zone)))) notify(ws, u.id, { orderId: order ? order.id : null, ...msg });
+}
+
+// Ce qui manque encore au dossier, en mots simples. Les pièces refusées ou jamais envoyées comptent.
+export function dossierMissing(ws, order) {
+  const out = [];
+  const req = order.requiredDocs || [];
+  for (const t of req) {
+    const live = ws.documents.filter(d => d.orderId === order.id && d.type === t && d.status !== 'remplace');
+    const last = live.at(-1);
+    if (!last) out.push({ kind: 'doc', type: t, label: DOC_TYPES[t].label, why: 'pas encore envoyée' });
+    else if (last.status === 'refuse') out.push({ kind: 'doc', type: t, label: DOC_TYPES[t].label, why: 'refusée : ' + (last.reason || 'à refaire') });
+  }
+  const a = order.address || {};
+  if (!a.landmark || String(a.landmark).trim().length < 8) out.push({ kind: 'info', field: 'landmark', label: 'Repère pour trouver le logement', why: 'au moins 8 caractères' });
+  const appt = order.apptId && byId(ws.appointments, order.apptId);
+  if (!appt || !['reserve', 'confirme', 'en_cours', 'realise'].includes(appt.status)) out.push({ kind: 'slot', label: 'Créneau de visite', why: 'pas encore choisi' });
+  return out;
+}
+
+// État du dossier en ligne, calculé (jamais stocké) : il suit toujours les pièces et le rendez-vous réels.
+export function dossierState(ws, order) {
+  const d = order.dossier;
+  if (!d) return null;
+  const missing = dossierMissing(ws, order);
+  const docs = (order.requiredDocs || []).map(t => ws.documents.filter(x => x.orderId === order.id && x.type === t && x.status !== 'remplace').at(-1)).filter(Boolean);
+  const pending = docs.filter(x => ['analyse', 'a_valider'].includes(x.status)).length;
+  const flagged = docs.filter(x => x.check && !x.check.ok && ['analyse', 'a_valider'].includes(x.status)).length;
+  let status;
+  if (order.cancelled) status = 'annule';
+  else if (stateRank(order.state) >= stateRank('RDV_CONFIRME')) status = 'valide';
+  else if (!d.submittedAt) status = ws.clock > d.dueAt ? 'en_retard' : 'a_completer';
+  else if (missing.length) status = 'incomplet';
+  else if (pending) status = 'a_verifier';
+  else status = 'verifie';
+  return { status, openedAt: d.openedAt, dueAt: d.dueAt, submittedAt: d.submittedAt || null, late: !!d.late, missing, pending, flagged, docs: docs.length };
+}
+
+// Réserve directement une place sur un créneau (sans garde temporaire) : la vérification et la prise de capacité
+// se font dans la même transaction, comme pour une réservation normale.
+export function reserveSlot(ws, order, { date, slot }, actor) {
+  if (!SLOTS.some(s => s.id === slot) || !Number.isFinite(Number(date))) throw new AppError('creneau', 'Choisissez un créneau dans la liste.');
+  // Mêmes règles que la réservation classique : matériel suspendu, pas de visite aujourd'hui ni dans le passé.
+  if (ws.sim.equipmentShortage && ws.config.policyEquipment === 'bloquer') throw new AppError('materiel', 'Matériel indisponible : la prise de rendez-vous est suspendue selon la politique en vigueur. Aucune date ne vous est promise.');
+  if (Number(date) < startOfDay(ws.clock) + DAY) throw new AppError('creneau', 'Choisissez un créneau à partir de demain.');
+  const teams = ws.teams.filter(t => t.available && t.zones.includes(order.zone));
+  const caps = ws.capacity.filter(c => c.date === Number(date) && c.slot === slot && teams.some(t => t.id === c.teamId) && (ws.sim.saturation ? remaining(ws, c) - 1 : remaining(ws, c)) > 0);
+  if (!caps.length) {
+    const alt = availability(ws, order).slots.filter(s => s.left > 0).slice(0, 3);
+    throw new AppError('complet', 'Ce créneau vient d’être pris. Choisissez-en un autre.', { alternatives: alt });
+  }
+  caps.sort((x, y) => (byId(ws.teams, y.teamId).zones[0] === order.zone ? 1 : 0) - (byId(ws.teams, x.teamId).zones[0] === order.zone ? 1 : 0));
+  const c = caps[0];
+  const old = order.apptId && byId(ws.appointments, order.apptId);
+  if (old && ['reserve', 'tenu'].includes(old.status)) { old.status = 'remplace'; old.reason = 'Nouveau créneau choisi par ' + actor.name; releaseCap(ws, old); }
+  c.used++;
+  const appt = { id: nid(ws, 'RDV'), orderId: order.id, date: c.date, slot, teamId: c.teamId, capId: c.id, status: 'reserve', createdAt: ws.clock, replaces: old ? old.id : null, reason: null, eventSeq: 0 };
+  ws.appointments.push(appt);
+  order.apptId = appt.id; order.version++; order.updatedAt = ws.clock;
+  appt.eventSeq = emit(ws, order, 'RDV_RESERVE', { actor, payload: { date: appt.date, slot }, publicText: 'Créneau demandé : ' + fmtDate(appt.date) + ' (' + slotLabel(slot) + '). Moov confirme l’heure et le technicien.' }).seq;
+  return appt;
+}
+
+// Contrôle automatique d'une photo, à partir de mesures faites sur le téléphone (taille, lumière, netteté).
+// Ce n'est pas une IA : trois règles simples, expliquées au client et à la conseillère.
+export function photoCheck(q) {
+  if (!q || typeof q !== 'object') return null;
+  const n = (v, lo, hi) => { const x = Number(v); return Number.isFinite(x) ? Math.max(lo, Math.min(hi, x)) : null; };
+  const m = { w: n(q.w, 0, 20000), h: n(q.h, 0, 20000), bright: n(q.bright, 0, 255), sharp: n(q.sharp, 0, 100) };
+  if (m.w == null || m.h == null || m.bright == null || m.sharp == null) return null;
+  const issues = [];
+  if (Math.min(m.w, m.h) < 480) issues.push('trop petite');
+  if (m.bright < 55) issues.push('trop sombre');
+  else if (m.bright > 235) issues.push('trop claire (reflet)');
+  if (m.sharp < 12) issues.push('floue');
+  return { ok: !issues.length, issues, ...m };
 }
 
 export function docCheck(file) {

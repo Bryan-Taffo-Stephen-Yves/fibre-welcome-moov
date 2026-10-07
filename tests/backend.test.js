@@ -3,6 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createBackend, memoryStorage } from '../src/server/backend.js';
 import { evaluate } from '../src/server/ai.js';
+import { hourLabel } from '../src/server/model.js';
 
 function setup(seed = 42) {
   let now = Date.UTC(2026, 8, 28, 9, 0, 0);
@@ -289,8 +290,233 @@ test('R-22 / R-23 : évaluation reproductible avec la même graine', () => {
 
 test('Tous les scénarios se préparent sans erreur', async () => {
   const t = setup(99);
-  for (const code of ['SC-01', 'SC-02', 'SC-03', 'SC-04', 'SC-05', 'SC-06', 'SC-07', 'SC-08', 'SC-09', 'SC-10', 'SC-11', 'SC-12', 'SC-13', 'SC-14', 'SC-15', 'SC-16']) {
+  for (const code of ['SC-01', 'SC-02', 'SC-03', 'SC-04', 'SC-05', 'SC-06', 'SC-07', 'SC-08', 'SC-09', 'SC-10', 'SC-11', 'SC-12', 'SC-13', 'SC-14', 'SC-15', 'SC-16', 'SC-17']) {
     const r = await t.api.exec(t.token, 'demo.scenario', { code });
     assert.equal(r.ok, true, code + ' : ' + (r.error && r.error.message));
   }
+});
+
+test('SC-17 : démo en direct, du site des offres à la note du technicien', async () => {
+  const t = setup(7);
+  const run = ok(await t.api.exec(t.token, 'demo.scenario', { code: 'SC-17' }));
+  const notifs = (tok, re) => t.api.q(tok, 'notifications').filter(n => re.test(n.title));
+  // 1. Achat : paiement simulé, dossier créé, nouveau client jouable. Rejouer la même demande ne crée rien de plus.
+  const bad = await t.api.exec(t.token, 'shop.purchase', { offerId: 'confort', zone: 'abobo', name: 'Bryan Test', phone: '0700000001', street: 'Rue 12' });
+  assert.equal(bad.ok, false);
+  const args = { offerId: 'confort', zone: 'cocody', name: 'Bryan Test', phone: '07 00 00 00 01', street: 'Riviera 3, rue des Lilas', building: 'maison' };
+  const buy = ok(await t.api.exec(t.token, 'shop.purchase', args, { idemKey: 'achat-1' }));
+  const again = await t.api.exec(t.token, 'shop.purchase', args, { idemKey: 'achat-1' });
+  assert.equal(again.replayed, true); assert.equal(again.data.id, buy.id);
+  assert.equal(t.ws().orders.filter(o => o.source === 'Site des offres (démo)').length, 1);
+  const oid = buy.id;
+  const cl = t.api.switchUser(t.token, buy.userId);
+  let v = t.api.q(cl, 'client.order', { orderId: oid });
+  assert.equal(v.order.state, 'PREPARATION'); assert.equal(v.order.payment.status, 'confirme'); assert.equal(v.order.payment.amount, 35000);
+  assert.equal(v.dossier.status, 'a_completer'); assert.equal(Math.round((v.dossier.dueAt - t.ws().clock) / 3600e3), 24);
+  const nadia = t.as('conseiller'); const herve = t.as('planificateur');
+  assert.equal(notifs(nadia, /Nouveau client/).length, 1);
+  // 2. Deux photos sur trois (dont une floue), repère, créneau : le dossier part incomplet. Une seule alerte chez Nadia.
+  const up = (type, quality) => t.api.exec(cl, 'doc.upload', { orderId: oid, type, name: type + '.jpg', size: 90000, mime: 'image/jpeg', quality });
+  ok(await up('cni_recto', { w: 1280, h: 860, bright: 130, sharp: 60 }));
+  const blurry = ok(await up('selfie_cni', { w: 1280, h: 960, bright: 120, sharp: 6 }));
+  assert.deepEqual(blurry.check.issues, ['floue']);
+  assert.equal(notifs(nadia, /Nouvelle pièce|Pièce à valider/).length, 0);
+  const slot = t.api.q(cl, 'client.availability', { orderId: oid }).slots.find(s => s.left > 0);
+  const short = await t.api.exec(cl, 'dossier.submit', { orderId: oid, info: { landmark: 'ici' }, date: slot.date, slot: slot.slot });
+  assert.equal(short.ok, false);
+  const st = ok(await t.api.exec(cl, 'dossier.submit', { orderId: oid, info: { landmark: 'portail vert après la pharmacie' }, date: slot.date, slot: slot.slot }));
+  assert.equal(st.status, 'incomplet'); assert.deepEqual(st.missing.map(m => m.type), ['cni_verso']);
+  assert.equal(notifs(nadia, /Dossier incomplet/).length, 1);
+  assert.equal(notifs(herve, /Créneau demandé/).length, 1);
+  assert.ok(t.api.q(nadia, 'ops.queues').dossiers.some(r => r.id === oid && r.dossier.status === 'incomplet'));
+  ok(await t.api.exec(nadia, 'dossier.ask', { orderId: oid, text: 'Le selfie est flou, merci de le reprendre.' }));
+  assert.ok(notifs(cl, /incomplet/).length >= 1);
+  // 3. Le client complète ; Hervé ne peut pas valider tant que Nadia n'a pas validé les pièces.
+  ok(await up('cni_verso', { w: 1280, h: 860, bright: 128, sharp: 55 }));
+  ok(await up('selfie_cni', { w: 1280, h: 960, bright: 120, sharp: 40 }));
+  t.tick(8000); await t.api.pump(t.wsId);
+  assert.equal(t.api.q(cl, 'client.order', { orderId: oid }).dossier.status, 'a_verifier');
+  const tooSoon = await t.api.exec(herve, 'dossier.validate', { orderId: oid, time: '09:00' });
+  assert.equal(tooSoon.ok, false); assert.equal(tooSoon.error.code, 'pieces');
+  for (const d of t.ws().documents.filter(d => d.orderId === oid && d.status === 'a_valider')) ok(await t.api.exec(nadia, 'doc.review', { docId: d.id, decision: 'valide' }));
+  assert.equal(t.api.q(cl, 'client.order', { orderId: oid }).dossier.status, 'verifie');
+  assert.equal(notifs(herve, /Dossier vérifié/).length, 1);
+  // 4. Hervé voit qui est libre, choisit l'heure : la cliente reçoit « Brice viendra le … à … ».
+  const free = t.api.q(herve, 'ops.techFree', { orderId: oid });
+  const team = free.teams.find(x => x.canTake && x.hours.some(h => h.free));
+  const hour = team.hours.find(h => h.free).h;
+  const wrongHour = await t.api.exec(herve, 'dossier.validate', { orderId: oid, teamId: team.id, time: '23:00' });
+  assert.equal(wrongHour.ok, false);
+  ok(await t.api.exec(herve, 'dossier.validate', { orderId: oid, teamId: team.id, time: hour }));
+  v = t.api.q(cl, 'client.order', { orderId: oid });
+  assert.equal(v.order.state, 'RDV_CONFIRME'); assert.equal(v.appt.time, hour); assert.equal(v.dossier.status, 'valide');
+  const firstTech = team.techName.split(' ')[0];
+  assert.ok(notifs(cl, new RegExp(firstTech + ' viendra le .* à ' + hourLabel(hour))).length === 1);
+  assert.notEqual(t.ws().notifications.filter(n => n.userId === buy.userId).some(n => /Choisissez votre créneau/.test(n.title)), true);
+  // 5. Préparation cochée : le technicien est prévenu. Départ : trajet suivi, alertes à 2 min puis à l'arrivée.
+  for (const id of ['presence', 'acces', 'prise']) ok(await t.api.exec(cl, 'prep.toggle', { orderId: oid, id, value: true }));
+  const wo = t.ws().workOrders.find(w => w.orderId === oid);
+  const tech = t.api.switchUser(t.token, wo.techUserId);
+  assert.equal(notifs(tech, /client est prêt/).length, 1);
+  const cur = () => t.ws().workOrders.find(w => w.id === wo.id);
+  const act = async (action, a) => ok(await t.api.exec(tech, 'wo.action', { woId: wo.id, action, args: a, expectedVersion: cur().version }));
+  await act('depart', {});
+  v = t.api.q(cl, 'client.order', { orderId: oid });
+  assert.equal(v.mission.track.durMs, 4 * 60e3); assert.equal(v.mission.track.to, 'cocody');
+  t.tick(2 * 60e3 + 500); await t.api.pump(t.wsId);
+  assert.equal(notifs(cl, /arrive dans 2 minutes/).length, 1);
+  t.tick(2 * 60e3); await t.api.pump(t.wsId);
+  assert.equal(notifs(cl, /tout près/).length, 1);
+  assert.equal(cur().status, 'en_route'); // le serveur ne change jamais la mission à la place du technicien
+  await act('arrive', {});
+  assert.equal(notifs(cl, /est arrivé/).length, 1);
+  await act('start', {});
+  await act('checklist', { values: { puissance: -18, pto: true, cheminement: true, ont_led: true } });
+  await act('serial', { serial: t.ws().equipment.find(e => e.status === 'stock' && e.model.includes('ZTE')).serial });
+  await act('photo', { name: 'box.jpg' });
+  await act('reception', { mode: 'code', code: cur().receptionCode, status: 'accord' });
+  await act('finish', {});
+  // 6. Note du technicien, une seule fois ; une note basse va au superviseur.
+  const r1 = ok(await t.api.exec(cl, 'tech.rate', { orderId: oid, score: 2, clear: false, problem: true, comment: 'Il est reparti sans expliquer la box.' }));
+  assert.equal(r1.score, 2);
+  assert.equal((await t.api.exec(cl, 'tech.rate', { orderId: oid, score: 5 })).ok, false);
+  assert.equal(notifs(tech, /Note du client/).length, 1);
+  assert.ok(notifs(t.as('superviseur'), /Visite à revoir/).length >= 1);
+  // 7. Appel au service client : sonne chez Nadia, décroché, terminé avec une note ; puis un appel manqué devient un rappel.
+  const call = ok(await t.api.exec(cl, 'call.start', { orderId: oid, reason: 'Question sur la box' }));
+  assert.equal((await t.api.exec(cl, 'call.start', { orderId: oid })).ok, false);
+  assert.equal(t.api.q(nadia, 'ops.calls')[0].status, 'sonne');
+  ok(await t.api.exec(nadia, 'call.answer', { id: call.id }));
+  t.tick(65e3);
+  const ended = ok(await t.api.exec(nadia, 'call.end', { id: call.id, note: 'Explications données sur le Wi-Fi.' }));
+  assert.equal(ended.status, 'termine');
+  assert.ok(t.api.q(cl, 'client.order', { orderId: oid }).timeline.some(e => /Appel avec Nadia/.test(e.text)));
+  const call2 = ok(await t.api.exec(cl, 'call.start', { orderId: oid }));
+  t.tick(46e3); await t.api.pump(t.wsId);
+  assert.equal(t.ws().calls.find(c => c.id === call2.id).status, 'manque');
+  assert.ok(t.ws().callbacks.some(c => c.fromCall === call2.id && c.status === 'demande'));
+  // Le guide du scénario a tout coché sur l'état réel.
+  const sc = t.api.q(t.token, 'labo.state').scenarios.find(x => x.code === 'SC-17');
+  assert.ok(sc.steps.every(s => s.done), JSON.stringify(sc.steps.map(s => s.done)));
+  assert.ok(run);
+});
+
+test('Démo en direct : deux visites à la même heure pour un technicien sont refusées, la photo est jugée sur des règles simples', async () => {
+  const t = setup(11);
+  const { photoCheck } = await import('../src/server/domain.js');
+  assert.deepEqual(photoCheck({ w: 300, h: 200, bright: 20, sharp: 5 }).issues, ['trop petite', 'trop sombre', 'floue']);
+  assert.equal(photoCheck({ w: 1200, h: 900, bright: 140, sharp: 50 }).ok, true);
+  assert.equal(photoCheck({ w: 'x' }), null);
+  const herve = t.as('planificateur'); const nadia = t.as('conseiller');
+  const mkOne = async (name, key) => {
+    const b = ok(await t.api.exec(t.token, 'shop.purchase', { offerId: 'essentiel', zone: 'cocody', name, phone: '0700000002', street: 'Angré, rue 8', landmark: 'face au maquis du carrefour' }, { idemKey: key }));
+    const c = t.api.switchUser(t.token, b.userId);
+    for (const type of ['cni_recto', 'cni_verso', 'selfie_cni']) ok(await t.api.exec(c, 'doc.upload', { orderId: b.id, type, name: type + '.jpg', size: 9e4, mime: 'image/jpeg', quality: { w: 1200, h: 900, bright: 130, sharp: 50 } }));
+    return { b, c };
+  };
+  const A = await mkOne('Cliente Un', 'k1'), B = await mkOne('Cliente Deux', 'k2');
+  const slot = t.api.q(A.c, 'client.availability', { orderId: A.b.id }).slots.find(s => s.left > 1);
+  ok(await t.api.exec(A.c, 'dossier.submit', { orderId: A.b.id, info: {}, date: slot.date, slot: slot.slot }));
+  ok(await t.api.exec(B.c, 'dossier.submit', { orderId: B.b.id, info: {}, date: slot.date, slot: slot.slot }));
+  t.tick(8000); await t.api.pump(t.wsId);
+  for (const d of t.ws().documents.filter(d => d.status === 'a_valider')) ok(await t.api.exec(nadia, 'doc.review', { docId: d.id, decision: 'valide' }));
+  const team = t.api.q(herve, 'ops.techFree', { orderId: A.b.id }).teams.find(x => x.canTake);
+  const h = team.hours[0].h;
+  ok(await t.api.exec(herve, 'dossier.validate', { orderId: A.b.id, teamId: team.id, time: h }));
+  const freeB = t.api.q(herve, 'ops.techFree', { orderId: B.b.id }).teams.find(x => x.id === team.id);
+  assert.equal(freeB.hours.find(x => x.h === h).free, false);
+  if (freeB.canTake) {
+    const clash = await t.api.exec(herve, 'dossier.validate', { orderId: B.b.id, teamId: team.id, time: h });
+    assert.equal(clash.ok, false); assert.equal(clash.error.code, 'heure');
+  }
+});
+
+test('Démo en direct : garde-fous du dossier en ligne (note d’appel, pièces relues, heure gardée, matériel)', async () => {
+  const t = setup(1);
+  const herve = t.as('planificateur'); const nadia = t.as('conseiller');
+  const notifs = (tok, re) => t.api.q(tok, 'notifications').filter(n => re.test(n.title));
+  const docs = id => t.ws().documents.filter(d => d.orderId === id);
+  const buy = async (name, key, upload = true) => {
+    const b = ok(await t.api.exec(t.token, 'shop.purchase', { offerId: 'essentiel', zone: 'cocody', name, phone: '0700000003', street: 'Angré, rue 9', landmark: 'face au maquis du carrefour' }, { idemKey: key }));
+    const c = t.api.switchUser(t.token, b.userId);
+    if (upload) for (const type of ['cni_recto', 'cni_verso', 'selfie_cni']) ok(await t.api.exec(c, 'doc.upload', { orderId: b.id, type, name: type + '.jpg', size: 9e4, mime: 'image/jpeg', quality: { w: 1200, h: 900, bright: 130, sharp: 50 } }));
+    return { b, c, id: b.id };
+  };
+  const submit = (X, slot) => t.api.exec(X.c, 'dossier.submit', { orderId: X.id, info: {}, date: slot.date, slot: slot.slot });
+  const validateAll = async id => { t.tick(8000); await t.api.pump(t.wsId); for (const d of docs(id).filter(d => d.status === 'a_valider')) ok(await t.api.exec(nadia, 'doc.review', { docId: d.id, decision: 'valide' })); };
+  // 1. Ancien chemin « vérification technique » puis « confirmer » : refusé pour un dossier en ligne.
+  const A = await buy('Cliente Alpha', 'a1', false);
+  assert.equal((await t.api.exec(herve, 'order.markReady', { orderId: A.id })).ok, false);
+  const slots = t.api.q(A.c, 'client.availability', { orderId: A.id }).slots.filter(s => s.left > 0);
+  ok(await submit(A, slots[0]));
+  assert.equal((await t.api.exec(herve, 'order.markReady', { orderId: A.id })).ok, false);
+  const conf = await t.api.exec(herve, 'appt.confirm', { orderId: A.id });
+  assert.equal(conf.ok, false);
+  assert.equal(t.ws().orders.find(o => o.id === A.id).state, 'PREPARATION');
+  // 2. Pièces validées AVANT l'envoi : Hervé reçoit directement « Dossier vérifié : à planifier ».
+  const B = await buy('Cliente Bravo', 'b1');
+  await validateAll(B.id);
+  // Créneau où au moins deux équipes ont de la place (pour l'étape 4).
+  const multi = t.api.q(B.c, 'client.availability', { orderId: B.id }).slots.find(s => s.teams.length >= 2 && s.left >= 3);
+  const st = ok(await submit(B, multi));
+  assert.equal(st.status, 'verifie');
+  assert.equal(notifs(herve, /Dossier vérifié/).length, 1);
+  assert.equal(notifs(nadia, /Dossier à vérifier/).length, 0);
+  // 3. Une nouvelle photo (non relue) remplace une pièce validée : on ne peut plus valider le dossier.
+  ok(await t.api.exec(B.c, 'doc.upload', { orderId: B.id, type: 'selfie_cni', name: 'selfie2.jpg', size: 9e4, mime: 'image/jpeg', quality: { w: 1200, h: 900, bright: 130, sharp: 3 } }));
+  const free = t.api.q(herve, 'ops.techFree', { orderId: B.id });
+  assert.equal(free.docsOk, false);
+  const team = free.teams.find(x => x.canTake && x.hours.some(h => h.free));
+  const early = await t.api.exec(herve, 'dossier.validate', { orderId: B.id, teamId: team.id, time: team.hours.find(h => h.free).h });
+  assert.equal(early.ok, false); assert.equal(early.error.code, 'pieces');
+  await validateAll(B.id);
+  const hour = t.api.q(herve, 'ops.techFree', { orderId: B.id }).teams.find(x => x.id === team.id).hours.find(h => h.free).h;
+  ok(await t.api.exec(herve, 'dossier.validate', { orderId: B.id, teamId: team.id, time: hour }));
+  assert.ok(notifs(B.c, new RegExp('viendra le .* à ' + hourLabel(hour) + '$')).length === 1);
+  assert.equal(notifs(B.c, /Rappel : visite demain/).length, 0);
+  // 4. Réaffecter sur une équipe déjà attendue ailleurs à la même heure : refusé.
+  const C = await buy('Cliente Charlie', 'c1');
+  const slotB = t.ws().appointments.find(a => a.orderId === B.id && a.status === 'confirme');
+  ok(await submit(C, { date: slotB.date, slot: slotB.slot }));
+  await validateAll(C.id);
+  const other = t.api.q(herve, 'ops.techFree', { orderId: C.id }).teams.find(x => x.id !== team.id && x.canTake && x.hours.find(h => h.h === hour).free);
+  assert.ok(other, 'une autre équipe libre à la même heure');
+  ok(await t.api.exec(herve, 'dossier.validate', { orderId: C.id, teamId: other.id, time: hour }));
+  const clash = await t.api.exec(herve, 'appt.reassign', { orderId: B.id, teamId: other.id, reason: 'Technicien malade aujourd’hui' });
+  assert.equal(clash.ok, false); assert.equal(clash.error.code, 'heure');
+  // 5. Le client déplace sa visite déjà fixée : l'heure n'est pas perdue en silence, Hervé la refixe.
+  const next = t.api.q(B.c, 'client.availability', { orderId: B.id }).slots.find(s => s.left > 0 && s.teams.includes(team.id) && !(s.date === slotB.date && s.slot === slotB.slot));
+  const hold = ok(await t.api.exec(B.c, 'appt.hold', { orderId: B.id, date: next.date, slot: next.slot }));
+  const moved = ok(await t.api.exec(B.c, 'appt.book', { orderId: B.id, holdId: hold.id }));
+  assert.equal(moved.status, 'reserve');
+  assert.equal(t.ws().orders.find(o => o.id === B.id).state, 'PRET_A_PLANIFIER');
+  assert.equal(notifs(herve, /Heure à refixer/).length, 1);
+  const h2 = t.api.q(herve, 'ops.techFree', { orderId: B.id }).teams.find(x => x.canTake && x.hours.some(h => h.free));
+  ok(await t.api.exec(herve, 'dossier.validate', { orderId: B.id, teamId: h2.id, time: h2.hours.find(h => h.free).h }));
+  assert.ok(t.ws().appointments.find(a => a.id === t.ws().orders.find(o => o.id === B.id).apptId).time);
+  // 6. La note interne de l'appel ne part jamais chez le client ni chez son représentant.
+  const call = ok(await t.api.exec(B.c, 'call.start', { orderId: B.id, reason: 'Question' }));
+  ok(await t.api.exec(nadia, 'call.answer', { id: call.id }));
+  ok(await t.api.exec(nadia, 'call.end', { id: call.id, note: 'NOTE INTERNE : client pressé' }));
+  const seen = t.api.q(B.c, 'client.order', { orderId: B.id }).calls[0];
+  assert.equal(seen.note, undefined); assert.equal(seen.toId, undefined); assert.equal(seen.mine, true);
+  assert.equal(JSON.stringify(t.api.q(B.c, 'client.order', { orderId: B.id })).includes('NOTE INTERNE'), false);
+  // 7. Matériel suspendu (politique « bloquer ») : l'envoi du dossier ne réserve aucun créneau.
+  const D2 = await buy('Cliente Delta', 'd1');
+  ok(await t.api.exec(t.token, 'demo.flag', { key: 'equipmentShortage', value: true }));
+  const admin = t.as('admin');
+  ok(await t.api.exec(admin, 'config.set', { key: 'policyEquipment', value: 'bloquer' }));
+  const blocked = await submit(D2, slots[1] || slots[0]);
+  assert.equal(blocked.ok, false); assert.equal(blocked.error.code, 'materiel');
+});
+
+test('Démo en direct : le représentant ne voit pas la note interne et n’est pas pris dans l’appel du client', async () => {
+  const t = setup(5);
+  const awa = t.api.switchUser(t.token, 'U1'); const nadia = t.as('conseiller'); const rep = t.as('representant');
+  const c = ok(await t.api.exec(awa, 'call.start', { orderId: 'O1' }));
+  ok(await t.api.exec(nadia, 'call.answer', { id: c.id }));
+  const seen = t.api.q(rep, 'client.order', { orderId: 'O1' }).calls.find(x => x.id === c.id);
+  assert.equal(seen.mine, false);
+  ok(await t.api.exec(nadia, 'call.end', { id: c.id, note: 'note interne' }));
+  assert.equal(t.api.q(rep, 'client.order', { orderId: 'O1' }).calls.find(x => x.id === c.id).note, undefined);
 });

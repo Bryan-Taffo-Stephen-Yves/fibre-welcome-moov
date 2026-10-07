@@ -1,8 +1,8 @@
 // Espace terrain (TE-01 à TE-08) : l’application du technicien. Missions, étapes, preuves, travail hors ligne.
 // Sur grand écran, le téléphone est entouré de cartes d’accompagnement (profil, carte, synchronisation).
-import { api, useQ, call, toast, useOnline, setOnline, isOnline, readQueue, updateQueue, replay, watchQueue, prepareImage, putImage } from './platform.js';
-import { Btn, AsyncBtn, Tag, Sim, Explain, Field, Modal, Empty, Icon, Picture, NotifBell, Avatar, Say, Ring, Bars, AbidjanMap, VanScene, HouseScene, firstName, fmtDate, fmtDateTime, fmtAgo, slotLabel, BLOCKER_TYPES } from './kit.jsx';
-import { CHECKLIST_TECH, ZONES, DOC_TYPES } from '../server/model.js';
+import { api, useQ, call, toast, useOnline, setOnline, isOnline, readQueue, updateQueue, replay, watchQueue, prepareImage, putImage, useNow } from './platform.js';
+import { Btn, AsyncBtn, Tag, Sim, Explain, Field, Modal, Empty, Icon, Picture, NotifBell, Avatar, Say, Ring, Bars, AbidjanMap, VanScene, HouseScene, firstName, fmtDate, fmtDateTime, fmtAgo, slotLabel, BLOCKER_TYPES, NotifPopups, TrackMap, hourLabel, trackInfo, deName } from './kit.jsx';
+import { CHECKLIST_TECH, ZONES, DOC_TYPES, BASE_NAMES, PREP_CHECKLIST } from '../server/model.js';
 const React = window.React;
 const { useState, useEffect, useRef } = React;
 
@@ -24,6 +24,7 @@ const SCAN = S(<><path d="M4 8V6a2 2 0 012-2h2M16 4h2a2 2 0 012 2v2M20 16v2a2 2 
 const tz = { timeZone: 'Africa/Abidjan' };
 const hhmm = t => (t ? new Intl.DateTimeFormat('fr-FR', { ...tz, hour: '2-digit', minute: '2-digit' }).format(t).replace(':', 'h') : '');
 const dayShort = t => new Intl.DateTimeFormat('fr-FR', { ...tz, weekday: 'short', day: 'numeric' }).format(t);
+const dayLong = t => new Intl.DateTimeFormat('fr-FR', { ...tz, weekday: 'long', day: 'numeric', month: 'short' }).format(t);
 const zoneOf = commune => (ZONES.find(z => z.name === commune) || {}).id;
 const toNum = v => (v === '' || v == null ? '' : Number(String(v).replace(',', '.').replace('−', '-')));
 const isWaiting = s => s === 'en attente de réseau' || s === 'à réessayer';
@@ -37,7 +38,9 @@ const INCIDENTS = [
   ['AUTRE', 'Autre souci (outil, échelle, retard…)', 'Seul le planificateur est prévenu. Le client ne voit rien.'],
 ];
 const byRank = (a, b) => (RANK[a.status] - RANK[b.status]) || (((a.appt && a.appt.date) || 0) - ((b.appt && b.appt.date) || 0)) || ((a.appt && a.appt.slot) || '').localeCompare((b.appt && b.appt.slot) || '');
-const when = w => (w.appt ? fmtDate(w.appt.date) + ' · ' + slotLabel(w.appt.slot) : 'Date à fixer');
+const when = w => (w.appt ? fmtDate(w.appt.date) + ' · ' + (w.appt.time ? hourLabel(w.appt.time) : slotLabel(w.appt.slot)) : 'Date à fixer');
+// « Agence du Plateau » → « Agence Plateau » : assez court pour l'étiquette de la carte.
+const baseShort = id => (BASE_NAMES[id] || 'Agence').replace(/ (du|de|d’) ?/, ' ');
 
 export function FieldApp({ token }) {
   const me = useQ(token, 'me');
@@ -67,10 +70,11 @@ export function FieldApp({ token }) {
   return <div className="fd-wrap">
     <div className="fd-stage">
       <div className="phone fd-phone" data-tour="field-phone">
+        <NotifPopups key={token} token={token} variant="phone" onOpen={n => { const w = list.find(x => x.orderId === n.orderId); if (w) openMission(w.id); }} />
         <div className="phone-top fd-top">
           <div className="fd-hello">
             <Avatar name={user.name} size={42} dot={online ? 'ok' : 'off'} />
-            <span className="fd-hello-t"><b>Bonjour {firstName(user.name)}</b><span>{user.contractor ? user.contractor + ' pour Moov' : 'Moov Terrain'}</span></span>
+            <span className="fd-hello-t" title={user.contractor ? user.contractor + ' pour Moov' : 'Moov Terrain'}><span>Bonjour,</span><b>{firstName(user.name)}</b></span>
           </div>
           <NotifBell token={token} onOpen={oid => { const w = list.find(x => x.orderId === oid); if (w) openMission(w.id); }} />
           <button type="button" className={'fd-net' + (online ? '' : ' off')} onClick={() => setOnline(!online, token)} data-tour="field-network" aria-pressed={!online} title={online ? 'Couper le réseau de cet onglet (simulation)' : 'Rétablir le réseau'}>
@@ -83,7 +87,7 @@ export function FieldApp({ token }) {
             <span><b>Mode hors ligne (simulation)</b>Vos actions sont gardées sur le téléphone et partiront une seule fois au retour du réseau. L’activation et les nouvelles réservations attendent le réseau.</span>
           </div>}
           {tab === 'queue' ? <Queue token={token} missions={list} />
-            : cur ? <Mission key={cur.id} token={token} wo={cur} onBack={() => setSel(null)} online={online} onQueue={() => setTab('queue')} />
+            : cur ? <Mission key={cur.id} token={token} wo={cur} ws={me.data.ws} onBack={() => setSel(null)} online={online} onQueue={() => setTab('queue')} />
             : <Home list={list} live={live} waitBy={waitBy} onOpen={openMission} />}
         </div>
         <nav className="phone-tabs fd-tabs" aria-label="Application terrain">
@@ -99,7 +103,7 @@ export function FieldApp({ token }) {
         </section>
       </aside>
       <aside className="fd-side fd-side-r" aria-label="Carte et synchronisation">
-        <SideMap live={live} current={cur} onOpen={openMission} />
+        <SideMap live={live} current={cur} onOpen={openMission} ws={me.data.ws} />
         <SideSync q={q} online={online} name={firstName(user.name)} onOpen={() => setTab('queue')} />
       </aside>
     </div>
@@ -153,7 +157,7 @@ function MissionCard({ wo, waiting, onOpen, closed }) {
 }
 
 // ---------- Détail d’une mission ----------
-function Mission({ token, wo, onBack, online, onQueue }) {
+function Mission({ token, wo, ws, onBack, online, onQueue }) {
   const [vals, setVals] = useState(() => ({ ...wo.checklist }));
   const [serial, setSerial] = useState(wo.serial || '');
   const [code, setCode] = useState('');
@@ -172,6 +176,10 @@ function Mission({ token, wo, onBack, online, onQueue }) {
   const [incType, setIncType] = useState('MATERIEL_PANNE');
   const [incText, setIncText] = useState('');
   const live = LIVE.includes(st);
+  // Pendant le trajet, l'écran se rafraîchit chaque seconde (minutes restantes, camionnette sur la carte).
+  useNow(st === 'en_route' ? 1000 : 60000);
+  const trip = st === 'en_route' && wo.track ? trackInfo(wo.track, ws) : null;
+  const there = !!trip && (trip.p >= 1 || wo.track.there);
   const a = wo.address;
   const fillDemo = () => { const v = { puissance: (-17 - Math.random() * 5).toFixed(1), pto: true, cheminement: true, ont_led: true, wifi: true }; setVals(v); setSerial('ZTE-F670-4821' + Math.floor(Math.random() * 10)); };
   const scan = () => setSerial('ZTE-F670-4821' + Math.floor(Math.random() * 10));
@@ -211,7 +219,7 @@ function Mission({ token, wo, onBack, online, onQueue }) {
   const reached = REACHED[st] ?? 0;
   const flow = {
     affectee: ['Prêt à partir ?', 'Le client est prévenu dès que vous partez.', 'depart', 'Je pars'],
-    en_route: ['En route vers ' + firstName(wo.contactName), wo.times.depart ? 'Parti à ' + hhmm(wo.times.depart) + '.' : 'Bonne route.', 'arrive', 'Je suis arrivé'],
+    en_route: ['En route vers ' + firstName(wo.contactName), wo.times.depart ? 'Parti à ' + hhmm(wo.times.depart) + '. Le client suit votre trajet.' : 'Bonne route.', 'arrive', 'Arrivé'],
     sur_place: ['Vous êtes sur place', (wo.times.arrive ? 'Arrivé à ' + hhmm(wo.times.arrive) + '. ' : '') + 'Démarrez quand les travaux commencent.', 'start', 'Démarrer l’installation'],
     en_cours: ['Installation en cours', (wo.times.start ? 'Commencée à ' + hhmm(wo.times.start) + '. ' : '') + doneCount + ' étape' + (doneCount > 1 ? 's' : '') + ' sur 4 faite' + (doneCount > 1 ? 's' : '') + '.'],
     terminee: ['Mission terminée', wo.times.end ? 'Le ' + fmtDateTime(wo.times.end) + '.' : ''],
@@ -224,10 +232,23 @@ function Mission({ token, wo, onBack, online, onQueue }) {
       <Tag tone={WO_TONE[st]}>{WO_LABEL[st]}</Tag>
     </div>
 
+    {/* L'action du moment (« Je pars », « Arrivé »…) d'abord : visible sans défiler dans le cadre du téléphone. */}
+    {flow && <section className="card-dark fd-flow">
+      <ol className="fd-steps" aria-label={'Étape ' + Math.min(reached + 1, 4) + ' sur 4'}>
+        {STEPS.map((s, i) => <li key={s} className={i < reached ? 'done' : i === reached ? 'now' : ''} aria-current={i === reached ? 'step' : undefined}><span className="fd-dot">{i < reached ? Icon.check : i + 1}</span>{s}</li>)}
+      </ol>
+      <div className="fd-flow-t"><b>{flow[0]}</b><span>{flow[1]}</span></div>
+      {trip && <Trip wo={wo} info={trip} there={there} height={170} />}
+      {st === 'en_route' && !wo.track && !online && <div className="fd-trip-off"><span className="fd-ic">{WIFI_OFF}</span><span>Départ gardé sur le téléphone. Le client sera prévenu et le trajet s’affichera sur la carte au retour du réseau.</span></div>}
+      {flow[2] && <AsyncBtn className={'fd-lime' + (there ? ' fd-pulse' : '')} block onClick={() => act(flow[2])} data-tour={flow[2] === 'start' ? 'field-start' : undefined}>{flow[3]}{Icon.right}</AsyncBtn>}
+    </section>}
+
     <section className="card fd-client">
       <span className="fd-who"><Avatar name={wo.contactName} size={52} /><span className="fd-who-t"><b className="fd-big">{wo.contactName}</b><span>{wo.offer}</span></span></span>
       <ul className="fd-info">
-        <li><span className="fd-ic">{Icon.clock}</span><span><b>{wo.appt ? fmtDate(wo.appt.date) : 'Date à fixer'}</b>{wo.appt ? ' · ' + slotLabel(wo.appt.slot) : ''}</span></li>
+        <li><span className="fd-ic">{Icon.clock}</span>{wo.appt && wo.appt.time
+          ? <span><b>{dayLong(wo.appt.date)} à {hourLabel(wo.appt.time)}</b><em>Créneau {slotLabel(wo.appt.slot)}, heure confirmée par le planificateur</em></span>
+          : <span><b>{wo.appt ? fmtDate(wo.appt.date) : 'Date à fixer'}</b>{wo.appt ? ' · ' + slotLabel(wo.appt.slot) : ''}</span>}</li>
         <li><span className="fd-ic">{Icon.pin}</span><span><b>{a.street}, {a.commune}</b>{a.floor ? ' · ' + a.floor : ''}<em>Repère : {a.landmark || 'aucun'} · {a.building}</em></span></li>
         {a.accessNotes && <li><span className="fd-ic">{Icon.lock}</span><span>Accès : {a.accessNotes}</span></li>}
         {a.onsiteContact && <li><span className="fd-ic">{Icon.user}</span><span>Personne présente : <b>{a.onsiteContact}</b></span></li>}
@@ -236,10 +257,10 @@ function Mission({ token, wo, onBack, online, onQueue }) {
         <summary>Voir le détail</summary>
         <div className="stack-s small">
           <span>Box attendue : <b>{wo.equipmentModel}</b></span>
-          <span>Préparation du client : {Object.values(wo.prep || {}).filter(Boolean).length} point(s) confirmé(s).</span>
           <span className="muted">Contact avec le client via l’application uniquement.</span>
         </div>
       </details>
+      {live && <Prep wo={wo} />}
       {(wo.documents || []).length > 0 && <div className="fd-docs">
         <b className="small">Pièces du client pour cette visite</b>
         {wo.documents.map(d => <div key={d.id} className="fd-doc">
@@ -257,13 +278,6 @@ function Mission({ token, wo, onBack, online, onQueue }) {
     {st === 'annulee' && <div className="card fd-state bad"><span className="fd-ic">{Icon.x}</span><span><b>Mission retirée ou annulée</b>{wo.cancelReason ? 'Motif : ' + wo.cancelReason + '. ' : 'La planification l’a retirée. '}Plus aucune action n’est possible.</span></div>}
     {st === 'echec' && wo.failure && <div className="card fd-state bad"><span className="fd-ic">{Icon.alert}</span><span><b>Visite non réalisée : {BLOCKER_TYPES[wo.failure.type].label}</b>{wo.failure.comment ? '« ' + wo.failure.comment + ' ». ' : ''}Un conseiller reprend le dossier.</span></div>}
 
-    {flow && <section className="card-dark fd-flow">
-      <ol className="fd-steps" aria-label={'Étape ' + Math.min(reached + 1, 4) + ' sur 4'}>
-        {STEPS.map((s, i) => <li key={s} className={i < reached ? 'done' : i === reached ? 'now' : ''} aria-current={i === reached ? 'step' : undefined}><span className="fd-dot">{i < reached ? Icon.check : i + 1}</span>{s}</li>)}
-      </ol>
-      <div className="fd-flow-t"><b>{flow[0]}</b><span>{flow[1]}</span></div>
-      {flow[2] && <AsyncBtn className="fd-lime" block onClick={() => act(flow[2])} data-tour={flow[2] === 'start' ? 'field-start' : undefined}>{flow[3]}{Icon.right}</AsyncBtn>}
-    </section>}
 
     {live && st !== 'en_cours' && <div className="fd-alt">
       {st !== 'sur_place' && <AsyncBtn size="s" kind="ghost" onClick={() => act('start')} data-tour="field-start">{Icon.tool}Démarrer l’installation</AsyncBtn>}
@@ -346,6 +360,7 @@ function Mission({ token, wo, onBack, online, onQueue }) {
       <HouseScene progress={0.7} height={96} />
       <b>Et maintenant ?</b>
       <span className="small">La demande d’activation est partie vers Moov. Le dossier n’est pas « actif » tant que le système ne l’a pas confirmé. <Sim what="activation simulée" /></span>
+      <Rating wo={wo} />
       <details className="fd-more">
         <summary>Voir le rapport</summary>
         <ul className="fd-kv">
@@ -374,6 +389,59 @@ function Mission({ token, wo, onBack, online, onQueue }) {
       </div>
       <Field label="Ce qui se passe" id="inc"><textarea id="inc" className="input" value={incText} onChange={e => setIncText(e.target.value)} placeholder="Ex. la box livrée ne s’allume pas" /></Field>
     </Modal>}
+  </div>;
+}
+
+// Trajet simulé vers le client, façon application de VTC : la carte, puis les minutes restantes.
+function Trip({ wo, info, there, height = 170 }) {
+  const t = wo.track;
+  return <div className={'fd-trip' + (there ? ' is-there' : '')}>
+    <TrackMap from={t.from} to={t.to} p={info.p} arrived={info.arrived} height={height} fromLabel={baseShort(t.from)} toLabel={firstName(wo.contactName)} />
+    <div className="fd-trip-eta">
+      <span className="fd-trip-ic">{there ? Icon.pin : Icon.clock}</span>
+      {there ? <span><b>Vous devriez être arrivé : touchez Arrivé</b></span>
+        : <span><b>Arrivée prévue dans {info.leftMin} min</b> · trajet simulé pour la démo</span>}
+    </div>
+  </div>;
+}
+
+// Ce que le client a coché dans son application avant la visite.
+const PREP_SHORT = { presence: 'Une personne majeure sera présente', acces: 'Vous pourrez entrer (gardien, portail)', prise: 'Une prise électrique est libre', passage: 'Passage du câble autorisé', animaux: 'Les animaux seront enfermés' };
+function Prep({ wo }) {
+  const p = wo.prep || {};
+  const items = PREP_CHECKLIST.filter(i => !i.when || i.when === wo.address.building);
+  const need = items.filter(i => i.need);
+  const okNeed = need.filter(i => p[i.id]).length;
+  const ready = okNeed === need.length;
+  const none = !items.some(i => p[i.id]);
+  return <div className={'fd-prep' + (ready ? ' ready' : '')}>
+    <div className="fd-prep-h">
+      <b className="small">Préparation du client</b>
+      {ready ? <span className="fd-ready">{Icon.check}Client prêt</span> : <Tag tone={none ? '' : 'warn'}>{okNeed} sur {need.length} indispensables</Tag>}
+    </div>
+    <ul className="fd-prep-l">{items.map(i => <li key={i.id} className={p[i.id] ? 'on' : ''}>
+      <span className="fd-prep-ck" aria-hidden="true">{p[i.id] ? Icon.check : null}</span>
+      <span>{PREP_SHORT[i.id] || i.label}{!i.need && <em> · conseillé</em>}<span className="sr-only">{p[i.id] ? ' : coché' : ' : pas coché'}</span></span>
+    </li>)}</ul>
+    {none && <span className="tiny muted">Le client n’a encore rien coché dans son application. Vous serez prévenu quand il sera prêt.</span>}
+  </div>;
+}
+
+// Note laissée par le client après la visite (étoiles, clarté, souci éventuel).
+function Rating({ wo }) {
+  const r = wo.rating;
+  if (!r) return <div className="fd-rate fd-rate-none"><Avatar name={wo.contactName} size={30} /><span className="small muted">{firstName(wo.contactName)} n’a pas encore noté la visite. Sa note apparaîtra ici.</span></div>;
+  return <div className="fd-rate">
+    <div className="fd-rate-h">
+      <Avatar name={wo.contactName} size={36} />
+      <span className="fd-who-t"><b>Note {deName(firstName(wo.contactName))}</b><span>{fmtDateTime(r.at)}</span></span>
+      <span className="fd-stars" role="img" aria-label={r.score + ' étoiles sur 5'}>{[1, 2, 3, 4, 5].map(i => <span key={i} className={i <= r.score ? 'on' : ''}>{Icon.star}</span>)}</span>
+    </div>
+    <div className="fd-rate-tags">
+      {r.clear != null && <Tag tone={r.clear ? 'ok' : 'warn'}>Explications claires : {r.clear ? 'oui' : 'non'}</Tag>}
+      <Tag tone={r.problem ? 'bad' : 'ok'}>{r.problem ? 'Souci signalé pendant la visite' : 'Aucun souci signalé'}</Tag>
+    </div>
+    {r.comment && <p className="fd-rate-c small">« {r.comment} »</p>}
   </div>;
 }
 
@@ -497,7 +565,9 @@ function SideProfile({ user, list, live, online }) {
   </section>;
 }
 
-function SideMap({ live, current, onOpen }) {
+function SideMap({ live, current, onOpen, ws }) {
+  const trip = current && current.status === 'en_route' && current.track ? current : live.find(w => w.status === 'en_route' && w.track);
+  if (trip) return <SideTrip wo={trip} ws={ws} onOpen={onOpen} />;
   const zones = {}; for (const w of live) { const z = zoneOf(w.address.commune); if (z) zones[z] = { count: ((zones[z] || {}).count || 0) + 1 }; }
   const focus = current && LIVE.includes(current.status) ? current : live[0];
   const sel = focus && zoneOf(focus.address.commune);
@@ -506,6 +576,18 @@ function SideMap({ live, current, onOpen }) {
     <div className="card-title"><h3>Adresses à visiter</h3><span className="tiny muted">{live.length} mission{live.length > 1 ? 's' : ''}</span></div>
     <AbidjanMap zones={zones} selected={sel} onPick={pick} height={190} />
     <span className="tiny muted">{live.length ? 'Touchez une commune pour ouvrir sa mission.' : 'Aucune adresse à visiter pour le moment.'}</span>
+  </section>;
+}
+
+// Grand écran : pendant un trajet, la carte suit la camionnette au lieu de montrer les communes.
+function SideTrip({ wo, ws, onOpen }) {
+  useNow(1000);
+  const info = trackInfo(wo.track, ws);
+  const there = info.p >= 1 || wo.track.there;
+  return <section className="card fd-card">
+    <div className="card-title"><h3>Trajet vers {firstName(wo.contactName)}</h3><Tag tone={there ? 'ok' : 'info'}>{there ? 'Sur place ?' : 'En route'}</Tag></div>
+    <Trip wo={wo} info={info} there={there} height={230} />
+    <button type="button" className="link-btn small fd-trip-open" onClick={() => onOpen(wo.id)}>Ouvrir la mission {wo.ref}{Icon.right}</button>
   </section>;
 }
 
