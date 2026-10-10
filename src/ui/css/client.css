@@ -167,7 +167,7 @@ select.input.cl-pick { border: 0; background-color: var(--surface); box-shadow: 
 .cl-check { position: relative; display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: 14px; background: var(--surface-2); cursor: pointer; min-height: 50px; font-size: 13.5px; line-height: 1.35; }
 .cl-check:hover { background: var(--surface-3); }
 .cl-check input { position: absolute; opacity: 0; width: 1px; height: 1px; margin: 0; }
-.cl-box { width: 24px; height: 24px; border-radius: 50%; border: 2px solid var(--ink-3); display: grid; place-items: center; flex: none; color: transparent; background: var(--surface); }
+.cl-box { width: 28px; height: 28px; border-radius: 8px; border: 2.5px solid var(--ink-3); display: grid; place-items: center; flex: none; color: transparent; background: var(--surface); }
 .cl-box svg { width: 14px; height: 14px; }
 .cl-check.on .cl-box { background: var(--ok); border-color: var(--ok); color: #fff; }
 .cl-check.on .cl-check-l { color: var(--ink-2); }
