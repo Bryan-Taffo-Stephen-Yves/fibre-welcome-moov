@@ -1,7 +1,8 @@
 // Espace terrain (TE-01 à TE-08) : l’application du technicien. Missions, étapes, preuves, travail hors ligne.
 // Sur grand écran, le téléphone est entouré de cartes d’accompagnement (profil, carte, synchronisation).
-import { api, useQ, call, toast, useOnline, setOnline, isOnline, readQueue, updateQueue, replay, watchQueue, prepareImage, putImage, useNow } from './platform.js';
+import { api, useQ, call, toast, useOnline, setOnline, isOnline, readQueue, updateQueue, replay, watchQueue, prepareImage, putImage, useNow, tabGet, tabSet, liveClock, photoIssues } from './platform.js';
 import { Btn, AsyncBtn, Tag, Sim, Explain, Field, Modal, Empty, Icon, Picture, NotifBell, Avatar, Say, Ring, Bars, AbidjanMap, VanScene, HouseScene, firstName, fmtDate, fmtDateTime, fmtAgo, slotLabel, BLOCKER_TYPES, NotifPopups, TrackMap, hourLabel, trackInfo, deName } from './kit.jsx';
+import { TrackCard } from './trackcard.jsx';
 import { CHECKLIST_TECH, ZONES, DOC_TYPES, BASE_NAMES, PREP_CHECKLIST } from '../server/model.js';
 const React = window.React;
 const { useState, useEffect, useRef } = React;
@@ -39,14 +40,30 @@ const INCIDENTS = [
 ];
 const byRank = (a, b) => (RANK[a.status] - RANK[b.status]) || (((a.appt && a.appt.date) || 0) - ((b.appt && b.appt.date) || 0)) || ((a.appt && a.appt.slot) || '').localeCompare((b.appt && b.appt.slot) || '');
 const when = w => (w.appt ? fmtDate(w.appt.date) + ' · ' + (w.appt.time ? hourLabel(w.appt.time) : slotLabel(w.appt.slot)) : 'Date à fixer');
+// Aide sur place : sujets proposés en un tap (les mots sont ceux que reconnaît le guide).
+const ASK_TOPICS = ['La box ne s’allume pas', 'Signal faible', 'Câble abîmé', 'Accès impossible', 'Wi-Fi'];
+const TOOLS = [
+  ['ask', 'Poser une question', 'Le guide technicien répond en quelques étapes', Icon.chat],
+  ['show', 'Montrer un problème', 'Une photo prise sur place, et une phrase', Icon.camera],
+  ['warn', 'Prévenir mon responsable', 'Votre superviseur vous répond ici', Icon.alert],
+];
+const helpOf = wo => [...(wo.help || [])].sort((a, b) => b.at - a.at);
+const helpOpenN = wo => (wo.help || []).filter(h => h.escalated && h.status !== 'repondu').length;
+// État court de la fin de visite, pour la carte de la mission terminée.
+const signoffShort = s => (!s ? null : s.state === 'attente' ? ['warn', 'En attente du client'] : s.state === 'probleme' ? ['bad', 'Souci signalé par le client'] : ['ok', 'Validée']);
+const jump = el => { if (el) el.scrollIntoView({ block: 'start', behavior: window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' }); };
+// Où ouvrir la mission selon la notification reçue.
+const notifTarget = n => (/^Réponse de/.test((n && n.title) || '') ? 'aide' : /^(Visite validée|Le client signale un souci)/.test((n && n.title) || '') ? 'fin' : null);
 // « Agence du Plateau » → « Agence Plateau » : assez court pour l'étiquette de la carte.
 const baseShort = id => (BASE_NAMES[id] || 'Agence').replace(/ (du|de|d’) ?/, ' ');
 
 export function FieldApp({ token }) {
   const me = useQ(token, 'me');
   const ms = useQ(token, 'tech.missions');
+  const nf = useQ(token, 'notifications');
   const online = useOnline(token);
   const [sel, setSel] = useState(null);
+  const [focus, setFocus] = useState(null);
   const [tab, setTab] = useState('missions');
   const bodyRef = useRef(null);
   const selStatus = ((ms.data || []).find(w => w.id === sel) || {}).status;
@@ -65,18 +82,20 @@ export function FieldApp({ token }) {
   const pending = q.filter(x => ['en attente de réseau', 'refusé'].includes(x.status)).length;
   const waitBy = {}; for (const x of q) if (x.status === 'en attente de réseau') waitBy[x.args.woId] = (waitBy[x.args.woId] || 0) + 1;
   const cur = list.find(w => w.id === sel);
-  const openMission = id => { setSel(id); setTab('missions'); };
+  const [seen, setSeen] = useState(() => tabGet('fw:seenMissions:' + token, []));
+  // `at` : où poser l'écran dans la mission ('aide' = historique de l'aide, 'fin' = fin de visite), sinon en haut.
+  const openMission = (id, at) => { setSel(id); setTab('missions'); setFocus(at ? { id, at, k: Date.now() } : null); if (!seen.includes(id)) { const n = [...seen, id]; setSeen(n); tabSet('fw:seenMissions:' + token, n); } };
   const live = list.filter(w => LIVE.includes(w.status)).sort(byRank);
   return <div className="fd-wrap">
     <div className="fd-stage">
       <div className="phone fd-phone" data-tour="field-phone">
-        <NotifPopups key={token} token={token} variant="phone" onOpen={n => { const w = list.find(x => x.orderId === n.orderId); if (w) openMission(w.id); }} />
+        <NotifPopups key={token} token={token} variant="phone" onOpen={n => { const w = list.find(x => x.orderId === n.orderId); if (w) openMission(w.id, notifTarget(n)); }} />
         <div className="phone-top fd-top">
           <div className="fd-hello">
             <Avatar name={user.name} size={42} dot={online ? 'ok' : 'off'} />
             <span className="fd-hello-t" title={user.contractor ? user.contractor + ' pour Moov' : 'Moov Terrain'}><span>Bonjour,</span><b>{firstName(user.name)}</b></span>
           </div>
-          <NotifBell token={token} onOpen={oid => { const w = list.find(x => x.orderId === oid); if (w) openMission(w.id); }} />
+          <NotifBell token={token} onOpen={(oid, note) => { const w = list.find(x => x.orderId === oid); if (!w) return; /* la notification touchée décide de la cible ; repli : la plus récente non lue du dossier */ const mine = (nf.data || []).filter(n => n.orderId === oid).sort((a, b) => (a.read - b.read) || (b.at - a.at)); openMission(w.id, notifTarget(note || mine[0])); }} />
           <button type="button" className={'fd-net' + (online ? '' : ' off')} onClick={() => setOnline(!online, token)} data-tour="field-network" aria-pressed={!online} title={online ? 'Couper le réseau de cet onglet (simulation)' : 'Rétablir le réseau'}>
             {online ? Icon.wifi : WIFI_OFF}<span>{online ? 'Connecté' : 'Hors ligne'}</span><i className="fd-knob" aria-hidden="true" />
           </button>
@@ -87,8 +106,8 @@ export function FieldApp({ token }) {
             <span><b>Mode hors ligne (simulation)</b>Vos actions sont gardées sur le téléphone et partiront une seule fois au retour du réseau. L’activation et les nouvelles réservations attendent le réseau.</span>
           </div>}
           {tab === 'queue' ? <Queue token={token} missions={list} />
-            : cur ? <Mission key={cur.id} token={token} wo={cur} ws={me.data.ws} onBack={() => setSel(null)} online={online} onQueue={() => setTab('queue')} />
-            : <Home list={list} live={live} waitBy={waitBy} onOpen={openMission} />}
+            : cur ? <Mission key={cur.id} token={token} wo={cur} ws={me.data.ws} onBack={() => setSel(null)} online={online} onQueue={() => setTab('queue')} focus={focus && focus.id === cur.id ? focus : null} />
+            : <Home list={list} live={live} waitBy={waitBy} onOpen={openMission} seen={seen} />}
         </div>
         <nav className="phone-tabs fd-tabs" aria-label="Application terrain">
           <button type="button" aria-current={tab === 'missions' ? 'page' : undefined} onClick={() => { if (tab === 'missions') setSel(null); else setTab('missions'); }}>{Icon.list}Missions</button>
@@ -111,19 +130,43 @@ export function FieldApp({ token }) {
 }
 
 // ---------- Accueil : la mission du moment, puis les suivantes ----------
-function Home({ list, live, waitBy, onOpen }) {
+function Home({ list, live, waitBy, onOpen, seen }) {
   const next = live[0];
   const rest = live.slice(1);
+  // Nouvelles courses : missions confiées par la conseillère ou le planificateur et pas encore ouvertes (comme une course proposée sur Yango).
+  const fresh = live.filter(w => w.status === 'affectee' && w.appt && !seen.includes(w.id));
+  const isNew = w => fresh.some(x => x.id === w.id);
+  // Agenda : les sept prochains jours, avec le nombre de missions de chacun.
+  const dated = live.filter(w => w.appt && w.appt.date).map(w => w.appt.date).sort((a, b) => a - b);
+  const day0 = dated[0];
+  const week = day0 ? Array.from({ length: 7 }, (_, i) => day0 + i * 864e5) : [];
+  const countOn = d => live.filter(w => w.appt && Math.abs(w.appt.date - d) < 43200e3).length;
+  // La liste « Ensuite » est rangée par jour.
+  const groups = []; for (const w of rest) { const d = (w.appt && w.appt.date) || 0; const g = groups.find(x => x.d === d); if (g) g.items.push(w); else groups.push({ d, items: [w] }); }
   const closed = list.filter(w => !LIVE.includes(w.status)).sort((a, b) => ((b.appt && b.appt.date) || 0) - ((a.appt && a.appt.date) || 0));
+  // Disponible : la dernière visite est validée et aucune mission n'est commencée.
+  const lastDone = list.filter(w => w.status === 'terminee').sort((a, b) => ((b.times && b.times.end) || 0) - ((a.times && a.times.end) || 0))[0];
+  const isFree = !!lastDone && !!lastDone.signoff && ['validee', 'auto'].includes(lastDone.signoff.state) && !list.some(w => ['en_route', 'sur_place', 'en_cours'].includes(w.status));
   return <>
     <div className="fd-h"><h2>Vos missions</h2>{list.length > 0 && <span className="small muted">{live.length} à faire</span>}</div>
     {list.length === 0 && <div className="card fd-empty">
       <VanScene height={64} />
       <Empty>Aucune mission pour l’instant. Elles arrivent ici dès que le planificateur confirme un rendez-vous.</Empty>
     </div>}
+    {isFree && <div className="card fd-free" role="status">
+      <span className="fd-ic">{Icon.check}</span>
+      <span><b>Vous êtes disponible pour une nouvelle mission</b>Visite chez {firstName(lastDone.contactName)} validée{lastDone.freeAt ? ' à ' + hhmm(lastDone.freeAt) : ''}. L’équipe Moov le sait.</span>
+    </div>}
+    {fresh.map(w => <button key={w.id} type="button" className="card fd-offer" onClick={() => onOpen(w.id)}>
+      <span className="fd-offer-top"><span className="tag tag-lime">Nouvelle course</span><span className="tiny">{when(w)}</span></span>
+      <span className="fd-who"><Avatar name={w.contactName} size={40} /><span className="fd-who-t"><b>{w.contactName}</b><span>{w.address.commune} · {w.offer}</span></span><span className="fd-go" aria-hidden="true">{Icon.arrow}</span></span>
+    </button>)}
+    {week.length > 0 && <div className="fd-week" role="group" aria-label="Agenda de la semaine">{week.map(d => { const n = countOn(d); return <span key={d} className={'fd-day' + (n ? ' has' : '')} aria-label={dayLong(d) + ' : ' + (n ? n + ' mission' + (n > 1 ? 's' : '') : 'rien de prévu')}><small>{new Intl.DateTimeFormat('fr-FR', { ...tz, weekday: 'short' }).format(d).replace('.', '')}</small><b>{new Intl.DateTimeFormat('fr-FR', { ...tz, day: 'numeric' }).format(d)}</b><i aria-hidden="true">{n || ''}</i></span>; })}</div>}
     {next && <NextCard wo={next} waiting={waitBy[next.id]} onOpen={onOpen} />}
-    {rest.length > 0 && <span className="fd-sec">Ensuite</span>}
-    {rest.map(w => <MissionCard key={w.id} wo={w} waiting={waitBy[w.id]} onOpen={onOpen} />)}
+    {groups.map(g => <React.Fragment key={g.d}>
+      <span className="fd-sec">{g.d ? dayLong(g.d).replace(/^./, c => c.toUpperCase()) : 'Date à fixer'}</span>
+      {g.items.map(w => <MissionCard key={w.id} wo={w} waiting={waitBy[w.id]} onOpen={onOpen} fresh={isNew(w)} />)}
+    </React.Fragment>)}
     {closed.length > 0 && <span className="fd-sec">Terminées ou clôturées</span>}
     {closed.map(w => <MissionCard key={w.id} wo={w} waiting={waitBy[w.id]} onOpen={onOpen} closed />)}
     <div className="fd-narrow-only"><Explain>Le technicien ne voit que <b>ses</b> missions, jamais l’ensemble des clients. Il ne peut pas valider un paiement ni confirmer une activation.</Explain></div>
@@ -141,23 +184,27 @@ function NextCard({ wo, waiting, onOpen }) {
       <span className="fd-go" aria-hidden="true">{Icon.arrow}</span>
     </span>
     {waiting > 0 && <span className="fd-wait fd-wait-dark">{Icon.clock}{waiting} action{waiting > 1 ? 's' : ''} en attente de réseau</span>}
+    {helpOpenN(wo) > 0 && <span className="fd-wait fd-wait-dark">{Icon.clock}Demande transmise, en attente du responsable</span>}
   </button>;
 }
 
-function MissionCard({ wo, waiting, onOpen, closed }) {
+function MissionCard({ wo, waiting, onOpen, closed, fresh }) {
   const a = wo.address;
-  return <button type="button" className={'card fd-mcard' + (closed ? ' closed' : '')} onClick={() => onOpen(wo.id)}>
-    <span className="fd-who"><Avatar name={wo.contactName} size={40} /><span className="fd-who-t"><b>{wo.contactName}</b><span>{wo.ref}</span></span><Tag tone={WO_TONE[wo.status]}>{WO_LABEL[wo.status]}</Tag></span>
+  const so = wo.status === 'terminee' ? signoffShort(wo.signoff) : null;
+  return <button type="button" className={'card fd-mcard' + (closed ? ' closed' : '') + (so && so[0] !== 'ok' ? ' hot' : '')} onClick={() => onOpen(wo.id)}>
+    <span className="fd-who"><Avatar name={wo.contactName} size={40} /><span className="fd-who-t"><b>{wo.contactName}</b><span>{wo.ref}</span></span><Tag tone={WO_TONE[wo.status]}>{fresh ? 'Nouvelle' : WO_LABEL[wo.status]}</Tag></span>
     <span className="fd-mc-meta">
       <span>{Icon.clock}{when(wo)}</span>
       <span>{Icon.pin}{a.commune} · {a.street}</span>
     </span>
+    {so && <span className={'fd-so-line ' + so[0]}>{so[0] === 'ok' ? Icon.check : so[0] === 'bad' ? Icon.alert : Icon.clock}{so[1]}</span>}
     {waiting > 0 && <span className="fd-wait">{Icon.clock}{waiting} action{waiting > 1 ? 's' : ''} en attente de réseau</span>}
+    {helpOpenN(wo) > 0 && <span className="fd-wait">{Icon.clock}Demande transmise, en attente du responsable</span>}
   </button>;
 }
 
 // ---------- Détail d’une mission ----------
-function Mission({ token, wo, ws, onBack, online, onQueue }) {
+function Mission({ token, wo, ws, onBack, online, onQueue, focus }) {
   const [vals, setVals] = useState(() => ({ ...wo.checklist }));
   const [serial, setSerial] = useState(wo.serial || '');
   const [code, setCode] = useState('');
@@ -166,6 +213,14 @@ function Mission({ token, wo, ws, onBack, online, onQueue }) {
   const [comment, setComment] = useState('');
   const [reserve, setReserve] = useState('');
   const [open, setOpen] = useState(null);
+  const aideRef = useRef(null), finRef = useRef(null);
+  const [hl, setHl] = useState(null);
+  // Ouverte depuis une notification : l'écran se pose sur l'aide ou sur la fin de visite.
+  useEffect(() => {
+    if (!focus) return;
+    const t = setTimeout(() => jump(focus.at === 'aide' ? aideRef.current : finRef.current), 90);
+    return () => clearTimeout(t);
+  }, [focus && focus.k]);
   const act = (action, args = {}) => call(token, 'wo.action', { woId: wo.id, action, args: { ...args, offline: !isOnline(token) }, expectedVersion: wo.version }, { meta: { ref: wo.ref } });
   // Après une photo, le bloc reste ouvert pour en ajouter d'autres ; sinon on passe au suivant.
   const step = async (action, args, keep = false) => { const r = await act(action, args); if (r && r.ok) setOpen(keep ? action : null); return r; };
@@ -238,10 +293,12 @@ function Mission({ token, wo, ws, onBack, online, onQueue }) {
         {STEPS.map((s, i) => <li key={s} className={i < reached ? 'done' : i === reached ? 'now' : ''} aria-current={i === reached ? 'step' : undefined}><span className="fd-dot">{i < reached ? Icon.check : i + 1}</span>{s}</li>)}
       </ol>
       <div className="fd-flow-t"><b>{flow[0]}</b><span>{flow[1]}</span></div>
-      {trip && <Trip wo={wo} info={trip} there={there} height={170} />}
+      {trip && <Trip wo={wo} ws={ws} there={there} height={170} dark />}
       {st === 'en_route' && !wo.track && !online && <div className="fd-trip-off"><span className="fd-ic">{WIFI_OFF}</span><span>Départ gardé sur le téléphone. Le client sera prévenu et le trajet s’affichera sur la carte au retour du réseau.</span></div>}
       {flow[2] && <AsyncBtn className={'fd-lime' + (there ? ' fd-pulse' : '')} block onClick={() => act(flow[2])} data-tour={flow[2] === 'start' ? 'field-start' : undefined}>{flow[3]}{Icon.right}</AsyncBtn>}
     </section>}
+
+    {st === 'terminee' && wo.signoff && <SignoffCard wo={wo} ws={ws} innerRef={finRef} />}
 
     <section className="card fd-client">
       <span className="fd-who"><Avatar name={wo.contactName} size={52} /><span className="fd-who-t"><b className="fd-big">{wo.contactName}</b><span>{wo.offer}</span></span></span>
@@ -253,6 +310,7 @@ function Mission({ token, wo, ws, onBack, online, onQueue }) {
         {a.accessNotes && <li><span className="fd-ic">{Icon.lock}</span><span>Accès : {a.accessNotes}</span></li>}
         {a.onsiteContact && <li><span className="fd-ic">{Icon.user}</span><span>Personne présente : <b>{a.onsiteContact}</b></span></li>}
       </ul>
+      {live && !trip && <ClientSpot wo={wo} />}
       <details className="fd-more">
         <summary>Voir le détail</summary>
         <div className="stack-s small">
@@ -278,6 +336,12 @@ function Mission({ token, wo, ws, onBack, online, onQueue }) {
     {st === 'annulee' && <div className="card fd-state bad"><span className="fd-ic">{Icon.x}</span><span><b>Mission retirée ou annulée</b>{wo.cancelReason ? 'Motif : ' + wo.cancelReason + '. ' : 'La planification l’a retirée. '}Plus aucune action n’est possible.</span></div>}
     {st === 'echec' && wo.failure && <div className="card fd-state bad"><span className="fd-ic">{Icon.alert}</span><span><b>Visite non réalisée : {BLOCKER_TYPES[wo.failure.type].label}</b>{wo.failure.comment ? '« ' + wo.failure.comment + ' ». ' : ''}Un conseiller reprend le dossier.</span></div>}
 
+
+    {helpOpenN(wo) > 0 && <button type="button" className="fd-wait fd-wait-btn" onClick={() => jump(aideRef.current)}>{Icon.clock}{helpOpenN(wo)} demande{helpOpenN(wo) > 1 ? 's' : ''} transmise{helpOpenN(wo) > 1 ? 's' : ''} au responsable, en attente de réponse</button>}
+
+    {['affectee', 'en_route'].includes(wo.status) && <div className="fd-tools-off">{Icon.tool}<span><b>Boîte à outils</b> : disponible dès votre arrivée</span></div>}
+    {['sur_place', 'en_cours'].includes(wo.status) && <Toolbox token={token} wo={wo} online={online} onNew={id => { setHl(id); setTimeout(() => jump(aideRef.current), 90); }} />}
+    <HelpHistory token={token} wo={wo} online={online} hl={hl} innerRef={aideRef} />
 
     {live && st !== 'en_cours' && <div className="fd-alt">
       {st !== 'sur_place' && <AsyncBtn size="s" kind="ghost" onClick={() => act('start')} data-tour="field-start">{Icon.tool}Démarrer l’installation</AsyncBtn>}
@@ -393,16 +457,194 @@ function Mission({ token, wo, ws, onBack, online, onQueue }) {
 }
 
 // Trajet simulé vers le client, façon application de VTC : la carte, puis les minutes restantes.
-function Trip({ wo, info, there, height = 170 }) {
-  const t = wo.track;
+function Trip({ wo, ws, there, height = 170, dark }) {
+  const t = wo.track, a = wo.address;
+  const first = firstName(wo.contactName);
+  const rdv = wo.appt ? 'Rendez-vous ' + dayLong(wo.appt.date) + (wo.appt.time ? ' à ' + hourLabel(wo.appt.time) : ', ' + slotLabel(wo.appt.slot)) : '';
+  // Le bouton « Appeler » est juste dessous (ClientSpot) : la fiche du client ne le répète pas.
+  const person = { name: wo.contactName, role: [a.street, a.commune].filter(Boolean).join(', ') || wo.offer };
   return <div className={'fd-trip' + (there ? ' is-there' : '')}>
-    <TrackMap from={t.from} to={t.to} p={info.p} arrived={info.arrived} height={height} fromLabel={baseShort(t.from)} toLabel={firstName(wo.contactName)} />
-    <div className="fd-trip-eta">
-      <span className="fd-trip-ic">{there ? Icon.pin : Icon.clock}</span>
-      {there ? <span><b>Vous devriez être arrivé : touchez Arrivé</b></span>
-        : <span><b>Arrivée prévue dans {info.leftMin} min</b> · trajet simulé pour la démo</span>}
+    <TrackCard track={t} ws={ws} status="en_route" times={wo.times} received={wo.createdAt} receivedHint={rdv} person={person} notice={there ? 'Vous devriez être arrivé : touchez Arrivé' : null} fromLabel={baseShort(t.from)} toLabel={first} mapHeight={height} dark={dark} />
+    <ClientSpot wo={wo} />
+  </div>;
+}
+
+// Où est le client : adresse en une ligne, appel et itinéraire. Le technicien suit la position du client comme le client suit la sienne.
+function ClientSpot({ wo }) {
+  const a = wo.address, first = firstName(wo.contactName);
+  const [call, setCall] = useState(false);
+  const maps = 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent([a.street, a.commune, 'Abidjan', 'Côte d’Ivoire'].filter(Boolean).join(', '));
+  return <div className="fd-spot">
+    <p className="fd-spot-t">{Icon.pin}<span><b>Chez {first}</b> : {[a.street, a.commune, a.landmark].filter(Boolean).join(', ')}</span></p>
+    <div className="fd-spot-b">
+      <Btn size="s" onClick={() => setCall(true)}>{Icon.handset}Appeler</Btn>
+      <a className="btn btn-s" href={maps} target="_blank" rel="noopener noreferrer">{Icon.right}Itinéraire<span className="sr-only"> (s’ouvre dans une carte)</span></a>
+    </div>
+    <span className="fd-spot-h">Vous suivez la position de {first} comme {first} suit la vôtre sur son téléphone.</span>
+    {call && <CallModal wo={wo} onClose={() => setCall(false)} />}
+  </div>;
+}
+
+// Appel simulé : aucun numéro n'est donné au technicien (contact par l'application seulement).
+function CallModal({ wo, onClose }) {
+  const [t0] = useState(() => Date.now());
+  const s = Math.floor((useNow(1000) - t0) / 1000);
+  return <Modal title={'Appel vers ' + firstName(wo.contactName)} onClose={onClose} actions={<Btn kind="primary" block className="fd-hang" onClick={onClose}>{Icon.x}Raccrocher</Btn>}>
+    <div className="fd-call">
+      <Avatar name={wo.contactName} size={72} />
+      <b>{wo.contactName}</b>
+      <span className="fd-call-s" role="status">{s < 3 ? 'Ça sonne…' : 'En ligne · ' + String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0')}</span>
+      <Sim what="appel simulé" />
+    </div>
+    <p className="tiny muted">Aucun vrai appel dans cette démo. Dans la réalité, l’appel passerait par Moov : le numéro du client reste masqué.</p>
+  </Modal>;
+}
+
+// ---------- Fin de visite : le client vérifie, valide ou laisse partir ----------
+function SignoffCard({ wo, ws, innerRef }) {
+  const s = wo.signoff, first = firstName(wo.contactName);
+  useNow(s.state === 'attente' ? 1000 : 60000);
+  const left = s.state === 'attente' ? Math.max(0, (s.autoAt || 0) - liveClock(ws)) : 0;
+  const total = Math.max(1, (s.autoAt || 0) - (s.since || 0));
+  const eta = left >= 60e3 ? Math.ceil(left / 60e3) + ' min' : Math.ceil(left / 1e3) + ' s';
+  const [tone, ic, tag, body] = {
+    attente: ['wait', Icon.clock, 'En attente du client', <><b>{first} vérifie l’installation.</b> Validation automatique dans <b className="num">{eta}</b>.</>],
+    validee: ['ok', Icon.check, 'Validée', <><b>Visite validée.</b> Vous êtes de nouveau disponible.</>],
+    auto: s.mode === 'auto'
+      ? ['ok', Icon.check, 'Validée', <><b>{first} vous a laissé partir.</b> Vous êtes de nouveau disponible.</>]
+      : ['ok', Icon.check, 'Validée', <><b>Visite validée automatiquement, sans réponse de {first}.</b> Vous êtes de nouveau disponible.</>],
+    probleme: ['bad', Icon.alert, 'Souci signalé', <><b>{first} signale un souci</b> : « {s.problem || 'sans détail'} ». Attendez les instructions de votre responsable.</>],
+  }[s.state] || ['wait', Icon.clock, 'En attente du client', <>{first} vérifie l’installation.</>];
+  return <section className={'card fd-so ' + tone} ref={innerRef} aria-label="Fin de visite">
+    <div className="fd-so-h"><span className="fd-ic">{ic}</span><b>Visite terminée</b><Tag tone={tone === 'ok' ? 'ok' : tone === 'bad' ? 'bad' : 'warn'}>{tag}</Tag></div>
+    <p className="fd-so-t">{body}</p>
+    {s.state === 'attente' && <div className="fd-so-bar" role="img" aria-label="Temps avant la validation automatique"><i style={{ width: Math.max(2, Math.min(100, 100 - left / total * 100)) + '%' }} /></div>}
+  </section>;
+}
+
+// ---------- Boîte à outils : poser une question, montrer un problème, prévenir le responsable ----------
+function PhotoPick({ token, id, value, onChange }) {
+  const [busy, setBusy] = useState(false);
+  const pick = async e => {
+    const f = e.target.files[0]; e.target.value = ''; if (!f) return;
+    if (!/^image\//.test(f.type || '')) { toast('Choisissez une photo (JPG ou PNG).', true); return; }
+    setBusy(true);
+    try {
+      const pic = await prepareImage(f);
+      if (!pic) { toast('Cette image ne peut pas être lue ici. Essayez une photo au format JPG ou PNG.', true); return; }
+      let img = null; try { img = await putImage(api.session(token).wsId, pic.full); } catch {}
+      onChange({ name: f.name, thumb: pic.thumb, img, quality: pic.quality });
+    } finally { setBusy(false); }
+  };
+  const issues = value ? photoIssues(value.quality) : [];
+  return <div className="fd-pp">
+    {value && <figure className="fd-pp-prev">
+      {value.thumb ? <img src={value.thumb} alt="Photo choisie" /> : <span className="fd-ph-none">{Icon.camera}<span>{value.name}</span></span>}
+      <button type="button" className="fd-pp-x" onClick={() => onChange(null)} aria-label="Retirer la photo">{Icon.x}</button>
+    </figure>}
+    {issues.length > 0 && <span className="fd-range warn">{Icon.alert}Photo {issues.join(' et ')} : reprenez-la si le responsable doit la voir</span>}
+    <div className="fd-pp-btns">
+      <label className={'btn fd-pp-take' + (busy ? ' is-busy' : '')} htmlFor={id}>{Icon.camera}{busy ? 'Préparation…' : value ? 'Reprendre la photo' : 'Prendre une photo'}</label>
+      <input id={id} type="file" accept="image/*" capture="environment" onChange={pick} className="fd-file" />
+      <Btn size="s" kind="sim" onClick={() => onChange({ name: 'photo-demo.jpg', thumb: null, img: null, quality: null })}>Photo de démonstration</Btn>
     </div>
   </div>;
+}
+
+function Toolbox({ token, wo, online, onNew }) {
+  const [tool, setTool] = useState(null);
+  const [question, setQuestion] = useState('');
+  const [text, setText] = useState('');
+  const [pic, setPic] = useState(null);
+  const [warn, setWarn] = useState('');
+  const [pic2, setPic2] = useState(null);
+  const open = k => setTool(tool === k ? null : k);
+  const photoArg = p => (p ? { name: p.name, thumb: p.thumb, img: p.img, quality: p.quality } : undefined);
+  const done = (r, reset) => { if (r && r.ok) { reset(); setTool(null); if (r.data) onNew(r.data.id); } return r; };
+  return <section className="card fd-tools" aria-label="Boîte à outils">
+    <div className="fd-tools-h">
+      <span className="fd-ic">{Icon.tool}</span>
+      <span className="fd-who-t"><b>Boîte à outils</b><span>{online ? 'Un souci sur place ? Choisissez.' : 'Disponible avec du réseau'}</span></span>
+    </div>
+    {!online && <p className="fd-tools-net">{WIFI_OFF}<span>Disponible avec du réseau. Rétablissez la connexion pour poser une question ou prévenir votre responsable.</span></p>}
+    {TOOLS.map(([k, label, sub, ic]) => <div key={k} className={'fd-tool' + (tool === k ? ' open' : '')}>
+      <button type="button" className="fd-tool-b" disabled={!online} aria-expanded={tool === k} aria-controls={'fd-tf-' + k} onClick={() => open(k)}>
+        <span className="fd-tool-ic">{ic}</span>
+        <span className="fd-tool-t"><b>{label}</b><span>{sub}</span></span>
+        <span className="fd-chev">{CHEV}</span>
+      </button>
+      {tool === k && <div className="fd-tool-f" id={'fd-tf-' + k}>
+        {k === 'ask' && <>
+          <label className="fd-lbl" htmlFor="ask-q">Votre question</label>
+          <textarea id="ask-q" className="input" rows={3} maxLength={500} value={question} onChange={e => setQuestion(e.target.value)} placeholder="Ex. la box ne s’allume pas" />
+          <div className="fd-topics" role="group" aria-label="Sujets fréquents">{ASK_TOPICS.map(t => <button key={t} type="button" className={'fd-topic' + (question === t ? ' on' : '')} aria-pressed={question === t} onClick={() => setQuestion(t)}>{t}</button>)}</div>
+          <AsyncBtn kind="primary" block disabled={!question.trim()} onClick={async () => done(await call(token, 'tech.ask', { woId: wo.id, question: question.trim() }), () => setQuestion(''))}>Demander l’aide</AsyncBtn>
+          <span className="tiny muted">Réponse automatique du guide technicien. Ce n’est pas une IA.</span>
+        </>}
+        {k === 'show' && <>
+          <PhotoPick token={token} id={'ph-show-' + wo.id} value={pic} onChange={setPic} />
+          <label className="fd-lbl" htmlFor="show-t">Une phrase pour expliquer <span className="muted">(facultatif)</span></label>
+          <input id="show-t" className="input" maxLength={500} value={text} onChange={e => setText(e.target.value)} placeholder="Ex. le câble est écrasé derrière le mur" />
+          <AsyncBtn kind="primary" block disabled={!pic} onClick={async () => done(await call(token, 'tech.ask', { woId: wo.id, question: text.trim(), photo: photoArg(pic) }), () => { setPic(null); setText(''); })}>Envoyer la photo</AsyncBtn>
+          <span className="tiny muted">Le guide ne lit pas les images : après l’envoi, touchez « Transmettre au responsable » pour qu’il la regarde.</span>
+        </>}
+        {k === 'warn' && <>
+          <label className="fd-lbl" htmlFor="warn-t">Votre message au superviseur</label>
+          <textarea id="warn-t" className="input" rows={3} maxLength={500} value={warn} onChange={e => setWarn(e.target.value)} placeholder="Ex. la prise optique n’est pas accessible, j’ai besoin de votre accord" />
+          <PhotoPick token={token} id={'ph-warn-' + wo.id} value={pic2} onChange={setPic2} />
+          <AsyncBtn kind="primary" block disabled={!warn.trim() && !pic2} onClick={async () => { const r = done(await call(token, 'tech.escalate', { woId: wo.id, text: warn.trim(), photo: photoArg(pic2) }), () => { setWarn(''); setPic2(null); }); if (r && r.ok) toast('Votre responsable est prévenu. Sa réponse arrive ici.'); }}>Prévenir mon responsable</AsyncBtn>
+          <span className="tiny muted">Le superviseur reçoit le message tout de suite et vous répond dans cet écran.</span>
+        </>}
+      </div>}
+    </div>)}
+  </section>;
+}
+
+// Réponse d'aide : étapes numérotées courtes, la source, et le rappel que ce n'est pas une IA.
+function HelpAnswer({ a }) {
+  return <div className="fd-ans">
+    <ol className="fd-ans-steps">{(a.steps || []).map((t, i) => <li key={i}><span className="fd-ans-n" aria-hidden="true">{i + 1}</span><span>{t}</span></li>)}</ol>
+    {a.note && <p className="small fd-ans-note">{a.note}</p>}
+    <div className="fd-ans-foot">
+      <span className="tiny muted">{Icon.book}{a.source ? 'Source : ' + a.source : 'Aucune source trouvée'}</span>
+      <Tag>Réponse automatique, pas une IA</Tag>
+    </div>
+  </div>;
+}
+
+function HelpItem({ token, wo, h, online, open }) {
+  const waiting = h.escalated && h.status !== 'repondu';
+  const answered = h.escalated && h.status === 'repondu' && h.reply;
+  const propose = !h.escalated && (!!h.photo || !!(h.a && h.a.escalate));
+  const bad = h.photo && h.photo.check && !h.photo.check.ok ? h.photo.check.issues : [];
+  return <article className={'fd-hi' + (waiting ? ' wait' : '') + (answered ? ' done' : '')}>
+    <div className="fd-hi-top">
+      <span className="tiny muted">{hhmm(h.at)}</span>
+      {waiting ? <Tag tone="warn">Transmis au responsable, en attente</Tag> : answered ? <Tag tone="ok">Réponse reçue</Tag> : h.a ? <Tag>Réponse du guide</Tag> : null}
+    </div>
+    <div className="fd-hi-q">
+      {h.photo && <Picture token={token} img={h.photo.img} thumb={h.photo.thumb} label={'Photo envoyée · ' + wo.ref} alt="Photo envoyée pour l’aide" size={64} />}
+      <p><b>{h.q || (h.photo ? 'Photo sans description' : 'Demande')}</b>{bad.length > 0 && <span className="tiny fd-hi-bad">Photo {bad.join(' et ')}</span>}</p>
+    </div>
+    {h.a && <details className="fd-hi-a" open={open}><summary>{h.a.title}</summary><HelpAnswer a={h.a} /></details>}
+    {waiting && <div className="fd-hi-s wait"><span className="fd-ic">{Icon.clock}</span><span><b>Transmis au responsable, en attente</b>Vous serez prévenu ici dès qu’il répond.</span></div>}
+    {answered && <div className="fd-hi-s ok"><Avatar name={h.reply.by} size={34} /><span><b>Réponse de {firstName(h.reply.by)} :</b> {h.reply.text}<em>{hhmm(h.reply.at)}</em></span></div>}
+    {propose && <div className="fd-hi-go">
+      <AsyncBtn kind="primary" block disabled={!online} onClick={async () => { const r = await call(token, 'tech.escalate', { woId: wo.id, helpId: h.id }); if (r && r.ok) toast('Transmis à votre responsable. Sa réponse arrive ici.'); }}>{Icon.alert}Transmettre au responsable</AsyncBtn>
+      <span className="tiny muted">{online ? (h.photo && !(h.a && h.a.escalate) ? 'Pour qu’il regarde la photo.' : 'Le guide conseille de le prévenir.') : 'Disponible avec du réseau.'}</span>
+    </div>}
+  </article>;
+}
+
+// Historique de l'aide de cette mission : une demande transmise sans réponse se voit tout de suite.
+function HelpHistory({ token, wo, online, hl, innerRef }) {
+  const list = helpOf(wo);
+  if (!list.length) return null;
+  const waiting = helpOpenN(wo);
+  return <section className="card fd-help" ref={innerRef} aria-label="Aide de cette mission">
+    <div className="fd-help-h"><b>Aide de cette mission</b>{waiting > 0 ? <Tag tone="warn">{waiting} en attente de réponse</Tag> : <span className="tiny muted">{list.length} demande{list.length > 1 ? 's' : ''}</span>}</div>
+    {list.map((h, i) => <HelpItem key={h.id} token={token} wo={wo} h={h} online={online} open={i === 0 || h.id === hl} />)}
+  </section>;
 }
 
 // Ce que le client a coché dans son application avant la visite.
@@ -586,7 +828,7 @@ function SideTrip({ wo, ws, onOpen }) {
   const there = info.p >= 1 || wo.track.there;
   return <section className="card fd-card">
     <div className="card-title"><h3>Trajet vers {firstName(wo.contactName)}</h3><Tag tone={there ? 'ok' : 'info'}>{there ? 'Sur place ?' : 'En route'}</Tag></div>
-    <Trip wo={wo} info={info} there={there} height={230} />
+    <Trip wo={wo} ws={ws} there={there} height={230} />
     <button type="button" className="link-btn small fd-trip-open" onClick={() => onOpen(wo.id)}>Ouvrir la mission {wo.ref}{Icon.right}</button>
   </section>;
 }

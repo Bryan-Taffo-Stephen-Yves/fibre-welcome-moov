@@ -112,11 +112,11 @@ export const CHECKLIST_TECH = [
 ];
 
 export const PREP_CHECKLIST = [
-  { id: 'presence', label: 'Une personne majeure sera présente pendant tout le créneau', need: true },
-  { id: 'acces', label: 'Le technicien pourra entrer (gardien, portail, badge)', need: true },
-  { id: 'prise', label: 'Une prise électrique est libre près de l’emplacement de la box', need: true },
+  { id: 'presence', label: 'Une personne majeure sera présente pendant tout le créneau', need: true, ask: 'quelqu’un est bien présent' },
+  { id: 'acces', label: 'Le technicien pourra entrer (gardien, portail, badge)', need: true, ask: 'le gardien ou le portail est prévenu' },
+  { id: 'prise', label: 'Une prise électrique est libre près de l’emplacement de la box', need: true, ask: 'une prise est libre près de la box' },
   { id: 'passage', label: 'Le propriétaire ou le syndic autorise le passage du câble', need: false, when: 'immeuble' },
-  { id: 'animaux', label: 'Les chiens et autres animaux seront enfermés pendant la visite', need: false },
+  { id: 'animaux', label: 'Les chiens et autres animaux seront enfermés pendant la visite', need: false, ask: 'les chiens sont enfermés' },
 ];
 
 export const GLOSSARY = [

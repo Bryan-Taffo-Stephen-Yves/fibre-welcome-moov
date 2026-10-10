@@ -117,7 +117,7 @@ export function NotifBell({ token, onOpen, dark }) {
   React.useEffect(() => { if (!open) return; const f = e => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); }; document.addEventListener('pointerdown', f); return () => document.removeEventListener('pointerdown', f); }, [open]);
   const list = r.data || [];
   const unread = list.filter(n => !n.read).length;
-  const pick = n => { if (!n.read) call(token, 'notif.read', { id: n.id }, { silent: true }); if (n.orderId && onOpen) { onOpen(n.orderId); setOpen(false); } };
+  const pick = n => { if (!n.read) call(token, 'notif.read', { id: n.id }, { silent: true }); if (n.orderId && onOpen) { onOpen(n.orderId, n); setOpen(false); } };
   return <span className="nbell" ref={ref}>
     <button type="button" className={'icon-btn nbell-btn' + (dark ? ' on-dark' : '')} onClick={() => setOpen(!open)} aria-expanded={open} aria-label={'Notifications' + (unread ? ' (' + unread + ' non lues)' : '')} data-tour="staff-bell">{Icon.bell}{unread > 0 && <span className="badge">{unread > 9 ? '9+' : unread}</span>}</button>
     {open && <div className="nbell-pop" role="dialog" aria-label="Notifications">

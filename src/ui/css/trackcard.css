@@ -1,0 +1,83 @@
+/* Carte de suivi du trajet (src/ui/trackcard.jsx), partagée par le client et le technicien. */
+.tc { --tc-bg: var(--surface-2); --tc-ink: var(--ink); --tc-ink2: var(--ink-2); --tc-line: var(--line); --tc-on: var(--accent); display: flex; flex-direction: column; gap: 12px; min-width: 0; color: var(--tc-ink); }
+.tc-dark { --tc-bg: var(--dark-2); --tc-ink: var(--on-dark); --tc-ink2: var(--on-dark-2); --tc-line: var(--dark-3); --tc-on: var(--lime); }
+.tc-lab { font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--tc-ink2); }
+
+/* La carte, avec la pastille « En direct » */
+.tc-map { position: relative; border-radius: 18px; overflow: hidden; line-height: 0; box-shadow: inset 0 0 0 1px var(--tc-line); }
+.tc-map .track-map { border-radius: 18px; }
+.tc-badge { position: absolute; top: 10px; left: 10px; display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px; border-radius: 999px; background: var(--surface); color: var(--ink); font-size: 12px; font-weight: 700; line-height: 1.2; box-shadow: 0 1px 4px rgba(0, 0, 0, .18); }
+.tc-badge i { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); animation: tc-blink 1.2s ease-in-out infinite; }
+@keyframes tc-blink { 50% { opacity: .35; } }
+
+.tc-head { display: flex; flex-direction: column; gap: 2px; padding: 0 4px; }
+.tc-title { font-size: 24px; font-weight: 700; letter-spacing: -.025em; line-height: 1.15; }
+.tc-sub { font-size: 14px; line-height: 1.4; color: var(--tc-ink2); }
+.tc-notice { display: flex; gap: 10px; align-items: center; margin: 0; padding: 10px 12px; border-radius: 14px; font-size: 13.5px; line-height: 1.35; background: color-mix(in srgb, var(--tc-on) 16%, transparent); }
+.tc-notice svg { width: 18px; height: 18px; flex: none; color: var(--tc-on); }
+.tc-notice span { font-weight: 700; }
+
+/* Distance faite sur le total + jauge de vitesse */
+.tc-dist { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 14px; align-items: end; padding: 12px 14px; border-radius: 16px; background: var(--tc-bg); }
+.tc-dist-main { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.tc-km { font-size: 14px; color: var(--tc-ink2); }
+.tc-km b { font-size: 24px; letter-spacing: -.02em; color: var(--tc-ink); font-weight: 700; }
+.tc-bar { height: 10px; border-radius: 999px; background: color-mix(in srgb, var(--tc-ink2) 28%, transparent); overflow: hidden; }
+.tc-bar i { display: block; height: 100%; border-radius: 999px; background: var(--tc-on); transition: width 1s linear; }
+.tc-pct { font-size: 13px; color: var(--tc-ink2); }
+.tc-pct b { color: var(--tc-ink); }
+.tc-simline { display: flex; }
+.tc-speed { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+.tc-gauge { position: relative; width: 104px; }
+.tc-gauge svg { display: block; width: 100%; height: auto; overflow: visible; }
+.tc-g-track, .tc-g-fill { fill: none; stroke-width: 9; stroke-linecap: round; }
+.tc-g-track { stroke: color-mix(in srgb, var(--tc-ink2) 28%, transparent); }
+.tc-g-fill { stroke: var(--tc-on); transition: stroke-dasharray .9s ease; }
+.tc-g-end { font-size: 8px; fill: var(--tc-ink2); }
+.tc-g-v { position: absolute; left: 0; right: 0; bottom: 10px; display: flex; flex-direction: column; align-items: center; line-height: 1.05; }
+.tc-g-v b { font-size: 22px; font-weight: 700; }
+.tc-g-v i { font-style: normal; font-size: 10px; color: var(--tc-ink2); }
+
+/* Fiche du trajet : étapes en ligne verticale */
+.tc-trip { display: flex; flex-direction: column; gap: 10px; padding: 12px 14px 8px; border-radius: 16px; background: var(--tc-bg); }
+.tc-steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.tc-step { position: relative; display: grid; grid-template-columns: 26px minmax(0, 1fr) auto; gap: 12px; align-items: start; padding-bottom: 14px; }
+.tc-step:last-child { padding-bottom: 6px; }
+.tc-step::before { content: ''; position: absolute; left: 12px; top: 24px; bottom: -2px; width: 2px; border-radius: 2px; background: color-mix(in srgb, var(--tc-ink2) 30%, transparent); }
+.tc-step:last-child::before { display: none; }
+.tc-step.done::before { background: var(--tc-on); }
+.tc-dot { position: relative; width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; box-sizing: border-box; border: 2px solid color-mix(in srgb, var(--tc-ink2) 45%, transparent); background: var(--tc-bg); }
+.tc-dot svg { width: 14px; height: 14px; }
+.tc-step.done .tc-dot { background: var(--tc-on); border-color: var(--tc-on); color: #fff; }
+.tc-dark .tc-step.done .tc-dot { color: var(--lime-ink); }
+.tc-step.now .tc-dot { border-color: var(--tc-on); }
+.tc-step.now .tc-dot::before { content: ''; width: 10px; height: 10px; border-radius: 50%; background: var(--tc-on); }
+.tc-step.now .tc-dot::after { content: ''; position: absolute; inset: -2px; border-radius: 50%; border: 2px solid var(--tc-on); animation: tc-pulse 1.8s ease-out infinite; }
+@keyframes tc-pulse { from { transform: scale(1); opacity: .7; } to { transform: scale(1.7); opacity: 0; } }
+.tc-step-t { display: flex; flex-direction: column; gap: 1px; min-width: 0; font-size: 14px; line-height: 1.3; padding-top: 3px; }
+.tc-step.next .tc-step-t b { color: var(--tc-ink2); font-weight: 600; }
+.tc-step-s { font-size: 12.5px; color: var(--tc-ink2); }
+.tc-step-h { font-size: 13px; font-weight: 700; padding-top: 4px; white-space: nowrap; }
+
+/* Fiche de la personne */
+.tc-who { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 4px 12px; align-items: center; padding: 12px 14px; border-radius: 16px; background: var(--tc-bg); }
+.tc-who .avatar, .tc-who > :first-child { grid-row: 1 / span 2; }
+.tc-who-t { display: flex; flex-direction: column; min-width: 0; font-size: 15px; line-height: 1.3; }
+.tc-who-t span { font-size: 13px; color: var(--tc-ink2); overflow-wrap: anywhere; }
+.tc-who .tag { grid-column: 3; grid-row: 1 / span 2; }
+.tc-call { grid-column: 1 / -1; display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 44px; margin-top: 8px; padding: 0 16px; border-radius: 999px; border: 1px solid var(--tc-line); background: var(--surface); color: var(--ink); font: inherit; font-size: 14px; font-weight: 700; cursor: pointer; }
+.tc-dark .tc-call { background: var(--dark-3); border-color: transparent; color: var(--on-dark); }
+.tc-call svg { width: 17px; height: 17px; }
+.tc-call:disabled { cursor: not-allowed; opacity: .6; }
+.tc-who-n { grid-column: 1 / -1; font-size: 12px; line-height: 1.35; color: var(--tc-ink2); }
+
+@media (max-width: 380px) {
+  .tc-dist { grid-template-columns: 1fr; }
+  .tc-speed { flex-direction: row; justify-content: flex-start; gap: 12px; }
+  .tc-title { font-size: 22px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .tc-badge i, .tc-step.now .tc-dot::after { animation: none; }
+  .tc-step.now .tc-dot::after { opacity: .4; transform: scale(1.35); }
+  .tc-bar i, .tc-g-fill { transition: none; }
+}

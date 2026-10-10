@@ -311,3 +311,89 @@
 .ad-degr-sw { margin-top: auto; }
 /* Réglages du parcours en direct : libellés longs, champs alignés en bas */
 .ad-form2-end { align-items: end; }
+
+/* ---------- Trajets et visites (tr-) : chiffres, liste des visites, carte d'ensemble, techniciens ---------- */
+.tr { container: tr / inline-size; display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.tr-kpis { display: grid; gap: 14px; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.tr-tile { gap: 4px; }
+.tr-ic { width: 32px; height: 32px; border-radius: 50%; background: var(--surface-2); color: var(--ink-2); display: grid; place-items: center; flex: none; }
+.tr-ic svg { width: 16px; height: 16px; }
+.tr-ic-ok { background: var(--ok-soft); color: var(--ok); } .tr-ic-warn { background: var(--warn-soft); color: var(--warn); } .tr-ic-bad { background: var(--bad-soft); color: var(--bad); }
+
+.tr-main { display: grid; gap: 18px; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); grid-template-rows: auto 1fr; grid-template-areas: "list map" "list techs"; align-items: start; }
+.tr-list { grid-area: list; min-width: 0; }
+.tr-map { grid-area: map; min-width: 0; }
+.tr-techs { grid-area: techs; min-width: 0; }
+.tr-map .trips-map-svg { border-radius: var(--r-md); overflow: hidden; display: block; }
+
+.tr-cards { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 12px; }
+.tr-card { display: flex; flex-direction: column; gap: 10px; width: 100%; min-height: 44px; text-align: left; cursor: pointer; background: var(--surface-2); border: 2px solid transparent; border-radius: var(--r-lg); padding: 14px 16px; color: var(--ink); }
+.tr-card:hover { background: var(--surface-3); }
+.tr-card.on { border-color: var(--accent); background: var(--surface); box-shadow: var(--shadow); }
+.tr-card-h { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.tr-card-id { display: flex; flex-direction: column; min-width: 0; flex: 1 1 auto; line-height: 1.3; }
+.tr-card-id b { font-size: 14.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tr-card-end { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; flex: none; max-width: 52%; }
+.tr-card-end .tag { white-space: normal; text-align: right; }
+.tr-card-meta { display: flex; flex-wrap: wrap; gap: 2px 10px; color: var(--ink-2); }
+.tr-card-meta b { color: var(--ink); }
+.tr-card-meta span + span::before { content: "·"; margin-right: 10px; color: var(--ink-3); }
+
+.tr-steps { display: flex; flex-direction: column; gap: 6px; }
+.tr-steps-bar { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 4px; }
+.tr-steps-bar i { height: 7px; border-radius: 999px; background: var(--surface-3); }
+.tr-card.on .tr-steps-bar i { background: var(--surface-2); }
+.tr-steps-bar i.done { background: var(--ok); }
+.tr-steps-bar i.now { background: var(--accent); }
+.tr-steps-bar i.bad { background: var(--bad); }
+.tr-steps-t { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.tr-pct { font-size: 15px; font-weight: 700; }
+.tr-steps-l { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 4px; }
+.tr-steps-l li { font-size: 10.5px; line-height: 1.25; color: var(--ink-3); }
+.tr-steps-l li.on { color: var(--ink-2); font-weight: 600; }
+
+.tr-dur { display: flex; flex-wrap: wrap; gap: 6px; }
+.tr-chip { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 600; padding: 4px 11px; border-radius: 999px; background: var(--surface); color: var(--ink-2); }
+.tr-card.on .tr-chip { background: var(--surface-2); }
+.tr-chip.live { color: var(--accent-ink); }
+.tr-chip i { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); animation: tr-pulse 1.4s ease-in-out infinite; }
+@keyframes tr-pulse { 50% { opacity: .3; } }
+@media (prefers-reduced-motion: reduce) { .tr-chip i { animation: none; } }
+.tr-sign { padding: 8px 12px; border-radius: var(--r-sm); font-weight: 600; background: var(--surface); }
+.tr-sign-warn { background: var(--warn-soft); color: var(--warn); }
+.tr-sign-bad { background: var(--bad-soft); color: var(--bad); }
+.tr-sign-ok { background: var(--ok-soft); color: var(--ok); }
+.tr-sign-info { background: var(--info-soft); color: var(--info); }
+
+.tr-sel { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: var(--r-md); background: var(--surface-2); min-width: 0; }
+.trips-map { display: flex; flex-direction: column; gap: 10px; }
+.trips-hit { cursor: pointer; }
+.trips-hit:focus-visible { outline: none; }
+.trips-hit:focus-visible circle:last-of-type, .trips-hit:focus-visible path:first-child { stroke: var(--info); stroke-width: 3; }
+.trips-legend { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 12px; color: var(--ink-2); }
+.trips-legend li { display: inline-flex; align-items: center; gap: 6px; }
+.trips-lg { display: inline-block; flex: none; }
+.trips-lg-van { width: 12px; height: 12px; border-radius: 50%; border: 2px solid var(--surface); box-shadow: 0 0 0 1px var(--line); }
+.trips-lg-pin { width: 10px; height: 10px; border-radius: 50% 50% 50% 0; transform: rotate(-45deg); background: var(--ink); }
+.trips-lg-sel { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--ink); }
+
+.tr-tl { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.tr-tech { display: flex; align-items: center; gap: 12px; padding: 10px 4px; min-height: 52px; border-top: 1px solid var(--line); min-width: 0; }
+.tr-tech:first-child { border-top: 0; }
+.tr-tech.off .avatar { opacity: .5; }
+.tr-tech-end { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; flex: none; max-width: 52%; text-align: right; }
+.tr-tech-end .tag { white-space: normal; text-align: right; }
+
+@container tr (max-width: 900px) {
+  .tr-main { grid-template-columns: minmax(0, 1fr); grid-template-rows: none; grid-template-areas: "map" "list" "techs"; }
+}
+@container tr (max-width: 760px) { .tr-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@container tr (max-width: 560px) {
+  .tr-kpis { gap: 10px; }
+  .tr-steps-l { display: none; }
+  .tr-card { padding: 12px; }
+  .tr-card-h { flex-wrap: wrap; }
+  .tr-card-end { flex-direction: row; flex-wrap: wrap; justify-content: flex-start; max-width: none; width: 100%; }
+  .tr-tech { flex-wrap: wrap; }
+  .tr-tech-end { flex-direction: row; flex-wrap: wrap; align-items: center; max-width: none; width: 100%; text-align: left; }
+}

@@ -32,7 +32,7 @@ export function buildWorkspace({ id, name, seed, realNow, generation = 1, owner 
     sim: { failNextActivation: false, saturation: false, equipmentShortage: false, degraded: false },
     ports: {},
     config: {
-      holdMinutes: 5, autoConfirm: false, dossierDeadlineH: 24, travelMin: 4, policyEquipment: 'conditionnel', holidays: [],
+      holdMinutes: 5, autoConfirm: false, dossierDeadlineH: 24, travelMin: 4, autoValidateMin: 60, policyEquipment: 'conditionnel', holidays: [],
       slaH: { DOSSIER_RECU: 24, PAIEMENT_CONFIRME: 12, PREPARATION: 72, PRET_A_PLANIFIER: 48, RDV_CONFIRME: 168, INTERVENTION_EN_COURS: 8, INSTALLATION_TERMINEE: 4, ACTIVATION_EN_ATTENTE: 24, SERVICE_ACTIF: 168 },
       contractDays: 10,
       templates: {

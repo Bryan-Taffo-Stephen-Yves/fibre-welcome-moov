@@ -3,6 +3,7 @@
 import { useQ, call, toast } from './platform.js';
 import { Btn, AsyncBtn, Tag, Sim, Explain, Field, Modal, Panel, Empty, Avatar, AvatarStack, Say, Ring, Stacked, Icon, firstName, money, fmtDate, fmtDateTime, fmtAgo, STATE_INFO, ORDER_STATES, ROLES } from './kit.jsx';
 import { ZONES } from '../server/model.js';
+import { Trips } from './trips.jsx';
 const React = window.React;
 const { useState, useEffect, useRef } = React;
 
@@ -67,6 +68,7 @@ function More({ shown, total, onMore, dark }) {
 
 // ---------- Console ----------
 const SECTIONS = [
+  ['trips', 'Trajets', Icon.compass],
   ['users', 'Comptes', Icon.users],
   ['config', 'Réglages', Icon.settings],
   ['integrations', 'Intégrations', Icon.plug],
@@ -80,7 +82,7 @@ const SECTIONS = [
 export function AdminConsole({ token }) {
   const me = useQ(token, 'me');
   const health = useQ(token, 'admin.health');
-  const [sec, setSec] = useState('users');
+  const [sec, setSec] = useState('trips');
   const bar = useRef(null);
   useEffect(() => {
     const b = bar.current; const el = b && b.querySelector('[aria-selected="true"]');
@@ -102,7 +104,7 @@ export function AdminConsole({ token }) {
       {ro && <span className="ad-ro" title="L’auditeur peut tout lire mais ne peut rien modifier. C’est le serveur qui le vérifie.">{Icon.lock}Lecture seule</span>}
     </div>
     <div className="ad-body" role="tabpanel" aria-label={(SECTIONS.find(s => s[0] === sec) || [])[1]}>
-      {sec === 'users' ? <Users {...P} /> : sec === 'config' ? <Config {...P} /> : sec === 'integrations' ? <Integrations {...P} /> : sec === 'audit' ? <Audit {...P} /> : sec === 'models' ? <Models {...P} /> : sec === 'kb' ? <Kb {...P} /> : sec === 'health' ? <Health {...P} /> : <Payments {...P} />}
+      {sec === 'trips' ? <Trips token={token} /> : sec === 'users' ? <Users {...P} /> : sec === 'config' ? <Config {...P} /> : sec === 'integrations' ? <Integrations {...P} /> : sec === 'audit' ? <Audit {...P} /> : sec === 'models' ? <Models {...P} /> : sec === 'kb' ? <Kb {...P} /> : sec === 'health' ? <Health {...P} /> : <Payments {...P} />}
     </div>
   </div>;
 }
@@ -240,6 +242,7 @@ function Config({ token, ro }) {
           <div className="ad-form2 ad-form2-end">
             <Field label="Délai pour envoyer le dossier après l’achat (heures)" id="cf-dd"><span className="ad-unit ad-unit-w"><input id="cf-dd" key={'dd' + c.dossierDeadlineH} className="input num" inputMode="numeric" disabled={ro} defaultValue={c.dossierDeadlineH ?? 24} onBlur={e => save('dossierDeadlineH', e.target.value)} /><em>h</em></span></Field>
             <Field label="Durée du trajet simulé du technicien (minutes)" id="cf-tr"><span className="ad-unit ad-unit-w"><input id="cf-tr" key={'tr' + c.travelMin} className="input num" inputMode="numeric" disabled={ro} defaultValue={c.travelMin ?? 4} onBlur={e => save('travelMin', e.target.value)} /><em>min</em></span></Field>
+            <Field label="Validation automatique de la visite (minutes sans réponse du client)" id="cf-av" hint="Entre 1 et 240 minutes. Passé ce délai, la visite est validée toute seule."><span className="ad-unit ad-unit-w"><input id="cf-av" key={'av' + c.autoValidateMin} className="input num" inputMode="numeric" disabled={ro} defaultValue={c.autoValidateMin ?? 60} onBlur={e => Number(e.target.value) !== (c.autoValidateMin ?? 60) && save('autoValidateMin', e.target.value)} /><em>min</em></span></Field>
           </div>
           <Field label="Si le matériel manque" id="cf-p"><select id="cf-p" className="input" disabled={ro} value={c.policyEquipment} onChange={e => save('policyEquipment', e.target.value)}><option value="conditionnel">Réservation possible, confirmation bloquée</option><option value="bloquer">Aucune réservation</option></select></Field>
           <label className="switch"><input type="checkbox" disabled={ro} checked={c.autoConfirm} onChange={e => save('autoConfirm', e.target.checked)} /><span className="small">Confirmer les réservations tout seul, sans planificateur</span></label>
@@ -349,6 +352,7 @@ const ACT = {
   'order.close': 'Dossier clôturé', 'activation.retry': 'Activation relancée', 'duplicate.link': 'Doublon rapproché', 'duplicate.unlink': 'Doublon séparé',
   'demo.scenario': 'Scénario lancé', 'demo.clock': 'Horloge avancée', 'demo.webhook': 'Événement simulé', 'demo.integration': 'Panne simulée', 'demo.flag': 'Réglage du simulateur', 'demo.createOrder': 'Commande fictive', 'demo.restore': 'Restauration',
   'sauvegarde.creer': 'Sauvegarde créée', 'sauvegarde.restaurer': 'Sauvegarde restaurée', 'piece.valide': 'Pièce validée', 'piece.refuse': 'Pièce refusée', 'piece.refusee': 'Pièce refusée',
+  'tech.ask': 'Question d’aide du technicien', 'tech.escalate': 'Aide transmise au responsable', 'install.validate': 'Visite validée par le client', 'terrain.aide': 'Question d’aide du technicien', 'terrain.transmettre': 'Aide transmise au responsable',
 };
 const actLabel = a => ACT[a] || a;
 const isRefus = a => a.action === 'acces.refuse' || a.action === 'integration.rejet' || /^REFUS/.test(a.detail || '');

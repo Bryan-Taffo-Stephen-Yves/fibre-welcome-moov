@@ -3,6 +3,7 @@
 import { api, useQ, call, toast, prepareImage, putImage, useOnline, setOnline, netSince, tabGet, tabSet, liveClock, useNow, photoIssues, useImage } from './platform.js';
 import { Btn, AsyncBtn, Tag, Sim, Explain, Field, Modal, StateTag, Empty, Stale, Icon, Picture, Avatar, AvatarStack, Ring, HouseScene, VanScene, NotifPopups, TrackMap, trackInfo, hourLabel, firstName, fmtDate, fmtDateTime, fmtAgo, fmtDur, slotLabel, minutes, money, STATE_INFO, ORDER_STATES, APPT_STATES, ROLES } from './kit.jsx';
 import { PEOPLE } from './people.jsx';
+import { TrackCard } from './trackcard.jsx';
 import { DOC_TYPES, PREP_CHECKLIST, REPORT_TYPES, PAYMENT_STATES, DOSSIER_DOCS } from '../server/model.js';
 const React = window.React;
 const { useState, useEffect, useRef } = React;
@@ -77,7 +78,9 @@ export function ClientApp({ token, compact }) {
     if (target !== oid) setOrderId(target);
     // Technicien en route ou arrivé : la carte du trajet est sur l'accueil.
     let moving = false; try { const x = api.q(token, 'client.order', { orderId: target }); moving = !!x.mission && ['en_route', 'sur_place'].includes(x.mission.status); } catch {}
-    if (n.kind === 'rdv' && !moving) go('rdv');
+    // « Installation terminée : vérifiez et validez » : on ouvre directement la carte de vérification (en haut de l'accueil).
+    if (/vérifiez et validez/i.test(n.title || '')) { go('home'); setTimeout(() => { const el = document.getElementById('cl-signoff'); if (el) { el.scrollIntoView({ block: 'start', behavior: 'smooth' }); try { el.focus({ preventScroll: true }); } catch {} } }, 120); }
+    else if (n.kind === 'rdv' && !moving) go('rdv');
     else if (n.kind === 'message') { setMsgMode('human'); go('msg'); }
     else if (n.kind === 'appel') { setMsgMode('cb'); go('msg'); }
     else go('home');
@@ -131,6 +134,7 @@ const SIDE = {
   notif: ['Les notifications', n => 'Les alertes restent visibles ici, même si ' + n + ' refuse les SMS. Les envois SMS et WhatsApp sont imités.'],
   dossier: ['Le dossier en ligne', (n, h, dl) => n + ' a payé sur le site : il a ' + (dl || 24) + ' h pour envoyer trois photos, son repère et un créneau. Une photo floue ou sombre est signalée tout de suite, avant l’envoi. Il peut envoyer un dossier incomplet : Nadia lui dira ce qui manque.'],
   track: ['Le technicien arrive', n => 'Comme sur une application de taxi : ' + n + ' voit la camionnette avancer et le temps restant, seconde après seconde. Trajet simulé, sans GPS. Le code de réception se donne seulement à la fin.'],
+  sign: ['Vérifier puis valider', n => 'Le technicien a fini. ' + n + ' regarde le voyant de la box, teste Internet, puis valide la visite. Sans réponse, la visite est validée toute seule après un délai. Le technicien est alors libre pour un autre client.'],
   call: ['Appeler le service client', n => n + ' appelle : le téléphone de Nadia sonne dans l’Équipe Moov. Si personne ne décroche, un rappel est créé tout seul. Appel simulé, sans son.'],
 };
 function Side({ tab, name, isRep, go, hold, token, orderId, deadline }) {
@@ -139,6 +143,7 @@ function Side({ tab, name, isRep, go, hold, token, orderId, deadline }) {
   const v = r.data;
   // Sur l'accueil, la guide parle de ce qui se passe vraiment : dossier à remplir, technicien en route.
   const key = v && (v.calls || []).some(c => ['sonne', 'en_cours'].includes(c.status)) ? 'call'
+    : tab === 'home' && v && signPending(v.mission) ? 'sign'
     : tab === 'home' && v && v.mission && ['en_route', 'sur_place'].includes(v.mission.status) ? 'track'
     : tab === 'home' && v && v.dossier && ['a_completer', 'en_retard', 'incomplet'].includes(v.dossier.status) ? 'dossier'
     : tab;
@@ -167,6 +172,7 @@ function nextAction(v, isRep) {
   if (dz && DZ_OPEN.includes(dz.status)) return dossierNext(v, isRep);
   if (mine.length && isRep) { const b = mine[0]; return { title: b.action, text: b.text + ' Seule la cliente peut le faire depuis son téléphone.' }; }
   if (mine.length) { const b = mine[0]; return { title: b.action, text: b.text, go: b.type === 'PIECE_MANQUANTE' ? 'file' : b.type === 'ADRESSE_AMBIGUE' ? 'file' : 'rdv', sub: b.type === 'PIECE_MANQUANTE' ? 'docs' : b.type === 'ADRESSE_AMBIGUE' ? 'addr' : null, cta: b.type === 'PIECE_MANQUANTE' ? 'Envoyer la pièce' : b.type === 'ADRESSE_AMBIGUE' ? 'Préciser mon adresse' : 'Choisir une date' }; }
+  if (signPending(v.mission)) return v.mission.signoff.state === 'probleme' ? { title: 'L’équipe Moov vous répond', icon: Icon.clock, text: 'Nous avons bien reçu votre souci. Quand tout est réglé, vous pouvez valider la visite.' } : { title: 'Vérifiez l’installation', icon: Icon.check, text: 'Regardez la box, cochez ce que vous voyez, puis validez la visite.' };
   switch (o.state) {
     case 'DOSSIER_RECU': return { title: 'Rien à faire pour l’instant', text: 'Moov vérifie votre paiement Moov Money. Vous recevrez une notification.' };
     case 'PAIEMENT_CONFIRME': case 'PREPARATION': return { title: 'Rien à faire pour l’instant', text: 'Moov vérifie votre adresse et le point de raccordement. Vérifiez que vos coordonnées sont justes.', go: 'file', sub: 'addr', cta: 'Vérifier mon adresse' };
@@ -199,7 +205,7 @@ function dossierNext(v, isRep) {
     case 'en_retard': return { title: 'Le délai est dépassé', icon: Icon.clock, text: 'Vous pouvez encore envoyer votre dossier. Plus tôt il arrive, plus tôt le technicien passe.' + onlyHer, wizard: !isRep, cta: 'Terminer mon dossier' };
     case 'incomplet': return { title: 'Il manque : ' + andList(missLabels(dz)), icon: Icon.alert, text: 'Ajoutez ce qui manque : Nadia vérifie dès que c’est arrivé.' + onlyHer, go: isRep ? null : 'file', sub: 'docs', cta: 'Ajouter ce qui manque' };
     case 'a_verifier': return { title: 'Nadia vérifie vos photos', icon: Icon.clock, text: 'Rien à faire pour l’instant. Vous recevrez une notification dès que c’est bon, ou s’il faut reprendre une photo.' };
-    default: return { title: 'Pièces validées', icon: Icon.check, text: 'Hervé choisit l’heure et le technicien de votre visite. Vous recevrez une notification.' };
+    default: return { title: 'Pièces validées', icon: Icon.check, text: 'Moov choisit le technicien et l’heure de votre visite. Vous recevrez une notification.' };
   }
 }
 
@@ -332,23 +338,12 @@ function LiveTrack({ v, me }) {
   const name = firstName(m.techName);
   const title = here ? name + ' est arrivé' : !ti || p >= 1 ? name + ' est tout près' : name + ' arrive dans ' + Math.max(1, ti.leftMin) + ' min';
   const sub = here ? 'Il est devant chez vous : pensez à lui ouvrir.' : !ti ? 'Il est en route vers chez vous.' : p >= 1 ? 'Il cherche votre porte : gardez votre téléphone à portée de main.' : 'Il avance vers chez vous. Trajet simulé pour la démo.';
-  return <section className="card cl-live" data-tour="client-track" aria-live="polite">
-    {t && <div className="cl-live-map">
-      <TrackMap from={t.from} to={t.to} p={p} arrived={here || !!t.arrivedAt} height={186} toLabel="Chez vous" />
-      <span className="cl-live-badge"><span className="cl-live-dot" />{here ? 'Arrivé' : 'En direct'}</span>
-    </div>}
-    {!t && <div className="cl-van"><VanScene height={62} /></div>}
-    <div className="cl-live-head">
-      <b className="cl-live-t">{title}</b>
-      <span className="small muted">{sub}</span>
-    </div>
-    <div className="cl-live-bar" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(p * 100)} aria-label="Trajet parcouru"><i style={{ width: Math.round(p * 100) + '%' }} /></div>
-    <div className="cl-live-ends tiny muted"><span>Agence</span><span>Chez vous</span></div>
-    <div className="cl-tech cl-live-tech">
-      <Avatar name={fullName(m.techName)} size={52} dot="ok" />
-      <div className="grow"><b>{m.techName}</b><span className="small muted">{m.company}</span></div>
-      <Tag tone="info">Carte {m.badge}</Tag>
-    </div>
+  const a = v.appt;
+  const rdv = a ? 'Rendez-vous le ' + longDay(a.date) + (a.time ? ' à ' + hourLabel(a.time) : ', ' + slotLabel(a.slot)) : '';
+  // Le client ne reçoit pas le numéro du technicien : l'appel du technicien viendra plus tard, le service client reste joignable.
+  const person = { name: m.techName, avatar: fullName(m.techName), role: m.company, tag: 'Carte ' + m.badge, call: { label: 'Appel bientôt', disabled: true, note: 'Pour toute question, appelez le service client depuis l’onglet Messages.' } };
+  return <section className="card cl-live" data-tour="client-track">
+    <TrackCard track={t} ws={me.ws} status={m.status} times={m.times || {}} receivedHint={rdv} person={person} title={title} sub={sub} toLabel="Chez vous" fromLabel="Agence" liveTitle mapHeight={186} fallback={<div className="cl-van"><VanScene height={62} /></div>} />
     <div className="cl-code">
       <span className="tiny">Votre code de réception</span>
       <b className="num">{m.receptionCode}</b>
@@ -380,6 +375,137 @@ function RateTech({ token, v }) {
     <div className="cl-q"><span className="small">Un souci pendant le rendez-vous ?</span>{yn(problem, setProblem, ['Non', false], ['Oui', true])}</div>
     <textarea className="input" aria-label="Commentaire facultatif" placeholder="Un mot pour lui (facultatif)" value={c} onChange={e => setC(e.target.value)} />
     <AsyncBtn kind="primary" block disabled={!s} onClick={async () => { rated.add(v.order.id); const r = await call(token, 'tech.rate', { orderId: v.order.id, score: s, clear, problem: problem === true, comment: c }); if (!r.ok) rated.delete(v.order.id); }}>Envoyer</AsyncBtn>
+  </section>;
+}
+
+// ---------- Parcours de la visite : cinq étapes, de « un technicien va vous contacter » à la validation ----------
+// Le suivi sur carte (LiveTrack) et la note (RateTech) existent déjà : ce bandeau n'en reprend que le fil.
+const VJ = ['Un technicien va vous contacter', 'En route', 'Chez vous', 'Installation en cours', 'Vérification et validation'];
+const VJ_AT = { affectee: 1, en_route: 2, sur_place: 3, en_cours: 4, terminee: 5 };
+const HM = new Intl.DateTimeFormat('fr-FR', { timeZone: 'Africa/Abidjan', hour: 'numeric', minute: '2-digit' });
+const hm = t => HM.format(t).replace(/^0?(\d+):(\d+)/, '$1 h $2'); // « 9 h 04 »
+const signDone = so => !!so && ['validee', 'auto'].includes(so.state);
+const signPending = m => !!m && m.status === 'terminee' && !!m.signoff && ['attente', 'probleme'].includes(m.signoff.state);
+const signMode = so => so.mode || (so.state === 'validee' ? 'verifie' : 'delai');
+// Ce que le client lit une fois la visite validée : on distingue « vous avez validé » et « validée automatiquement ».
+const SIGN_SAYS = {
+  verifie: n => ['Vous avez validé la visite', 'Merci d’avoir vérifié. ' + n + ' est de nouveau disponible pour un autre client.'],
+  auto: () => ['Validée automatiquement', 'Vous avez laissé partir le technicien sans vérifier. Un souci plus tard ? Écrivez-nous dans Messages.'],
+  delai: () => ['Validée automatiquement', 'Sans réponse de votre part, la visite a été validée toute seule. Un souci ? Écrivez-nous dans Messages.'],
+};
+const frMin = n => n >= 120 ? Math.floor(n / 60) + ' h ' + pad2(n % 60) : n + ' min';
+
+function VisitJourney({ v }) {
+  const m = v.mission;
+  if (!m || !VJ_AT[m.status]) return null;
+  const so = m.signoff, a = v.appt, t = m.times || {};
+  const cur = VJ_AT[m.status];
+  // Une visite terminée sur un ancien espace n'a pas de validation : rien à demander au client.
+  const done = m.status === 'terminee' && (!so || signDone(so));
+  const name = firstName(m.techName);
+  const when = a ? longDay(a.date) + (a.time ? ' à ' + hourLabel(a.time) : ', ' + slotLabel(a.slot)) : '';
+  const now = [
+    name + ' (' + m.company + ') viendra chez vous' + (when ? ' le ' + when : '') + '.',
+    m.track ? 'Suivez-le sur la carte.' : name + ' est en route vers chez vous.',
+    name + ' est arrivé. Pensez à lui ouvrir.',
+    name + ' installe votre box. Restez joignable.',
+    done ? (so ? SIGN_SAYS[signMode(so)](name)[0] : 'Visite terminée') + '.' : so && so.state === 'probleme' ? 'Souci signalé : l’équipe Moov vous répond.' : 'À vous : vérifiez et validez.',
+  ];
+  const past = [null, t.depart && 'Parti à ' + hm(t.depart), t.arrive && 'Arrivé à ' + hm(t.arrive), t.start && 'Commencé à ' + hm(t.start), done && !so ? 'Visite terminée.' : null];
+  return <section className="card cl-vj" data-tour="client-journey">
+    <div className="spread"><span className="eyebrow">Votre visite</span><Tag tone={done ? 'ok' : 'info'}>{done ? 'Terminée' : 'Étape ' + cur + ' sur 5'}</Tag></div>
+    <ol className="cl-vj-l" aria-label={'Parcours de la visite : étape ' + cur + ' sur 5'}>{VJ.map((s, i) => {
+      const st = done || i < cur - 1 ? 'done' : i === cur - 1 ? 'now' : '';
+      const txt = st === 'now' ? now[i] : st === 'done' ? past[i] : null;
+      return <li key={s} className={st} aria-current={st === 'now' ? 'step' : undefined}>
+        <span className="cl-vj-dot" aria-hidden="true">{st === 'done' ? Icon.check : i + 1}</span>
+        <div className="cl-vj-t"><b>{s}{st === 'done' && <span className="sr-only"> (fait)</span>}</b>{txt && <span className="small muted">{txt}</span>}</div>
+      </li>;
+    })}</ol>
+  </section>;
+}
+
+// Fin de visite : le client regarde la box puis valide, signale un souci, ou laisse partir le technicien.
+// « Internet fonctionne » n'est exigé qu'une fois le service activé : avant, la ligne n'est pas encore ouverte.
+const SIGN_CHECKS = [['voyant', 'Le voyant de la box est allumé', true], ['internet', 'Internet fonctionne sur mon téléphone ou mon ordinateur', 'actif'], ['propre', 'L’espace est propre et rangé', false]];
+const signDraft = new Map(); // cases cochées, gardées si le client change d'onglet
+function SignoffCard({ token, v, me, isRep }) {
+  useNow(1000);
+  const m = v.mission, so = m.signoff, o = v.order;
+  const key = o.id + '|' + m.woId;
+  const [c, setC] = useState(() => signDraft.get(key) || {});
+  const [ask, setAsk] = useState(null); // null, 'souci' ou 'partir'
+  const [txt, setTxt] = useState('');
+  const [err, setErr] = useState(null);
+  const name = firstName(m.techName);
+  const prob = so.state === 'probleme';
+  const left = so.autoAt - liveClock(me.ws);
+  const count = left > 0 ? 'Sans réponse de votre part, la visite sera validée automatiquement dans ' + frMin(Math.max(1, Math.ceil(left / 60e3))) + '.' : 'La validation automatique est en cours.';
+  const toggle = id => { const n = { ...c, [id]: !c[id] }; signDraft.set(key, n); setC(n); setErr(null); };
+  const actif = o.state === 'SERVICE_ACTIF';
+  const checks = { voyant: !!c.voyant, internet: !!c.internet, propre: !!c.propre };
+  const validate = async () => {
+    if (!checks.voyant || (actif && !checks.internet)) { setErr(actif ? 'Cochez que le voyant de la box est allumé et qu’Internet fonctionne, ou choisissez « Il y a un souci ».' : 'Cochez que le voyant de la box est allumé, ou choisissez « Il y a un souci ».'); return; }
+    setErr(null);
+    const r = await call(token, 'install.validate', { orderId: o.id, mode: 'verifie', checks });
+    if (r.ok) signDraft.delete(key);
+  };
+  const sendProblem = async () => {
+    if (txt.trim().length < 5) { setErr('Décrivez le souci en une phrase pour que l’équipe puisse vous aider.'); return; }
+    setErr(null);
+    const r = await call(token, 'install.validate', { orderId: o.id, mode: 'probleme', text: txt.trim(), checks });
+    if (r.ok) { setAsk(null); setTxt(''); }
+  };
+  const leave = async () => { const r = await call(token, 'install.validate', { orderId: o.id, mode: 'auto' }); if (r.ok) signDraft.delete(key); };
+  const head = <div className="cl-hello"><Avatar name={fullName(m.techName)} size={52} dot="ok" /><div className="cl-hello-t"><span>{name} a terminé l’installation</span><b id="cl-sign-t" className="cl-sign-t">Vérifiez l’installation</b></div></div>;
+  if (isRep) return <section className="card cl-sign" id="cl-signoff" tabIndex={-1} aria-labelledby="cl-sign-t">
+    {head}
+    <p className="small muted">Seule la cliente peut vérifier et valider la visite depuis son téléphone.</p>
+    {!prob && <span className="small cl-sign-count">{count}</span>}
+  </section>;
+  return <section className="card cl-sign" id="cl-signoff" tabIndex={-1} aria-labelledby="cl-sign-t" data-tour="client-signoff">
+    {head}
+    {prob ? <div className="alert alert-warn small stack-s" role="status">
+      <b>Nous avons bien reçu votre souci. L’équipe Moov vous répond.</b>
+      {so.problem && <span>« {so.problem} »</span>}
+      <span>Quand c’est réglé, vous pouvez valider la visite ci-dessous.</span>
+    </div> : <p className="small muted">Cela prend une minute. Regardez la box, puis cochez ce que vous voyez.</p>}
+    <div className="cl-checks" role="group" aria-label="Vérifications de l’installation">
+      {SIGN_CHECKS.map(([id, label, kind]) => { const need = kind === true || (kind === 'actif' && actif); return <label key={id} className={'cl-check cl-check-big' + (c[id] ? ' on' : '')}>
+        <input type="checkbox" checked={!!c[id]} onChange={() => toggle(id)} />
+        <span className="cl-box" aria-hidden="true">{Icon.check}</span>
+        <span className="grow cl-check-l">{label}{need && <span className="cl-need">Indispensable</span>}{kind === 'actif' && !actif && <span className="tiny muted" style={{ display: 'block' }}>Internet arrivera après l’activation, ça peut prendre quelques minutes</span>}</span>
+      </label>; })}
+    </div>
+    <Explain open>
+      <span className="cl-sign-help">Le voyant est la petite lumière sur le devant de la box. Il doit rester allumé, sans clignoter en rouge.</span>
+      <span className="cl-sign-help">{actif ? 'Pour tester Internet, ouvrez n’importe quel site sur votre téléphone, connecté au wifi de la box.' : 'Internet arrivera après l’activation de la ligne : ne cochez cette case que s’il marche déjà.'}</span>
+    </Explain>
+    {err && <div className="alert alert-bad small" role="alert">{err}</div>}
+    {!prob && <span className="small cl-sign-count" role="timer" aria-live="off">{count}</span>}
+    <AsyncBtn kind="primary" block className="cl-big-btn" onClick={validate}>Je valide la visite</AsyncBtn>
+    {ask === 'souci' ? <div className="cl-sign-ask stack-s">
+      <label className="cl-lab" htmlFor="cl-sign-txt">Quel est le souci ?</label>
+      <textarea id="cl-sign-txt" className="input" value={txt} onChange={e => { setTxt(e.target.value); setErr(null); }} placeholder="Ex. : le voyant clignote en rouge, ou Internet ne marche pas." autoFocus />
+      <AsyncBtn kind="primary" block className="cl-big-btn" onClick={sendProblem}>Envoyer mon souci</AsyncBtn>
+      <Btn block className="cl-big-btn" onClick={() => { setAsk(null); setErr(null); }}>Annuler</Btn>
+    </div> : !prob && <Btn block className="cl-big-btn" onClick={() => { setAsk('souci'); setErr(null); }}>Il y a un souci</Btn>}
+    {ask === 'partir' ? <div className="alert alert-warn small stack-s" role="alertdialog" aria-label="Confirmer">
+      <b>La visite sera validée tout de suite.</b>
+      <span>Vous pourrez toujours nous écrire dans Messages si un souci apparaît plus tard.</span>
+      <AsyncBtn kind="primary" block className="cl-big-btn" onClick={leave}>Oui, laisser partir {name}</AsyncBtn>
+      <Btn block className="cl-big-btn" onClick={() => setAsk(null)}>Non, je vérifie</Btn>
+    </div> : !prob && ask !== 'souci' && <button type="button" className="link-btn cl-leave" onClick={() => { setAsk('partir'); setErr(null); }}>Laisser partir le technicien sans vérifier</button>}
+  </section>;
+}
+
+// Remerciement juste avant la note du technicien (RateTech).
+function SignoffThanks({ v, me }) {
+  const so = v.lastVisit.signoff;
+  const [t, d] = SIGN_SAYS[signMode(so)](firstName(v.lastVisit.techName));
+  return <section className="card cl-thanks" role="status">
+    <span className="cl-thanks-ic" aria-hidden="true">{Icon.check}</span>
+    <div className="grow stack-s" style={{ gap: 2 }}><b className="cl-block-t">{t}. Merci {firstName(me.user.name)} !</b><span className="small muted">{d}</span></div>
   </section>;
 }
 
@@ -478,7 +604,7 @@ function DossierWizard({ token, v, me, wiz, setWiz, go }) {
     </section>}
 
     {step === 2 && <section className="card cl-book">
-      <p className="small muted">Choisissez une demi-journée. Hervé vous confirmera l’heure exacte et le technicien après la vérification de vos photos.</p>
+      <p className="small muted">Choisissez une demi-journée. Moov vous confirmera l’heure exacte et le technicien après la vérification de vos photos.</p>
       {av.data && av.data.conditional && <div className={'alert small ' + (av.data.conditional === 'bloque' ? 'alert-bad' : 'alert-warn')}>{av.data.conditional === 'bloque' ? 'Matériel indisponible : aucune date ne vous est promise pour l’instant.' : 'Matériel en tension : votre créneau sera confirmé quand l’équipement sera disponible.'} <Sim /></div>}
       {slots.length === 0 && av.data && <Empty>Aucun créneau libre pour le moment. Envoyez votre dossier plus tard ou appelez le service client.</Empty>}
       <SlotGrid slots={slots} isSel={s => wiz.date === s.date && wiz.slot === s.slot} onPick={s => setWiz({ date: s.date, slot: s.slot })} />
@@ -651,7 +777,10 @@ function Home({ token, orderId, go, me, isRep }) {
   const last = ORDER_STATES.length;
   const finished = ['SERVICE_ACTIF', 'CLOTURE'].includes(o.state);
   const live = !!v.mission && (v.mission.status === 'sur_place' || (v.mission.status === 'en_route' && !!v.mission.track));
-  const rate = !!v.lastVisit && !isRep && (!v.techRating || rated.has(o.id));
+  // Le technicien n'est noté qu'une fois la visite validée (ou si aucune validation n'était demandée).
+  const rate = !!v.lastVisit && !isRep && (!v.lastVisit.signoff || signDone(v.lastVisit.signoff)) && (!v.techRating || rated.has(o.id));
+  const sign = signPending(v.mission) && !o.cancelled;
+  const journey = !!v.mission && !!VJ_AT[v.mission.status] && !finished && !o.cancelled;
   const prep = !live && o.state === 'RDV_CONFIRME' && v.appt && v.appt.status === 'confirme' && !(v.mission && ['en_route', 'sur_place', 'en_cours'].includes(v.mission.status));
   const dzCard = !dzOpen ? null
     : draft ? <DossierStart v={v} me={me} na={na} onStart={() => setWiz({ open: true })} />
@@ -659,10 +788,14 @@ function Home({ token, orderId, go, me, isRep }) {
     : <DossierWaiting token={token} v={v} na={na} />;
   return <>
     <Stale at={v.stale} />
+    {sign && <SignoffCard token={token} v={v} me={me} isRep={isRep} />}
+    {journey && <VisitJourney v={v} />}
     {live && <LiveTrack v={v} me={me} />}
+    {live && v.mission.status === 'en_route' && !isRep && <Prep token={token} v={v} arriving />}
+    {rate && !v.techRating && !!v.lastVisit.signoff && <SignoffThanks v={v} me={me} />}
     {rate && <RateTech key={v.lastVisit.woId} token={token} v={v} />}
     {dzCard}
-    {dz && !o.cancelled && !finished && <DossierSteps v={v} />}
+    {dz && !o.cancelled && !finished && !journey && <DossierSteps v={v} />}
     {prep && <PrepNudge v={v} go={go} />}
     <section className="card cl-hero" data-tour="client-state">
       <div className="cl-scene">
@@ -798,6 +931,7 @@ function Appointments({ token, orderId, go }) {
   const slots = av.data ? av.data.slots : [];
   return <>
     <div className="cl-h"><h2>Rendez-vous</h2></div>
+    {!!v.mission && !!VJ_AT[v.mission.status] && !o.cancelled && !['SERVICE_ACTIF', 'CLOTURE'].includes(o.state) && <VisitJourney v={v} />}
     {appt && <section className="card cl-appt" data-tour="client-appt">
       <div className="cl-appt-main">
         <DateTile t={appt.date} tone="lime" />
@@ -808,7 +942,7 @@ function Appointments({ token, orderId, go }) {
         </div>
         {appt.time && v.mission && <Avatar name={fullName(v.mission.techName)} size={44} />}
       </div>
-      {!underway && <p className="small muted">{appt.status === 'reserve' ? (dz ? 'Créneau demandé. Hervé confirme l’heure exacte et le technicien après la vérification de vos photos.' : 'Le créneau vous est réservé. Moov confirme l’équipe sous peu.') : appt.time ? 'Le technicien vient à cette heure. Vous recevrez un rappel la veille, puis son trajet en direct.' : 'Une équipe est affectée. Vous recevrez un rappel la veille.'}</p>}
+      {!underway && <p className="small muted">{appt.status === 'reserve' ? (dz ? 'Créneau demandé. Moov confirme l’heure exacte et le technicien après la vérification de vos photos.' : 'Le créneau vous est réservé. Moov confirme l’équipe sous peu.') : appt.time ? 'Le technicien vient à cette heure. Vous recevrez un rappel la veille, puis son trajet en direct.' : 'Une équipe est affectée. Vous recevrez un rappel la veille.'}</p>}
       {underway && <p className="small cl-note">Le technicien est déjà en route ou chez vous : pour changer ce rendez-vous, écrivez à votre conseiller dans Messages.</p>}
       {!changing && !underway && <div className="row"><Btn size="s" onClick={() => setChanging(true)}>Modifier</Btn><Btn size="s" kind="ghost" className="cl-danger-link" onClick={() => setCancelAsk(true)}>Annuler le rendez-vous</Btn></div>}
     </section>}
@@ -867,7 +1001,7 @@ function HoldTimer({ hold }) {
   </span>;
 }
 
-function Prep({ token, v }) {
+function Prep({ token, v, arriving }) {
   const o = v.order;
   const items = PREP_CHECKLIST.filter(i => !i.when || i.when === o.address.building);
   // Le compteur suit les points indispensables, comme sur l'accueil (les autres sont conseillés).
@@ -877,7 +1011,7 @@ function Prep({ token, v }) {
   const locked = o.cancelled || ORDER_STATES.indexOf(o.state) >= ORDER_STATES.indexOf('INSTALLATION_TERMINEE');
   return <section className="card cl-prep" data-tour="client-prep">
     <div className="card-title">
-      <div className="stack-s" style={{ gap: 0 }}><h3>Préparer la visite</h3><span className="tiny muted">{items.every(i => o.prep[i.id]) ? 'Tout est prêt, merci !' : all ? 'L’indispensable est prêt, merci !' : 'Indispensable : ' + done + ' sur ' + need.length + ' · pour éviter un second déplacement'}</span></div>
+      <div className="stack-s" style={{ gap: 0 }}><h3>{arriving ? 'Avant son arrivée : vérifiez' : 'Préparer la visite'}</h3><span className="tiny muted">{arriving && !all ? 'Cochez ce qui est prêt : le technicien le voit sur son téléphone.' : items.every(i => o.prep[i.id]) ? 'Tout est prêt, merci !' : all ? 'L’indispensable est prêt, merci !' : 'Indispensable : ' + done + ' sur ' + need.length + ' · pour éviter un second déplacement'}</span></div>
       <span role="img" aria-label={done + ' sur ' + need.length + ' indispensables cochés'}><Ring value={done} max={need.length} size={50} stroke={5} color="var(--ok)"><span className="cl-ring-s num">{done}/{need.length}</span></Ring></span>
     </div>
     <div className="cl-checks">
@@ -1358,7 +1492,7 @@ function Notifications({ token, me, onBack, onOpen }) {
       {unread > 0 && <AsyncBtn size="s" kind="ghost" onClick={() => call(token, 'notif.read', { all: true })}>Tout marquer lu</AsyncBtn>}
     </div>
     {list.length === 0 ? <div className="card cl-empty"><Empty>Aucune notification pour l’instant.</Empty></div>
-      : <section className="card cl-notifs">{list.map(n => { const who = /^Réponse de (.+)$/.exec(n.title || '') || (n.title === 'Technicien en route' && /^(.+?) est en route/.exec(n.body || '')); return <div key={n.id} className={'cl-notif' + (n.read ? '' : ' unread') + (n.orderId ? ' cl-notif-go' : '')} role={n.orderId ? 'button' : undefined} tabIndex={n.orderId ? 0 : undefined} onClick={() => { if (!n.read) call(token, 'notif.read', { id: n.id }, { silent: true }); if (n.orderId && onOpen) onOpen(n); }} onKeyDown={e => { if (e.key === 'Enter' && n.orderId && onOpen) { call(token, 'notif.read', { id: n.id }, { silent: true }); onOpen(n); } }}>
+      : <section className="card cl-notifs">{list.map(n => { const who = /^Réponse de (.+)$/.exec(n.title || '') || (/^Technicien en route/.test(n.title || '') && /^(.+?) est en route/.exec(n.body || '')); return <div key={n.id} className={'cl-notif' + (n.read ? '' : ' unread') + (n.orderId ? ' cl-notif-go' : '')} role={n.orderId ? 'button' : undefined} tabIndex={n.orderId ? 0 : undefined} onClick={() => { if (!n.read) call(token, 'notif.read', { id: n.id }, { silent: true }); if (n.orderId && onOpen) onOpen(n); }} onKeyDown={e => { if (e.key === 'Enter' && n.orderId && onOpen) { call(token, 'notif.read', { id: n.id }, { silent: true }); onOpen(n); } }}>
         {who ? <span className={'cl-notif-av' + (n.read ? '' : ' cl-ic-dot')}><Avatar name={who[1]} size={40} /></span> : <span className={'cl-ic' + (NOTIF_TONE[n.kind] ? ' cl-ic-' + NOTIF_TONE[n.kind] : '') + (n.read ? '' : ' cl-ic-dot')}>{NOTIF_ICON[n.kind] || Icon.bell}</span>}
         <div className="grow stack-s" style={{ gap: 2 }}>
           <div className="spread" style={{ flexWrap: 'nowrap', alignItems: 'baseline' }}><b className="small">{n.title}</b><span className="tiny muted cl-nowrap">{fmtDateTime(n.at)}</span></div>
