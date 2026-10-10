@@ -239,10 +239,13 @@ export function Labo({ owner, setOwner, go, openRoom }) {
   const running = sc => sc.active && !isDone(sc);
   // Scénario qui se vérifie à l'œil (rien à mesurer côté serveur), comme SC-16.
   const observeOnly = sc => sc.active && sc.steps.every(x => x.done === null);
-  const featured = open === '' ? null : scs.find(sc => sc.code === open) || scs.find(running) || null;
+  // Au retour sur le Labo, on retrouve le dernier scénario ouvert s'il est encore en cours, sinon le premier en cours.
+  const last = tabGet('fw:laboLast', null);
+  const featured = open === '' ? null : scs.find(sc => sc.code === open) || scs.find(sc => sc.code === last && running(sc)) || scs.find(running) || null;
+  const choose = code => { setOpen(code); if (code) tabSet('fw:laboLast', code); };
   const showFeat = () => setTimeout(() => { const el = document.getElementById('lb-feat'); if (!el) return; const r = el.getBoundingClientRect(); if (r.top < 70 || r.top > window.innerHeight - 160) el.scrollIntoView({ block: 'start', behavior: 'smooth' }); }, 60);
-  const launch = async sc => { const r = await sim('demo.scenario', { code: sc.code }, 'Scénario ' + sc.code + ' prêt.'); if (r.ok) { setOpen(sc.code); if (r.data.orderIds[0]) setOrderId(r.data.orderIds[0]); showFeat(); } };
-  const toggle = sc => { const on = featured && featured.code === sc.code; setOpen(on ? '' : sc.code); if (!on) showFeat(); };
+  const launch = async sc => { const r = await sim('demo.scenario', { code: sc.code }, 'Scénario ' + sc.code + ' prêt.'); if (r.ok) { choose(sc.code); if (r.data.orderIds[0]) setOrderId(r.data.orderIds[0]); showFeat(); } };
+  const toggle = sc => { const on = featured && featured.code === sc.code; choose(on ? '' : sc.code); if (!on) showFeat(); };
   const counts = { all: scs.length, run: scs.filter(running).length, ok: scs.filter(isDone).length };
   const shown = scs.filter(sc => filter === 'all' || (filter === 'run' ? running(sc) : isDone(sc)));
   const faces = sc => [...new Set(sc.steps.map(x => ROLE_FACE[x.role] || 'Aya'))];
@@ -452,7 +455,7 @@ export function Labo({ owner, setOwner, go, openRoom }) {
             {cur ? <Tag tone="ok">Ouvert</Tag> : w.ownerToken && <Btn size="s" onClick={() => setOwner(w.ownerToken)}>Ouvrir</Btn>}
           </div>;
         })}</div>
-        <div className="lb-new"><input className="input" aria-label="Nom du nouvel espace" value={newName} onChange={e => setNewName(e.target.value)} /><AsyncBtn size="s" kind="primary" onClick={async () => { api.createWorkspace({ name: newName }); refresh(); toast('Espace « ' + newName + ' » créé. Il est totalement séparé de celui-ci.'); }}>Créer un espace</AsyncBtn></div>
+        <div className="lb-new"><input className="input" aria-label="Nom du nouvel espace" value={newName} onChange={e => setNewName(e.target.value)} /><AsyncBtn size="s" kind="primary" onClick={async () => { const name = newName.trim().replace(/\s+/g, ' '); if (!name) return toast('Donnez un nom à l’espace avant de le créer.', true); api.createWorkspace({ name }); refresh(); toast('Espace « ' + name + ' » créé. Il est totalement séparé de celui-ci.'); }}>Créer un espace</AsyncBtn></div>
         <details className="lb-more"><summary>Voir le détail</summary><p className="small muted">Graine {s.ws.seed} · génération {s.ws.generation} · créé le {fmtDateTime(s.ws.createdAt)}. Chaque espace a ses propres utilisateurs, dossiers, événements et tâches : réinitialiser l’un ne touche pas les autres.</p></details>
       </section>
     </div>

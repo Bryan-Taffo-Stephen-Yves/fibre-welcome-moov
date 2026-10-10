@@ -540,14 +540,16 @@ test('Démo en direct : avis automatique sur les photos (photo floue, même phot
   assert.equal(adv.simulated, true);
   const by = type => adv.items.find(i => i.type === type);
   assert.match(by('selfie_cni').reason, /floue/);
-  assert.match(by('cni_recto').reason, /Même photo/); assert.match(by('cni_verso').reason, /Même photo/);
+  // Deux photos identiques : seule la seconde (le verso) est à refaire, la première reste valable.
+  assert.equal(by('cni_recto').verdict, 'ok'); assert.match(by('cni_verso').reason, /Même photo/);
   // Seule la conseillère peut suivre l'avis, et les autres rôles n'ont aucun droit de décision par ce chemin.
   assert.equal((await t.api.exec(herve, 'dossier.followAdvice', { orderId: b.id })).ok, false);
   assert.equal((await t.api.exec(c, 'dossier.followAdvice', { orderId: b.id })).ok, false);
   const done = ok(await t.api.exec(nadia, 'dossier.followAdvice', { orderId: b.id }));
-  assert.equal(done.refuse, 3); assert.equal(done.valide, 0);
+  assert.equal(done.refuse, 2); assert.equal(done.valide, 1);
   const docs = t.ws().documents.filter(d => d.orderId === b.id);
-  assert.ok(docs.every(d => d.status === 'refuse' && d.reason));
+  assert.ok(docs.filter(d => d.type !== 'cni_recto').every(d => d.status === 'refuse' && d.reason));
+  assert.equal(docs.find(d => d.type === 'cni_recto').status, 'valide');
   assert.ok(t.api.q(c, 'notifications').some(n => /Pièce à remplacer/.test(n.title)));
   // Le client renvoie trois bonnes photos différentes : l'avis dit de valider, et « suivre l'avis » valide les trois.
   ok(await up('cni_recto', good, 'data:image/jpeg;base64,CCCC')); ok(await up('cni_verso', good, 'data:image/jpeg;base64,DDDD')); ok(await up('selfie_cni', good, 'data:image/jpeg;base64,EEEE'));
@@ -751,6 +753,12 @@ test('Fin de visite : souci réglé par le superviseur, aide close, commande ann
   const tr = t.api.q(t.as('admin'), 'admin.trips');
   assert.ok(tr.trips.some(r => r.woId === v2.wo.id && r.stage === 4));
   assert.equal(tr.techs.find(x => x.id === v2.wo.techUserId).status, 'en_cours');
+  // Un technicien n'est jamais sur deux missions à la fois : on termine celle-ci avant d'en commencer une autre.
+  await v2.act('checklist', { values: { puissance: -18, pto: true, cheminement: true, ont_led: true } });
+  await v2.act('serial', { serial: t.ws().equipment.find(e => e.status === 'stock' && e.model.includes('ZTE')).serial });
+  await v2.act('photo', { name: 'box.jpg' });
+  await v2.act('reception', { mode: 'code', code: v2.cur().receptionCode, status: 'accord' });
+  await v2.act('finish', {});
   // Commande annulée entre la fin de la visite et la validation automatique : pas de texte « validée » au client, technicien libéré.
   const v3 = await visitReady(t, 23, 'Cliente Annulee');
   await v3.act('depart', {}); await v3.act('arrive', {});
@@ -779,4 +787,490 @@ test('Fin de visite : souci réglé par le superviseur, aide close, commande ann
   t.ws().documents.find(d => d.orderId === v5.b.id).img = 'img_abcdefgh12';
   const hp = ok(await t.api.exec(v5.tech, 'tech.ask', { woId: v5.wo.id, question: 'câble', photo: { name: 'x.jpg', img: 'img_abcdefgh12' } }));
   assert.equal(hp.photo.img, null);
+});
+
+// ---------- Correctifs après les retours des testeurs indépendants ----------
+// Annulation demandée par le client puis instruite par la conseillère, avant le départ du technicien.
+async function cancelFlow(t, clientTok, oid) {
+  ok(await t.api.exec(clientTok, 'cancel.request', { orderId: oid, reason: 'Je change d’avis' }));
+  ok(await t.api.exec(t.as('conseiller'), 'cancel.instruct', { orderId: oid, note: 'Client joint' }));
+}
+const decideCancel = async (t, oid, okFlag = true) => {
+  const ap = t.ws().approvals.find(a => a.orderId === oid && a.kind === 'annulation' && a.status === 'en_attente');
+  return t.api.exec(t.as('superviseur'), 'approval.decide', { id: ap.id, ok: okFlag });
+};
+
+test('Annulation validée pendant l’activation : rien ne bloque l’espace, l’activation est abandonnée', async () => {
+  const t = setup(1);
+  const v = await visitReady(t, 31, 'Cliente Activation');
+  await cancelFlow(t, v.c, v.b.id);
+  await v.act('depart', {}); await v.act('arrive', {}); await finishVisit(t, v);
+  const order = () => t.ws().orders.find(o => o.id === v.b.id);
+  assert.equal(order().state, 'ACTIVATION_EN_ATTENTE');
+  ok(await decideCancel(t, v.b.id));
+  assert.equal(order().cancelled, true);
+  // L'activation prévue deux minutes plus tard ne lève aucune erreur : elle est abandonnée.
+  t.tick(5 * 60e3); await t.api.pump(t.wsId);
+  const ws = t.ws();
+  assert.equal(ws.activations.find(a => a.orderId === v.b.id).status, 'annulee');
+  assert.ok(!ws.deliveries.some(d => d.orderId === v.b.id && d.status === 'en_attente'));
+  assert.equal(order().state, 'ACTIVATION_EN_ATTENTE');
+  // Toutes les autres commandes de l'espace continuent de marcher.
+  const admin = t.as('admin');
+  ok(await t.api.exec(admin, 'degraded.set', { on: false }));
+  ok(await t.api.exec(admin, 'config.set', { key: 'holdMinutes', value: 7 }));
+  ok(await t.api.exec(t.as('conseiller'), 'note.add', { orderId: v.b.id, text: 'Dossier annulé, rien à faire.' }));
+  // Un résultat d'activation qui arrive quand même est classé sans effet.
+  const late = ok(await t.api.exec(t.token, 'demo.webhook', { orderId: v.b.id, kind: 'wrongEquipment' }));
+  assert.equal(late[0].status, 'ignore');
+  // Un paiement confirmé avant l'annulation est bien remboursé (simulé).
+  assert.equal(ws.refunds.find(r => r.orderId === v.b.id).status, 'rembourse');
+  // Une tâche qui échouerait malgré tout est marquée en erreur au lieu de bloquer l'espace.
+  t.ws().jobs.push({ id: 'Jbad', kind: 'send', ref: 'SMS-inexistant', due: 0, generation: t.ws().generation, attempts: 0 });
+  t.ws().deliveries.push({ id: 'DLVbad', provider: 'inconnu', eventId: 'x', orderId: 'O1', kind: 'activation.request', status: 'en_attente', attempts: 0, nextAt: 0, generation: t.ws().generation });
+  ok(await t.api.exec(admin, 'config.set', { key: 'holdMinutes', value: 8 }));
+  assert.equal(t.ws().deliveries.find(d => d.id === 'DLVbad').status, 'abandon');
+});
+
+test('Annulation validée pendant que le technicien est sur place : mission close, technicien libéré, matériel remis en stock', async () => {
+  const t = setup(1);
+  const v = await visitReady(t, 32, 'Cliente SurPlace');
+  await cancelFlow(t, v.c, v.b.id);
+  await v.act('depart', {}); await v.act('arrive', {}); await v.act('start', {});
+  await v.act('checklist', { values: { puissance: -18, pto: true, cheminement: true, ont_led: true } });
+  const serial = t.ws().equipment.find(e => e.status === 'stock' && e.model.includes('ZTE')).serial;
+  await v.act('serial', { serial });
+  assert.equal(t.ws().equipment.find(e => e.serial === serial).status, 'attribue');
+  ok(await decideCancel(t, v.b.id));
+  const ws = t.ws();
+  assert.equal(v.cur().status, 'annulee');
+  assert.ok(v.cur().freeAt > 0, 'technicien libéré à une date précise');
+  assert.equal(ws.equipment.find(e => e.serial === serial).status, 'stock');
+  assert.equal(ws.equipment.find(e => e.serial === serial).orderId, null);
+  assert.equal(ws.appointments.find(a => a.orderId === v.b.id).status, 'annule');
+  assert.equal(t.api.q(t.as('admin'), 'admin.trips').techs.find(x => x.id === v.wo.techUserId).status, 'libre');
+  assert.ok(ws.notifications.some(n => n.userId === v.wo.techUserId && n.title === 'Mission annulée'));
+  // Le technicien reçoit un refus clair (pas une erreur technique) s'il tente de terminer.
+  const fin = await t.api.exec(v.tech, 'wo.action', { woId: v.wo.id, action: 'finish' });
+  assert.equal(fin.ok, false); assert.ok(fin.error.message.length > 10 && !/inattendue/.test(fin.error.message));
+  // La demandeuse (conseillère) est prévenue de la décision.
+  assert.ok(ws.notifications.some(n => /Annulation validée/.test(n.title) && (ws.users.find(u => u.id === n.userId) || {}).role === 'conseiller'));
+});
+
+test('Dossier annulé : plus de créneau tenu ni réservé, les gardes en cours sont libérées', async () => {
+  const t = setup(1);
+  const run = ok(await t.api.exec(t.token, 'demo.scenario', { code: 'SC-13' }));
+  const oid = run.orderIds[0];
+  const awa = t.api.switchUser(t.token, 'U1');
+  const slot = t.api.q(awa, 'client.availability', { orderId: oid }).slots.find(s => s.left > 0);
+  const hold = ok(await t.api.exec(awa, 'appt.hold', { orderId: oid, date: slot.date, slot: slot.slot }));
+  await cancelFlow(t, awa, oid);
+  ok(await decideCancel(t, oid));
+  assert.equal(t.ws().holds.find(h => h.id === hold.id).status, 'libere');
+  const usedBefore = t.ws().capacity.map(c => c.used).join();
+  const book = await t.api.exec(awa, 'appt.book', { orderId: oid, holdId: hold.id });
+  assert.equal(book.ok, false); assert.equal(book.error.code, 'annule');
+  const again = await t.api.exec(awa, 'appt.hold', { orderId: oid, date: slot.date, slot: slot.slot });
+  assert.equal(again.ok, false); assert.equal(again.error.code, 'annule');
+  assert.equal(t.ws().capacity.map(c => c.used).join(), usedBefore);
+  assert.ok(!t.ws().appointments.some(a => a.orderId === oid && a.status === 'reserve'));
+  // L'assistant ne parle pas comme si la commande était active.
+  const ans = ok(await t.api.exec(awa, 'assistant.ask', { orderId: oid, question: 'Où en est mon dossier ?' }));
+  assert.match(JSON.stringify(ans.blocks), /annulée/);
+  assert.ok(!/choisir un créneau/.test(JSON.stringify(ans.blocks)));
+});
+
+test('Commande jamais payée : annulée, mais pas « remboursée »', async () => {
+  const t = setup(1);
+  const o = ok(await t.api.exec(t.token, 'demo.createOrder', { zone: 'cocody', customerId: 'U1' }));
+  const awa = t.api.switchUser(t.token, 'U1');
+  await cancelFlow(t, awa, o.id);
+  ok(await decideCancel(t, o.id));
+  t.tick(5 * 60e3); await t.api.pump(t.wsId);
+  const ws = t.ws();
+  assert.equal(ws.orders.find(x => x.id === o.id).cancelled, true);
+  assert.equal(ws.orders.find(x => x.id === o.id).payment.status, 'en_attente');
+  assert.notEqual(ws.refunds.find(r => r.orderId === o.id).status, 'rembourse');
+  assert.ok(!ws.events.some(e => e.orderId === o.id && e.type === 'REMBOURSEMENT_SIMULE'));
+  assert.ok(!ws.jobs.some(j => j.kind === 'refund' && !j.done));
+});
+
+test('Un technicien ne part pas sur une seconde mission tant que la première est en cours', async () => {
+  const t = setup(1);
+  const r1 = ok(await t.api.exec(t.token, 'demo.scenario', { code: 'SC-11' }));
+  const r2 = ok(await t.api.exec(t.token, 'demo.scenario', { code: 'SC-07' }));
+  const wo1 = t.ws().workOrders.find(w => w.orderId === r1.orderIds[0]), wo2 = t.ws().workOrders.find(w => w.orderId === r2.orderIds[0]);
+  assert.equal(wo1.techUserId, wo2.techUserId);
+  const tech = t.api.switchUser(t.token, wo1.techUserId);
+  const go = (wo, action, args = {}) => t.api.exec(tech, 'wo.action', { woId: wo.id, action, args });
+  ok(await go(wo1, 'depart'));
+  for (const action of ['depart', 'arrive', 'start']) { const r = await go(wo2, action); assert.equal(r.ok, false, action); assert.match(r.error.message, /déjà une mission/); }
+  assert.equal(t.ws().workOrders.find(w => w.id === wo2.id).status, 'affectee');
+  ok(await go(wo1, 'fail', { reason: 'CLIENT_ABSENT' }));
+  ok(await go(wo2, 'depart'));
+  assert.equal(t.ws().workOrders.find(w => w.id === wo2.id).status, 'en_route');
+});
+
+test('Droits : note interne, images, validations d’autres zones et délégation', async () => {
+  const t = setup(1);
+  const run = ok(await t.api.exec(t.token, 'demo.scenario', { code: 'SC-11' }));
+  const oid = run.orderIds[0];
+  const o = t.ws().orders.find(x => x.id === oid);
+  const wo = t.ws().workOrders.find(w => w.orderId === oid);
+  const nadia = t.as('conseiller');
+  // 1. Le technicien ne voit jamais les notes internes de l'équipe (ni les notes d'appel).
+  ok(await t.api.exec(nadia, 'note.add', { orderId: oid, text: 'SECRETNADIA ne pas dire au client' }));
+  const tech = t.api.switchUser(t.token, wo.techUserId);
+  const mine = t.api.q(tech, 'tech.missions');
+  assert.equal(JSON.stringify(mine).includes('SECRETNADIA'), false);
+  assert.deepEqual(mine.find(w => w.id === wo.id).notes, []);
+  const owner = t.api.switchUser(t.token, o.customerId);
+  assert.equal(JSON.stringify(t.api.q(owner, 'client.order', { orderId: oid })).includes('SECRETNADIA'), false);
+  // 2. L'administrateur et l'auditeur ne reçoivent ni miniature ni référence de pièce d'identité.
+  ok(await t.api.exec(nadia, 'doc.request', { orderId: oid, type: 'cni' }));
+  ok(await t.api.exec(owner, 'doc.upload', { orderId: oid, type: 'cni', name: 'cni.jpg', size: 9e4, mime: 'image/jpeg', img: 'img_abcdefgh2345', thumb: 'data:image/jpeg;base64,AAAA' }));
+  for (const role of ['admin', 'auditeur']) {
+    const d = t.api.q(t.as(role), 'ops.order', { orderId: oid }).documents.find(x => x.type === 'cni');
+    assert.ok(d, role); assert.equal(d.thumb, null, role); assert.equal(d.img, null, role);
+  }
+  assert.equal(t.api.q(nadia, 'ops.order', { orderId: oid }).documents.find(x => x.type === 'cni').img, 'img_abcdefgh2345');
+  // 3. Une demande d'approbation d'une autre zone reste invisible pour un conseiller limité à sa zone.
+  const run13 = ok(await t.api.exec(t.token, 'demo.scenario', { code: 'SC-13' }));
+  await cancelFlow(t, t.api.switchUser(t.token, 'U1'), run13.orderIds[0]);
+  const adv = t.ws().users.find(u => u.role === 'conseiller');
+  assert.ok(t.api.q(nadia, 'ops.queues').approvals.length >= 1);
+  ok(await t.api.exec(t.as('admin'), 'user.setZones', { userId: adv.id, zones: ['bingerville'] }));
+  assert.equal(t.api.q(nadia, 'ops.queues').approvals.length, 0);
+  assert.equal(t.api.q(nadia, 'admin.refunds').approvals.length, 0);
+  // 4. Le représentant n'a que ce que sa délégation prévoit, et pas les procédures internes.
+  const awa = t.api.switchUser(t.token, 'U1');
+  ok(await t.api.exec(awa, 'msg.send', { orderId: 'O1', text: 'Message privé du client' }));
+  ok(await t.api.exec(awa, 'delegation.revoke', { id: 'DL1' }));
+  const rep = t.ws().users.find(u => u.role === 'representant');
+  ok(await t.api.exec(awa, 'delegation.add', { orderId: 'O1', delegateId: rep.id, scopes: ['rdv'] }));
+  const repTok = t.api.switchUser(t.token, rep.id);
+  const view = t.api.q(repTok, 'client.order', { orderId: 'O1' });
+  assert.deepEqual(view.messages, []); assert.deepEqual(view.callbacks, []); assert.deepEqual(view.tickets, []); assert.deepEqual(view.delegations, []);
+  assert.equal((await t.api.exec(repTok, 'report.create', { orderId: 'O1', type: 'adresse' })).ok, false);
+  assert.equal((await t.api.exec(repTok, 'msg.send', { orderId: 'O1', text: 'bonjour' })).ok, false);
+  assert.ok(!t.api.q(repTok, 'kb.public').some(d => d.scope !== 'public'));
+  assert.ok(t.api.q(t.as('conseiller'), 'kb.public').some(d => d.scope !== 'public'));
+  // Avec la portée « messages », il voit les échanges (mais toujours pas de pièce d'identité).
+  ok(await t.api.exec(awa, 'delegation.add', { orderId: 'O1', delegateId: rep.id, scopes: ['rdv', 'messages'] }));
+  assert.ok(t.api.q(repTok, 'client.order', { orderId: 'O1' }).messages.length >= 1);
+});
+
+test('Entrées hostiles : pas de pollution du prototype, pas d’erreur technique brute', async () => {
+  const t = setup(1);
+  const sup = t.as('superviseur'), adm = t.as('admin'), awa = t.api.switchUser(t.token, 'U1'), nadia = t.as('conseiller');
+  const french = r => { assert.equal(r.ok, false); assert.ok(r.error.message && !/inattendue|undefined|TypeError/.test(r.error.message), r.error.message); };
+  french(await t.api.exec(sup, 'network.addPorts', { zone: '__proto__', n: 2 }));
+  french(await t.api.exec(sup, 'network.addPorts', { zone: 'constructor', n: 2 }));
+  assert.equal(({}).free, undefined); assert.equal(Object.prototype.free, undefined);
+  for (const name of ['constructor', '__proto__', 'toString', 'hasOwnProperty']) {
+    french(await t.api.exec(awa, name, {}));
+    assert.throws(() => t.api.q(awa, name), e => e.code === 'requete');
+  }
+  french(await t.api.exec(awa, 'doc.upload', { orderId: 'O1', type: 'constructor', name: 'a.jpg', size: 10, mime: 'image/jpeg' }));
+  french(await t.api.exec(nadia, 'doc.request', { orderId: 'O1', type: '__proto__' }));
+  french(await t.api.exec(awa, 'report.create', { orderId: 'O1', type: 'constructor' }));
+  french(await t.api.exec(awa, 'report.create', { orderId: 'O1', type: '__proto__' }));
+  french(await t.api.exec(t.token, 'demo.flag', { key: 'constructor', value: true }));
+  french(await t.api.exec(t.token, 'demo.integration', { provider: '__proto__', up: false }));
+  french(await t.api.exec(awa, 'msg.send', JSON.parse('{"orderId":"O1","text":"x","__proto__":{"admin":true}}')));
+  assert.equal(({}).admin, undefined);
+  // Arguments absents ou mal typés.
+  french(await t.api.exec(awa, 'msg.send', null));
+  french(await t.api.exec(awa, 'msg.send', 'texte'));
+  french(await t.api.exec(awa, 'msg.send', [1, 2]));
+  assert.throws(() => t.api.q(nadia, 'ops.orders', null), e => e.code === 'args');
+  assert.throws(() => t.api.q(nadia, 'ops.orders', 'x'), e => e.code === 'args');
+  assert.throws(() => t.api.q(nadia, 12), e => e.code === 'requete');
+  french(await t.api.exec(adm, 'user.setZones', { userId: 'U999', zones: ['cocody'] }));
+  french(await t.api.exec(adm, 'user.setZones', { userId: 'U4', zones: 'cocody' }));
+  french(await t.api.exec(adm, 'user.setZones', { userId: 'U4' }));
+  french(await t.api.exec(adm, 'config.set', { key: 5, value: 1 }));
+  french(await t.api.exec(adm, 'config.set', {}));
+  french(await t.api.exec(adm, 'config.set', { key: 'autoConfirm', value: 'peut-être' }));
+  french(await t.api.exec(adm, 'config.set', { key: 'templates.rdv_confirme', value: '' }));
+  french(await t.api.exec(adm, 'config.set', { key: 'templates.__proto__', value: 'x' }));
+  french(await t.api.exec(awa, 'delegation.add', { orderId: 'O1', delegateId: 'U3', scopes: 'rdv' }));
+  french(await t.api.exec(awa, 'delegation.add', { orderId: 'O1', delegateId: 'U3', scopes: [] }));
+  french(await t.api.exec(awa, 'delegation.add', { orderId: 'O1', delegateId: 'U3', scopes: ['rdv'], days: -3 }));
+  french(await t.api.exec(t.token, 'demo.webhook', { orderId: 'O1', kind: 'inconnu' }));
+  french(await t.api.exec(t.token, 'demo.webhook', { orderId: 'O1', kind: 'old', state: 'XYZ' }));
+  french(await t.api.exec(nadia, 'callback.update', { id: 'CB1' }));
+  french(await t.api.exec(awa, 'feedback.submit', { orderId: 'O1' }));
+  french(await t.api.exec(awa, 'privacy.request', {}));
+  french(await t.api.exec(adm, 'invite.create', { userId: 'U4', hours: 'abc' }));
+  french(await t.api.exec(awa, 'order.updateAddress', { orderId: 'O1', lat: 999, lng: 'x' }));
+  french(await t.api.exec(awa, 'msg.send', { orderId: 'O1', text: 'x'.repeat(5000) }));
+  french(await t.api.exec(awa, 'msg.send', { orderId: 'O1', text: 'x', extra: { a: { b: { c: { d: { e: { f: { g: 1 } } } } } } } }));
+  french(await t.api.exec(nadia, 'msg.reply', { orderId: 'O1', text: 'y'.repeat(1_000_000) }));
+  const ws2 = t.api.createWorkspace({ name: { a: 1 }, seed: 3 });
+  assert.equal(t.api._load(ws2.wsId).name, 'Mon espace de test');
+  assert.ok(t.api.createWorkspace(null).wsId);
+  // Les clés de rejeu douteuses sont refusées.
+  french(await t.api.exec(awa, 'shop.purchase', { offerId: 'confort', zone: 'cocody', name: 'Zed Test', phone: '0700000009', street: 'Rue 9' }, { idemKey: '__proto__' }));
+});
+
+test('Horloge : jamais de recul, de valeur absurde, ni de saut quand l’heure de l’appareil recule puis revient', async () => {
+  const t = setup(1);
+  const clock = () => t.ws().clock;
+  const c0 = clock();
+  for (const hours of [-48, 0, 'abc', NaN, Infinity, 1e12, null, '', {}]) {
+    const r = await t.api.exec(t.token, 'demo.clock', { hours });
+    assert.equal(r.ok, false, String(hours)); assert.ok(!/inattendue/.test(r.error.message));
+  }
+  assert.equal(clock(), c0);
+  ok(await t.api.exec(t.token, 'demo.clock', { hours: 2 }));
+  assert.equal(clock(), c0 + 2 * 3600e3);
+  // L'heure de l'appareil recule de 2 h, puis revient : l'horloge de l'espace ne bouge pas.
+  const before = clock();
+  const adm = t.as('admin');
+  t.tick(-2 * 3600e3); ok(await t.api.exec(adm, 'config.set', { key: 'holdMinutes', value: 6 }));
+  assert.equal(clock(), before);
+  t.tick(2 * 3600e3); ok(await t.api.exec(adm, 'config.set', { key: 'holdMinutes', value: 7 }));
+  assert.equal(clock(), before);
+  t.tick(60e3); ok(await t.api.exec(adm, 'config.set', { key: 'holdMinutes', value: 8 }));
+  assert.equal(clock(), before + 60e3);
+});
+
+test('Plafonds : les listes ne grossissent pas sans fin, mais rien d’en attente n’est supprimé', async () => {
+  const t = setup(1);
+  const ws = t.ws();
+  const gen = ws.generation;
+  for (let i = 0; i < 1300; i++) ws.audit.push({ seq: 1000 + i, at: ws.clock, realAt: 0, actorId: 'U1', actor: 'x', role: 'client', action: 'msg.send', resource: '', detail: '', ai: false, correlationId: null });
+  for (let i = 0; i < 1300; i++) ws.notifications.push({ id: 'Nx' + i, userId: 'U1', title: 't', body: 'b', orderId: null, kind: 'info', at: ws.clock, read: true });
+  for (let i = 0; i < 300; i++) ws.jobs.push({ id: 'Jd' + i, kind: 'scan', ref: 'x', due: ws.clock - 60e3, generation: gen, attempts: 0, done: true });
+  for (let i = 0; i < 300; i++) ws.jobs.push({ id: 'Jp' + i, kind: 'send', ref: 'SMSx' + i, due: ws.clock + 86400e3, generation: gen, attempts: 0 });
+  for (let i = 0; i < 300; i++) ws.outbox.push({ id: 'SMSx' + i, userId: 'U1', to: '+225', channel: 'sms', text: 'a', at: ws.clock, attempts: 0, status: 'en_attente' });
+  for (let i = 0; i < 600; i++) ws.tickets.push({ id: 'TKx' + i, orderId: 'O1', type: 'escalade', text: 'a', status: i === 0 ? 'ouvert' : 'traite', ownerRole: 'superviseur', at: ws.clock, by: 'x' });
+  const lastSeq = ws.audit.at(-1).seq;
+  ok(await t.api.exec(t.as('admin'), 'config.set', { key: 'holdMinutes', value: 9 }));
+  const w = t.ws();
+  assert.ok(w.audit.length <= 1000 && w.notifications.length <= 1000);
+  assert.ok(w.audit.at(-1).seq > lastSeq, 'les numéros du journal continuent de croître');
+  assert.equal(new Set(w.audit.map(a => a.seq)).size, w.audit.length, 'pas deux lignes avec le même numéro');
+  assert.equal(w.jobs.filter(j => !j.done && j.kind === 'send').length, 300, 'aucune tâche en attente supprimée');
+  assert.ok(w.jobs.filter(j => j.done).length <= 100);
+  assert.equal(w.outbox.filter(o => o.status === 'en_attente').length, 300, 'aucun SMS à reprendre supprimé');
+  assert.ok(w.tickets.some(x => x.id === 'TKx0' && x.status === 'ouvert'), 'un ticket ouvert est gardé');
+  assert.ok(w.tickets.length <= 400);
+  // Refus de droit répétés : une seule ligne avec un compteur.
+  const awa = t.api.switchUser(t.token, 'U1');
+  for (let i = 0; i < 25; i++) await t.api.exec(awa, 'config.set', { key: 'holdMinutes', value: 1 });
+  const refus = t.ws().audit.filter(a => a.action === 'acces.refuse' && a.resource === 'config.set');
+  assert.equal(refus.length, 1); assert.equal(refus[0].count, 25);
+  // Une pièce remplacée ne garde pas sa vignette.
+  const up = n => t.api.exec(awa, 'doc.upload', { orderId: 'O1', type: 'justif_domicile', name: 'f' + n + '.jpg', size: 1000, mime: 'image/jpeg', thumb: 'data:image/jpeg;base64,AAAA' + n });
+  ok(await up(1)); ok(await up(2));
+  const docs = t.ws().documents.filter(d => d.orderId === 'O1' && d.type === 'justif_domicile');
+  assert.equal(docs[0].status, 'remplace'); assert.equal(docs[0].thumb, null); assert.ok(docs[1].thumb);
+});
+
+test('Rattachement : 8 essais puis fermeture temporaire (15 min), et code à 6 chiffres limité à 5 erreurs', async () => {
+  const t = setup(1);
+  const awa = t.api.switchUser(t.token, 'U1');
+  for (let i = 0; i < 8; i++) ok(await t.api.exec(awa, 'claim.start', { ref: 'FW-2026-999' }));
+  const locked = await t.api.exec(awa, 'claim.start', { ref: 'FW-2026-103' });
+  assert.equal(locked.ok, false); assert.equal(locked.error.code, 'limite');
+  t.tick(10 * 60e3);
+  assert.equal((await t.api.exec(awa, 'claim.start', { ref: 'FW-2026-103' })).error.code, 'limite');
+  t.tick(6 * 60e3);
+  ok(await t.api.exec(awa, 'claim.start', { ref: 'FW-2026-103' }));
+  const code = () => /(\d{6})/.exec(t.ws().outbox.filter(o => o.userId === 'U1').at(-1).text)[1];
+  const good = code();
+  const bad = String((Number(good) % 899999) + 100000);
+  for (let i = 0; i < 5; i++) { const r = await t.api.exec(awa, 'claim.verify', { ref: 'FW-2026-103', code: bad }); assert.equal(r.ok, false); assert.equal(r.error.code, 'code'); }
+  // Après 5 erreurs, même le bon code est refusé : il faut en demander un nouveau.
+  const dead = await t.api.exec(awa, 'claim.verify', { ref: 'FW-2026-103', code: good });
+  assert.equal(dead.ok, false);
+  ok(await t.api.exec(awa, 'claim.start', { ref: 'FW-2026-103' }));
+  ok(await t.api.exec(awa, 'claim.verify', { ref: 'FW-2026-103', code: code() }));
+  assert.equal(t.ws().orders.find(o => o.ref === 'FW-2026-103').customerId, 'U1');
+});
+
+test('Actions faites hors ligne : l’heure réelle de chaque étape est gardée (départ, arrivée, début, fin distincts)', async () => {
+  const t = setup(1);
+  const v = await visitReady(t, 41, 'Cliente HorsLigne');
+  const T0 = t.now();
+  const off = (action, args, ms, key) => t.api.exec(v.tech, 'wo.action', { woId: v.wo.id, action, args, offlineAt: T0 + ms }, { idemKey: key });
+  t.tick(30e3); // le réseau revient 30 s plus tard : tout est rejoué d'un coup
+  ok(await off('depart', {}, 0, 'o1'));
+  ok(await off('arrive', {}, 4000, 'o2'));
+  ok(await off('start', {}, 8000, 'o3'));
+  const tm = v.cur().times;
+  assert.ok(tm.depart < tm.arrive && tm.arrive < tm.start, JSON.stringify(tm));
+  assert.equal(tm.arrive - tm.depart, 4000); assert.equal(tm.start - tm.arrive, 4000);
+  assert.equal(t.ws().clock - tm.start, 30e3 - 8000);
+  ok(await off('checklist', { values: { puissance: -18, pto: true, cheminement: true, ont_led: true } }, 9000, 'o4'));
+  ok(await off('serial', { serial: t.ws().equipment.find(e => e.status === 'stock' && e.model.includes('ZTE')).serial }, 10000, 'o5'));
+  ok(await off('photo', { name: 'p.jpg', offline: true }, 11000, 'o6'));
+  ok(await off('reception', { mode: 'code', code: v.cur().receptionCode, status: 'accord' }, 12000, 'o7'));
+  // Une heure antérieure à l'étape précédente est ramenée à celle-ci ; une heure dans le futur est ignorée (horloge actuelle).
+  ok(await off('finish', {}, -5000, 'o8'));
+  assert.ok(v.cur().times.end >= v.cur().times.start);
+  const w2 = await visitReady(t, 42, 'Cliente Futur');
+  const fut = await t.api.exec(w2.tech, 'wo.action', { woId: w2.wo.id, action: 'depart', offlineAt: t.now() + 3600e3 });
+  ok(fut); assert.equal(w2.cur().times.depart, t.ws().clock);
+  // L'heure peut aussi venir des arguments de l'action.
+  t.tick(20e3);
+  ok(await t.api.exec(w2.tech, 'wo.action', { woId: w2.wo.id, action: 'arrive', args: { offline: true, offlineAt: t.now() - 15e3 } }));
+  assert.equal(t.ws().clock - w2.cur().times.arrive, 15e3);
+});
+
+test('Clé de rejeu liée à la personne, à la commande et aux arguments', async () => {
+  const t = setup(1);
+  const v = await visitReady(t, 51, 'Cliente Cle');
+  const go = (action, key, tok = v.tech) => t.api.exec(tok, 'wo.action', { woId: v.wo.id, action, args: {}, expectedVersion: v.cur().version }, { idemKey: key });
+  ok(await go('depart', 'W1'));
+  const same = await t.api.exec(v.tech, 'wo.action', { woId: v.wo.id, action: 'depart', args: {}, expectedVersion: 1 }, { idemKey: 'W1' });
+  assert.equal(same.replayed, true); // même action : rejeu sans doublon, même si la version attendue a changé
+  const other = await go('arrive', 'W1');
+  assert.equal(other.ok, false); assert.equal(other.error.code, 'idem');
+  assert.equal(v.cur().status, 'en_route');
+  const tech2 = t.api.switchUser(t.token, t.ws().users.find(u => u.role === 'technicien' && u.id !== v.wo.techUserId).id);
+  const thief = await t.api.exec(tech2, 'tech.ask', { woId: v.wo.id, question: 'box' }, { idemKey: 'W1' });
+  assert.equal(thief.ok, false); assert.equal(thief.error.code, 'idem');
+  // Achat : une autre personne ne reçoit pas le résultat de la clé de quelqu'un d'autre.
+  const a = { offerId: 'confort', zone: 'cocody', name: 'Zed Test', phone: '07 00 00 00 09', street: 'Riviera 9, rue des Lilas' };
+  const buy = ok(await t.api.exec(t.token, 'shop.purchase', a, { idemKey: 'K1' }));
+  const cl = t.api.switchUser(t.token, buy.userId);
+  const steal = await t.api.exec(cl, 'shop.purchase', a, { idemKey: 'K1' });
+  assert.equal(steal.ok, false); assert.equal(steal.error.code, 'idem');
+  const diff = await t.api.exec(t.token, 'shop.purchase', { ...a, street: 'Autre rue 3, Angré' }, { idemKey: 'K1' });
+  assert.equal(diff.ok, false); assert.equal(diff.error.code, 'idem');
+});
+
+test('Réglages : les trois politiques de matériel, jours fériés, confirmation automatique avec pénurie', async () => {
+  const t = setup(1);
+  const adm = t.as('admin');
+  for (const value of ['bloquer', 'conditionnel', 'ignorer']) { ok(await t.api.exec(adm, 'config.set', { key: 'policyEquipment', value })); assert.equal(t.ws().config.policyEquipment, value); }
+  ok(await t.api.exec(adm, 'config.set', { key: 'policyEquipment', value: 'conditionnel' }));
+  assert.equal((await t.api.exec(adm, 'config.set', { key: 'policyEquipment', value: 'au hasard' })).ok, false);
+  // Jours fériés : le jour retiré n'est plus proposé et ne peut plus être gardé.
+  const awa = t.api.switchUser(t.token, 'U1');
+  const slots = t.api.q(awa, 'client.availability', { orderId: 'O1' }).slots;
+  const day = slots[0].date, iso = new Date(day).toISOString().slice(0, 10);
+  ok(await t.api.exec(adm, 'config.set', { key: 'holidays', value: iso }));
+  const after = t.api.q(awa, 'client.availability', { orderId: 'O1' }).slots;
+  assert.ok(after.length > 0 && !after.some(s => s.date === day));
+  const held = await t.api.exec(awa, 'appt.hold', { orderId: 'O1', date: day, slot: slots[0].slot });
+  assert.equal(held.ok, false); assert.equal(held.error.code, 'complet');
+  ok(await t.api.exec(adm, 'config.set', { key: 'holidays', value: '' }));
+  assert.ok(t.api.q(awa, 'client.availability', { orderId: 'O1' }).slots.some(s => s.date === day));
+  // Confirmation automatique et pénurie de matériel : le créneau reste réservé (confirmation différée), la réservation n'est pas perdue.
+  ok(await t.api.exec(adm, 'config.set', { key: 'autoConfirm', value: true }));
+  ok(await t.api.exec(t.token, 'demo.flag', { key: 'equipmentShortage', value: true }));
+  const av = t.api.q(awa, 'client.availability', { orderId: 'O1' });
+  assert.equal(av.conditional, 'conditionnel');
+  const s = av.slots.find(x => x.left > 0);
+  const h = ok(await t.api.exec(awa, 'appt.hold', { orderId: 'O1', date: s.date, slot: s.slot }));
+  const booked = ok(await t.api.exec(awa, 'appt.book', { orderId: 'O1', holdId: h.id }));
+  assert.equal(booked.status, 'reserve');
+  assert.equal(t.ws().orders.find(o => o.id === 'O1').state, 'PRET_A_PLANIFIER');
+});
+
+test('Créneaux : de nouvelles demi-journées s’ouvrent au fil de l’horloge, même au-delà de 16 jours', async () => {
+  const t = setup(1);
+  await t.api.markShared(t.token);
+  const lastBefore = Math.max(...t.ws().capacity.map(c => c.date));
+  t.tick(20 * 24 * 3600e3);
+  await t.api.pump(t.wsId);
+  const tok = t.api.switchUser(t.api.ownerToken(t.wsId), 'U1');
+  const slots = t.api.q(tok, 'client.availability', { orderId: 'O1' }).slots;
+  assert.ok(slots.length > 0, 'des créneaux sont proposés après 20 jours');
+  const day = Math.floor(t.ws().clock / 86400e3) * 86400e3;
+  assert.ok(slots.every(s => s.date > day));
+  assert.ok(Math.max(...t.ws().capacity.map(c => c.date)) > lastBefore);
+  assert.ok(!t.ws().capacity.some(c => new Date(c.date).getUTCDay() === 0), 'jamais de dimanche');
+  assert.equal(new Set(t.ws().capacity.map(c => c.id)).size, t.ws().capacity.length);
+  // Les journées passées ne s'accumulent pas.
+  const used = new Set([...t.ws().appointments.map(a => a.capId), ...t.ws().holds.map(h => h.capId)]);
+  assert.ok(t.ws().capacity.every(c => c.date >= day - 4 * 86400e3 || used.has(c.id)));
+});
+
+test('Journal d’audit : une ligne par action, libellés lisibles cherchables, la restauration ne l’efface pas', async () => {
+  const t = setup(1);
+  const adm = t.as('admin');
+  const n0 = t.ws().audit.length;
+  ok(await t.api.exec(adm, 'user.setActive', { userId: 'U6', active: false }));
+  ok(await t.api.exec(adm, 'config.set', { key: 'holdMinutes', value: 9 }));
+  ok(await t.api.exec(adm, 'backup.create', {}));
+  ok(await t.api.exec(adm, 'degraded.set', { on: true }));
+  const added = t.ws().audit.slice(n0).map(a => a.action);
+  assert.deepEqual(added, ['compte.desactiver', 'config.modifier', 'sauvegarde.creer', 'continuite.mode_degrade']);
+  const find = q => t.api.q(adm, 'admin.audit', { q }).map(a => a.action);
+  assert.ok(find('Compte coupé').includes('compte.desactiver'));
+  assert.ok(find('compte coupe').includes('compte.desactiver'), 'sans tenir compte des accents ni des majuscules');
+  assert.ok(find('Réglage modifié').includes('config.modifier'));
+  assert.ok(find('Mode dégradé').includes('continuite.mode_degrade'));
+  const adm2 = t.ws().users.find(u => u.id === 'U6').name;
+  assert.ok(find(adm2).includes('compte.desactiver'), 'le nom de la personne visée');
+  ok(await t.api.exec(adm, 'user.setActive', { userId: 'U6', active: false }).then(() => ({ ok: true, data: 1 })));
+  // Accès refusé : cherchable aussi par son libellé.
+  await t.api.exec(t.api.switchUser(t.token, 'U1'), 'config.set', { key: 'holdMinutes', value: 1 });
+  assert.ok(find('Accès refusé').includes('acces.refuse'));
+  // Restauration : l'historique d'audit garde tout et la restauration s'y ajoute (sans JSON brut).
+  ok(await t.api.exec(adm, 'config.set', { key: 'holdMinutes', value: 11 }));
+  const len = t.ws().audit.length;
+  ok(await t.api.exec(t.token, 'demo.restore', { n: 1 }));
+  const a = t.ws().audit;
+  assert.ok(a.length > len);
+  assert.equal(a.at(-1).action, 'sauvegarde.restaurer'); assert.ok(!/[{}]/.test(a.at(-1).detail));
+  assert.equal(a.filter(x => x.action === 'sauvegarde.restaurer').length, 1, 'pas de doublon');
+  assert.ok(a.some(x => x.action === 'config.modifier' && /11/.test(x.detail)), 'les changements défaits restent visibles');
+  assert.equal(a.filter(x => /^demo\./.test(x.action) && /\{/.test(x.detail)).length, 0);
+});
+
+test('Textes et brouillons : prénom du contact, ponctuation, monnaie, aucun « undefined »', async () => {
+  const t = setup(1);
+  const nadia = t.as('conseiller');
+  const o = t.ws().orders.find(x => !x.customerId && x.state !== 'DOSSIER_RECU');
+  const s = t.api.q(nadia, 'ops.summary', { orderId: o.id });
+  assert.ok(s.draft.startsWith('Bonjour ' + o.contactName.split(' ')[0] + ', votre dossier'), s.draft);
+  assert.ok(!/undefined/.test(JSON.stringify(s)));
+  assert.ok(!/\.\./.test(s.lines.map(l => l.text).join(' ')), 'pas de double point');
+  assert.ok(s.lines.some(l => /F CFA/.test(l.text)) && !s.lines.some(l => /XOF/.test(l.text)));
+  assert.ok(!/\bIA\b/.test(s.note));
+  const awa = t.api.switchUser(t.token, 'U1');
+  assert.ok(/^Bonjour Awa, /.test(t.api.q(t.as('conseiller'), 'ops.summary', { orderId: 'O1' }).draft));
+  // Webhook : pas de code interne dans le message.
+  const od = ok(await t.api.exec(t.token, 'demo.createOrder', { zone: 'cocody', customerId: 'U1' }));
+  ok(await t.api.exec(t.token, 'demo.webhook', { orderId: od.id, kind: 'payment' }));
+  const dbl = ok(await t.api.exec(t.token, 'demo.webhook', { orderId: od.id, kind: 'payment' }));
+  assert.ok(!/confirme|\(/.test(dbl[0].note), dbl[0].note);
+  assert.ok(awa);
+  // Les dossiers « reçus » du départ ont une durée dans l'étape cohérente avec leur âge.
+  const rows = t.api.q(nadia, 'ops.orders', {});
+  const r7 = rows.find(r => r.ref === 'FW-2026-107'), r6 = rows.find(r => r.ref === 'FW-2026-106');
+  assert.ok(r7.inStateH > 60 && r6.inStateH > 30, r7.inStateH + ' / ' + r6.inStateH);
+});
+
+test('Rapprochement manuel : paiement arrivé entre-temps, demandeuse prévenue, équipe désactivée écartée', async () => {
+  const t = setup(1);
+  const nadia = t.as('conseiller'), sup = t.as('superviseur');
+  const o = ok(await t.api.exec(t.token, 'demo.createOrder', { zone: 'cocody', customerId: 'U1' }));
+  ok(await t.api.exec(nadia, 'payment.manualRequest', { orderId: o.id, justification: 'Relevé Moov Money 1234567890' }));
+  ok(await t.api.exec(t.token, 'demo.webhook', { orderId: o.id, kind: 'payment' }));
+  const ap = t.ws().approvals.find(a => a.orderId === o.id);
+  ok(await t.api.exec(sup, 'approval.decide', { id: ap.id, ok: true }));
+  assert.notEqual(t.ws().approvals.find(a => a.id === ap.id).status, 'en_attente');
+  assert.ok(t.ws().notifications.some(n => n.userId === ap.by && /Rapprochement/.test(n.title)));
+  // Un technicien désactivé ne reçoit plus de visite : son équipe n'est plus proposée ni confirmable.
+  const run = ok(await t.api.exec(t.token, 'demo.scenario', { code: 'SC-01' }));
+  const oid = run.orderIds[0];
+  ok(await t.api.exec(t.token, 'demo.webhook', { orderId: oid, kind: 'payment' }));
+  const plan = t.as('planificateur');
+  ok(await t.api.exec(plan, 'order.markReady', { orderId: oid }));
+  const awa = t.api.switchUser(t.token, 'U1');
+  const slot = t.api.q(awa, 'client.availability', { orderId: oid }).slots.find(s => s.teams.length);
+  const h = ok(await t.api.exec(awa, 'appt.hold', { orderId: oid, date: slot.date, slot: slot.slot }));
+  const appt = ok(await t.api.exec(awa, 'appt.book', { orderId: oid, holdId: h.id }));
+  const team = t.ws().teams.find(x => x.id === appt.teamId);
+  ok(await t.api.exec(t.as('admin'), 'user.setActive', { userId: team.techUserId, active: false }));
+  const conf = await t.api.exec(plan, 'appt.confirm', { orderId: oid });
+  assert.equal(conf.ok, false); assert.equal(conf.error.code, 'equipe');
+  assert.ok(!t.api.q(awa, 'client.availability', { orderId: oid }).slots.some(s => s.teams.includes(team.id)));
 });

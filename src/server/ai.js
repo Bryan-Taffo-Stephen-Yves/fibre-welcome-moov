@@ -137,7 +137,9 @@ export function estimate(ws, order) {
   if (appt && ['reserve', 'confirme'].includes(appt.status)) {
     const apptEnd = appt.date + (appt.slot === 'm' ? 12 : 17) * H;
     const expected = now + med * H;
-    if (expected > apptEnd + 36 * H) risk = 'Le modèle prévoit un délai plus long que votre rendez-vous. Le rendez-vous confirmé reste valable ; une équipe vérifie.';
+    if (expected > apptEnd + 36 * H) risk = appt.status === 'confirme'
+      ? 'Le modèle prévoit un délai plus long que votre rendez-vous. Le rendez-vous confirmé reste valable ; une équipe vérifie.'
+      : 'Le modèle prévoit un délai plus long que le créneau que vous avez demandé. Ce créneau n’est pas encore confirmé ; une équipe vérifie.';
   }
   const reliability = p.fallback || p.n < 30 ? 'faible' : (hi - lo) / med > 1.6 ? 'moyenne' : 'bonne';
   return { ...base, stage, medianH: med, loH: lo, hiH: hi, from: now, reliability, causes, used: p.used, sample: p.n, risk, fallback: !!p.fallback, confirmedAppt: appt && appt.status === 'confirme' ? appt : null };
@@ -218,6 +220,13 @@ export function assistantAnswer(ws, order, question, docs) {
     if (e.abstain) blocks.push({ kind: 'abstain', title: 'Estimation', text: e.reason });
     else if (!e.done) blocks.push({ kind: 'estimate', title: 'Estimation (ce n’est pas un engagement)', text: 'Délai restant probable : ' + fmtRange(e.loH, e.hiH) + ', fiabilité ' + e.reliability + '. Calculé par le modèle ' + e.modelVersion + ', entraîné sur données synthétiques.', source: 'Modèle ' + e.modelVersion });
   };
+  // Commande annulée : aucune étape à suivre, aucun rendez-vous à préparer. On le dit simplement.
+  if (order.cancelled && ['status', 'why', 'prepare', 'appt', 'when', 'activation'].includes(intent)) {
+    blocks.push({ kind: 'fact', title: 'Dans votre dossier', text: 'Votre commande est annulée. Aucune nouvelle étape n’est prévue : il n’y a plus de rendez-vous à choisir ni de visite à préparer.', source: 'Dossier ' + order.ref + ', version ' + order.version, fresh });
+    blocks.push({ kind: 'doc', title: 'Procédure', text: 'Le remboursement éventuel suit la procédure d’annulation. Je ne peux pas vous annoncer de montant.', doc: doc('PR-06') });
+    blocks.push({ kind: 'action', title: 'Action possible', text: 'Parler à un conseiller.', action: { handoff: true } });
+    return { trace, blocks };
+  }
   switch (intent) {
     case 'status': factStatus(); est(); break;
     case 'why':
@@ -259,9 +268,9 @@ export function summarize(ws, order) {
   const evs = ws.events.filter(e => e.orderId === order.id);
   const lines = [];
   const first = evs[0];
-  if (first) lines.push({ text: 'Dossier reçu de ' + first.source + ' le ' + fmtDate(first.effectiveAt) + '.', ref: first.seq });
+  if (first) lines.push({ text: 'Dossier reçu de ' + first.source + ' le ' + dot(fmtDate(first.effectiveAt)), ref: first.seq });
   const pay = evs.find(e => e.type === 'PAIEMENT_CONFIRME');
-  if (pay) lines.push({ text: 'Paiement rapproché (' + order.payment.amount.toLocaleString('fr-FR') + ' ' + order.payment.currency + ').', ref: pay.seq });
+  if (pay) lines.push({ text: 'Paiement rapproché (' + order.payment.amount.toLocaleString('fr-FR') + ' ' + (order.payment.currency === 'XOF' ? 'F CFA' : order.payment.currency) + ').', ref: pay.seq });
   const blk = ws.blockers.filter(b => b.orderId === order.id);
   for (const b of blk) lines.push({ text: 'Blocage « ' + BLOCKER_TYPES[b.type].label + ' » ' + (b.status === 'ouvert' ? 'ouvert, responsable : ' + (b.ownerRole || '—') : 'résolu : ' + (b.resolution || '')) + '.', ref: b.eventSeq });
   const appts = ws.appointments.filter(a => a.orderId === order.id);
@@ -271,10 +280,14 @@ export function summarize(ws, order) {
   const last = evs.at(-1);
   lines.push({ text: 'État actuel : ' + STATE_INFO[order.state].label + '.', ref: last && last.seq });
   const r = risk(ws, order);
-  const draft = 'Bonjour ' + (ws.users.find(u => u.id === order.customerId) || {}).name + ', votre dossier ' + order.ref + ' est à l’étape « ' + STATE_INFO[order.state].label + ' ». ' + (r.to === 'client' ? 'Pour avancer, merci de : ' + r.action.toLowerCase() + '. ' : '') + 'Nous revenons vers vous dès qu’il y a du nouveau.';
-  return { lines, risk: r, draft, generatedAt: ws.clock, note: 'Brouillon à relire. L’IA ne promet ni date, ni dérogation, ni montant.' };
+  // Le prénom vient du nom de contact du dossier (un dossier pas encore rattaché n'a pas de compte client).
+  const firstName = String(order.contactName || '').trim().split(/\s+/)[0];
+  const draft = (firstName ? 'Bonjour ' + firstName + ', votre' : 'Bonjour, votre') + ' dossier ' + order.ref + (order.cancelled ? ' est annulé. ' : ' est à l’étape « ' + STATE_INFO[order.state].label + ' ». ') + (r.to === 'client' && !order.cancelled ? 'Pour avancer, merci de : ' + r.action.toLowerCase() + '. ' : '') + 'Nous revenons vers vous dès qu’il y a du nouveau.';
+  return { lines, risk: r, draft, generatedAt: ws.clock, note: 'Brouillon automatique à relire. Il ne promet ni date, ni dérogation, ni montant.' };
 }
 
+// Ajoute un point final seulement s'il n'y en a pas déjà un (« oct. » se termine déjà par un point).
+const dot = x => (/[.!?]$/.test(x) ? x : x + '.');
 export const fmtDate = t => new Intl.DateTimeFormat('fr-FR', { timeZone: 'Africa/Abidjan', weekday: 'short', day: 'numeric', month: 'short' }).format(t);
 export const fmtDateTime = t => new Intl.DateTimeFormat('fr-FR', { timeZone: 'Africa/Abidjan', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }).format(t);
 export const fmtAgo = ms => { const m = Math.round(ms / 60e3); if (m < 1) return 'à l’instant'; if (m < 60) return 'il y a ' + m + ' min'; const h = Math.round(m / 60); if (h < 48) return 'il y a ' + h + ' h'; return 'il y a ' + Math.round(h / 24) + ' j'; };

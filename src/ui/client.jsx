@@ -36,7 +36,23 @@ const I2 = {
 };
 const TABS = [['home', 'Accueil', Icon.home], ['rdv', 'Rendez-vous', Icon.cal], ['msg', 'Messages', Icon.chat], ['file', 'Dossier', Icon.doc], ['me', 'Profil', Icon.user]];
 
-export function ClientApp({ token, compact }) {
+// Barrière d'erreur de l'espace client : un défaut d'un seul écran ne laisse plus une page blanche.
+class ClientGuard extends React.Component {
+  constructor(props) { super(props); this.state = { failed: false }; }
+  static getDerivedStateFromError() { return { failed: true }; }
+  componentDidCatch(e) { try { console.error('Espace client', e); } catch {} }
+  render() {
+    if (!this.state.failed) return this.props.children;
+    return <div className="cl-stage"><div className="phone cl-phone"><div className="phone-body cl-body"><section className="card cl-crash" role="alert">
+      <b className="cl-block-t">Un écran ne s’est pas affiché</b>
+      <span className="small muted">Un souci est survenu dans l’application. Vos informations sont gardées. Rechargez la page pour continuer.</span>
+      <Btn kind="primary" block onClick={() => { try { location.reload(); } catch {} }}>Recharger</Btn>
+    </section></div></div></div>;
+  }
+}
+export function ClientApp(props) { return <ClientGuard key={props.token}><ClientBody {...props} /></ClientGuard>; }
+
+function ClientBody({ token, compact }) {
   const me = useQ(token, 'me');
   const orders = useQ(token, 'client.orders');
   const [tab, setTab] = useState('home');
@@ -386,13 +402,17 @@ const HM = new Intl.DateTimeFormat('fr-FR', { timeZone: 'Africa/Abidjan', hour: 
 const hm = t => HM.format(t).replace(/^0?(\d+):(\d+)/, '$1 h $2'); // « 9 h 04 »
 const signDone = so => !!so && ['validee', 'auto'].includes(so.state);
 const signPending = m => !!m && m.status === 'terminee' && !!m.signoff && ['attente', 'probleme'].includes(m.signoff.state);
-const signMode = so => so.mode || (so.state === 'validee' ? 'verifie' : 'delai');
+const signMode = so => (so && so.mode) || (so.state === 'validee' ? 'verifie' : 'delai');
 // Ce que le client lit une fois la visite validée : on distingue « vous avez validé » et « validée automatiquement ».
 const SIGN_SAYS = {
   verifie: n => ['Vous avez validé la visite', 'Merci d’avoir vérifié. ' + n + ' est de nouveau disponible pour un autre client.'],
   auto: () => ['Validée automatiquement', 'Vous avez laissé partir le technicien sans vérifier. Un souci plus tard ? Écrivez-nous dans Messages.'],
   delai: () => ['Validée automatiquement', 'Sans réponse de votre part, la visite a été validée toute seule. Un souci ? Écrivez-nous dans Messages.'],
+  regle: () => ['Le souci est réglé : la visite est validée', 'L’équipe Moov a réglé le souci que vous avez signalé. Un autre souci ? Écrivez-nous dans Messages.'],
+  annule: () => ['Commande annulée', 'Cette visite n’aura pas lieu, car la commande est annulée.'],
 };
+// Lecture tolérante : un mode que l'écran ne connaît pas retombe sur le texte de la validation automatique.
+const signSays = (so, n) => (SIGN_SAYS[so && signMode(so)] || SIGN_SAYS.delai)(n);
 const frMin = n => n >= 120 ? Math.floor(n / 60) + ' h ' + pad2(n % 60) : n + ' min';
 
 function VisitJourney({ v }) {
@@ -409,12 +429,14 @@ function VisitJourney({ v }) {
     m.track ? 'Suivez-le sur la carte.' : name + ' est en route vers chez vous.',
     name + ' est arrivé. Pensez à lui ouvrir.',
     name + ' installe votre box. Restez joignable.',
-    done ? (so ? SIGN_SAYS[signMode(so)](name)[0] : 'Visite terminée') + '.' : so && so.state === 'probleme' ? 'Souci signalé : l’équipe Moov vous répond.' : 'À vous : vérifiez et validez.',
+    done ? (so ? signSays(so, name)[0] : 'Visite terminée') + '.' : so && so.state === 'probleme' ? 'Souci signalé : l’équipe Moov vous répond.' : 'À vous : vérifiez et validez.',
   ];
   const past = [null, t.depart && 'Parti à ' + hm(t.depart), t.arrive && 'Arrivé à ' + hm(t.arrive), t.start && 'Commencé à ' + hm(t.start), done && !so ? 'Visite terminée.' : null];
+  // Le titre de l'étape 1 suit l'état : « va vous contacter » seulement tant que la visite n'a pas commencé.
+  const labels = VJ.map((s, i) => i === 0 ? (cur >= 3 || done ? 'Votre technicien est venu' : cur === 2 ? 'Technicien affecté' : s) : s);
   return <section className="card cl-vj" data-tour="client-journey">
     <div className="spread"><span className="eyebrow">Votre visite</span><Tag tone={done ? 'ok' : 'info'}>{done ? 'Terminée' : 'Étape ' + cur + ' sur 5'}</Tag></div>
-    <ol className="cl-vj-l" aria-label={'Parcours de la visite : étape ' + cur + ' sur 5'}>{VJ.map((s, i) => {
+    <ol className="cl-vj-l" aria-label={'Parcours de la visite : étape ' + cur + ' sur 5'}>{labels.map((s, i) => {
       const st = done || i < cur - 1 ? 'done' : i === cur - 1 ? 'now' : '';
       const txt = st === 'now' ? now[i] : st === 'done' ? past[i] : null;
       return <li key={s} className={st} aria-current={st === 'now' ? 'step' : undefined}>
@@ -502,10 +524,10 @@ function SignoffCard({ token, v, me, isRep }) {
 // Remerciement juste avant la note du technicien (RateTech).
 function SignoffThanks({ v, me }) {
   const so = v.lastVisit.signoff;
-  const [t, d] = SIGN_SAYS[signMode(so)](firstName(v.lastVisit.techName));
+  const [t, d] = signSays(so, firstName(v.lastVisit.techName));
   return <section className="card cl-thanks" role="status">
     <span className="cl-thanks-ic" aria-hidden="true">{Icon.check}</span>
-    <div className="grow stack-s" style={{ gap: 2 }}><b className="cl-block-t">{t}. Merci {firstName(me.user.name)} !</b><span className="small muted">{d}</span></div>
+    <div className="grow stack-s" style={{ gap: 2 }}><b className="cl-block-t">{so && so.mode === 'annule' ? t + '.' : t + '. Merci ' + firstName(me.user.name) + ' !'}</b><span className="small muted">{d}</span></div>
   </section>;
 }
 
@@ -804,12 +826,12 @@ function Home({ token, orderId, go, me, isRep }) {
       </div>
       <div className="cl-hero-row">
         <div className="big">{o.cancelled ? 'Votre commande est annulée.' : dzOpen && DZ_HERO[dz.status] ? DZ_HERO[dz.status] : STATE_INFO[o.state].client}</div>
-        <span className="cl-ring" role="img" aria-label={'Étape ' + (idx + 1) + ' sur ' + last}>
+        {!o.cancelled && <span className="cl-ring" role="img" aria-label={'Étape ' + (idx + 1) + ' sur ' + last}>
           <Ring value={idx + 1} max={last} size={56} stroke={6} color={finished ? 'var(--ok)' : 'var(--accent)'}><span className="num">{idx + 1}<small>/{last}</small></span></Ring>
-        </span>
+        </span>}
       </div>
       <span className="tiny muted">Dossier {o.ref} · mis à jour {fmtAgo(Math.max(0, v.estimate.at - o.updatedAt))}{o.paidAt && <> · payé le {fmtDate(o.paidAt)}</>}</span>
-      <Explain>{STATE_INFO[o.state].clear}</Explain>
+      {!o.cancelled && <Explain>{STATE_INFO[o.state].clear}</Explain>}
     </section>
     {!dzCard && <section className="next cl-next" data-tour="client-next">
       <div className="spread cl-next-top"><span className="eyebrow">Votre prochaine action</span><span className="cl-next-ic" aria-hidden="true">{na.icon || NEXT_ICON[na.go] || Icon.clock}</span></div>
@@ -828,9 +850,9 @@ function Home({ token, orderId, go, me, isRep }) {
         </div>
       </section>;
     })}
-    {!live && v.mission && ['affectee', 'en_route', 'sur_place', 'en_cours'].includes(v.mission.status) && v.appt && <MissionCard v={v} />}
-    {!live && <Estimate v={v} />}
-    {o.paidAt && <DelayCard v={v} />}
+    {!o.cancelled && !live && v.mission && ['affectee', 'en_route', 'sur_place', 'en_cours'].includes(v.mission.status) && v.appt && <MissionCard v={v} />}
+    {!o.cancelled && !live && <Estimate v={v} />}
+    {!o.cancelled && o.paidAt && <DelayCard v={v} />}
   </>;
 }
 
@@ -944,7 +966,8 @@ function Appointments({ token, orderId, go }) {
       </div>
       {!underway && <p className="small muted">{appt.status === 'reserve' ? (dz ? 'Créneau demandé. Moov confirme l’heure exacte et le technicien après la vérification de vos photos.' : 'Le créneau vous est réservé. Moov confirme l’équipe sous peu.') : appt.time ? 'Le technicien vient à cette heure. Vous recevrez un rappel la veille, puis son trajet en direct.' : 'Une équipe est affectée. Vous recevrez un rappel la veille.'}</p>}
       {underway && <p className="small cl-note">Le technicien est déjà en route ou chez vous : pour changer ce rendez-vous, écrivez à votre conseiller dans Messages.</p>}
-      {!changing && !underway && <div className="row"><Btn size="s" onClick={() => setChanging(true)}>Modifier</Btn><Btn size="s" kind="ghost" className="cl-danger-link" onClick={() => setCancelAsk(true)}>Annuler le rendez-vous</Btn></div>}
+      {(cancelling || o.cancelled) && <p className="small cl-note">{o.cancelled ? 'La commande est annulée : ce rendez-vous n’aura pas lieu.' : 'Annulation de la commande en cours : le rendez-vous ne peut plus être changé.'}</p>}
+      {!changing && !underway && !cancelling && !o.cancelled && <div className="row"><Btn size="s" onClick={() => setChanging(true)}>Modifier</Btn><Btn size="s" kind="ghost" className="cl-danger-link" onClick={() => setCancelAsk(true)}>Annuler le rendez-vous</Btn></div>}
     </section>}
     {cancelAsk && <Modal title="Annuler ce rendez-vous ?" onClose={() => setCancelAsk(false)} actions={<><AsyncBtn kind="primary" onClick={async () => { await call(token, 'appt.cancel', { orderId, reason: 'Annulé par le client' }); setCancelAsk(false); }}>Oui, annuler</AsyncBtn><Btn onClick={() => setCancelAsk(false)}>Garder</Btn></>}>
       <p>Le créneau sera libéré pour un autre client. Votre commande reste active : vous pourrez choisir une autre date.</p>
@@ -975,8 +998,8 @@ function Appointments({ token, orderId, go }) {
       <Empty>Vous choisissez votre créneau dans votre dossier en ligne, juste après les photos et votre repère.</Empty>
       {go && <Btn kind="primary" block onClick={() => { openWizard(token, orderId); go('home'); }}>Compléter mon dossier{Icon.right}</Btn>}
     </section>}
-    {!canBook && !appt && !(dz && DZ_DRAFT.includes(dz.status)) && <div className="card cl-empty"><Empty>{o.state === 'SERVICE_ACTIF' || o.state === 'CLOTURE' ? 'L’installation est faite.' : 'Les créneaux s’ouvrent quand la vérification technique est terminée. Vous recevrez une notification.'}</Empty></div>}
-    <Prep token={token} v={v} />
+    {!canBook && !appt && !(dz && DZ_DRAFT.includes(dz.status)) && <div className="card cl-empty"><Empty>{o.cancelled ? 'Commande annulée : il n’y a plus de rendez-vous à prendre.' : cancelling ? 'Annulation de la commande en cours : les rendez-vous sont suspendus.' : o.state === 'SERVICE_ACTIF' || o.state === 'CLOTURE' ? 'L’installation est faite.' : 'Les créneaux s’ouvrent quand la vérification technique est terminée. Vous recevrez une notification.'}</Empty></div>}
+    {!o.cancelled && <Prep token={token} v={v} />}
     {v.appointments.length > 1 && <details className="card cl-more">
       <summary>Historique des rendez-vous ({v.appointments.length})</summary>
       <div className="cl-more-in">{v.appointments.map(a => <div key={a.id} className="cl-hist"><span className="grow">{fmtDate(a.date)}, {slotLabel(a.slot)}{a.reason ? <span className="tiny muted"> · {a.reason}</span> : null}</span><Tag tone={a.status === 'confirme' || a.status === 'realise' ? 'ok' : a.status === 'annule' || a.status === 'non_honore' ? 'bad' : ''}>{APPT_STATES[a.status]}</Tag></div>)}</div>
@@ -1201,14 +1224,14 @@ function Timeline({ v }) {
   const reached = s => v.timeline.find(e => e.type === s);
   return <>
     <section className="card cl-tl" data-tour="client-timeline">
-      <div className="card-title"><h3>Les étapes</h3><span className="tiny muted">{idx + 1} sur {ORDER_STATES.length}</span></div>
+      <div className="card-title"><h3>Les étapes</h3>{v.order.cancelled ? <Tag tone="bad">Commande annulée</Tag> : <span className="tiny muted">{idx + 1} sur {ORDER_STATES.length}</span>}</div>
       <ol className="cl-steps">{ORDER_STATES.map((s, i) => {
         const e = reached(s);
         const cls = i < idx || (i === idx && ['SERVICE_ACTIF', 'CLOTURE'].includes(s)) ? 'done' : i === idx ? 'now' : 'todo';
         return <li key={s} className={cls}>
           <span className="cl-mark">{cls === 'done' ? Icon.check : i + 1}</span>
           <div><b className="small">{STATE_INFO[s].label}</b>{e ? <span className="tiny muted">{fmtDateTime(e.at)}</span> : cls === 'todo' ? <span className="tiny">À venir</span> : null}</div>
-          {cls === 'now' && <Tag tone="accent">En cours</Tag>}
+          {cls === 'now' && (v.order.cancelled ? <Tag tone="bad">Arrêtée : commande annulée</Tag> : <Tag tone="accent">En cours</Tag>)}
         </li>;
       })}</ol>
     </section>
@@ -1234,7 +1257,7 @@ export async function sendDoc(token, orderId, type, f, pre, opts = {}) {
   if (pic) { try { img = await putImage(api.session(token).wsId, pic.full); } catch { img = null; } }
   const r = await call(token, 'doc.upload', { orderId, type, name: f.name, size: pic ? pic.bytes : f.size, mime: pic ? 'image/jpeg' : f.type, thumb: pic ? pic.thumb : null, img, quality: pic ? pic.quality : null });
   if (r.ok && r.data && r.data.check) checkMem.set(r.data.id, r.data.check);
-  if (r.ok && !opts.quiet) toast(DOC_TYPES[type].label + (opts.draft ? ' enregistrée : elle partira avec votre dossier.' : ' envoyée : votre conseiller la reçoit tout de suite.'));
+  if (r.ok && !opts.quiet) toast(opts.draft ? 'Pièce enregistrée (' + DOC_TYPES[type].label.toLowerCase() + ') : elle partira avec votre dossier.' : 'Pièce envoyée (' + DOC_TYPES[type].label.toLowerCase() + ') : votre conseiller la reçoit tout de suite.');
   return r.ok;
 }
 
@@ -1322,7 +1345,9 @@ function Address({ token, v, readOnly }) {
 const TICKET_LAB = { insatisfaction: 'Votre avis', question_assistant: 'Question à l’assistant' };
 const TICKET_STATUS = { ouvert: 'en cours', traite: 'traité', repondu: 'répondu' };
 // Signalements proposés selon l'étape du dossier.
-const reportOk = (k, v) => k === 'tech_absent' ? !!v.mission && ['affectee', 'en_route', 'sur_place'].includes(v.mission.status) : k === 'pas_internet' ? ORDER_STATES.indexOf(v.order.state) >= ORDER_STATES.indexOf('INSTALLATION_TERMINEE') : true;
+// « Le technicien n'est pas venu » n'a de sens qu'une fois l'heure du rendez-vous arrivée (début du créneau, ou heure précise si elle est fixée).
+const apptStart = a => { const m = /^(\d{2}):(\d{2})$/.exec(a.time || ''); return a.date + (m ? (Number(m[1]) * 60 + Number(m[2])) * 60e3 : ({ m: 8, a: 13 }[a.slot] || 8) * 3600e3); };
+const reportOk = (k, v, now) => k === 'tech_absent' ? !!v.mission && ['affectee', 'en_route', 'sur_place'].includes(v.mission.status) && !!v.appt && now >= apptStart(v.appt) : k === 'pas_internet' ? ORDER_STATES.indexOf(v.order.state) >= ORDER_STATES.indexOf('INSTALLATION_TERMINEE') : true;
 const ACT_LAB = { demandee: 'en cours', confirmee: 'confirmée par le système Moov', echouee: 'en échec, une équipe s’en occupe', anomalie: 'vérification en cours' };
 function Report({ token, v }) {
   const m = v.mission;
@@ -1338,7 +1363,7 @@ function Report({ token, v }) {
         {m.report.photos.length > 0 && <span className="pic-row">{m.report.photos.map(p => <Picture key={p.id} token={token} img={p.img} thumb={p.thumb} label={'Photo du technicien · ' + p.name} alt={p.name} size={56} />)}</span>}
         {m.report.comment && <p className="small cl-note">Mot du technicien : « {m.report.comment} »</p>}
         {m.reception && <span><Tag tone={m.reception.status === 'accord' ? 'ok' : 'warn'}>{m.reception.status === 'accord' ? 'Vous avez donné votre accord' : 'Réserve : ' + m.reception.comment}</Tag></span>}
-      </> : <p className="small muted">Disponible après le passage du technicien.</p>}
+      </> : <p className="small muted">{v.order.cancelled ? 'Commande annulée : il n’y aura pas de compte rendu.' : 'Disponible après le passage du technicien.'}</p>}
     </section>
     <section className="card stack cl-rep">
       <div className="cl-rep-h"><span className="cl-num">2</span><h3 className="grow">Activation de la ligne</h3><Sim what="émulateur" /></div>
@@ -1361,6 +1386,7 @@ function Profile({ token, orderId, me, isRep, go, onClaimed }) {
   const dels = useQ(token, isRep ? 'me' : 'delegates');
   const [modal, setModal] = useState(null);
   const [f, setF] = useState({});
+  useNow(30000);
   if (r.error) return <div className="alert alert-bad">{r.error.message}</div>;
   const v = r.data; const o = v.order;
   const prefs = me.user.prefs;
@@ -1396,7 +1422,7 @@ function Profile({ token, orderId, me, isRep, go, onClaimed }) {
     </section>
     <section className="card cl-list" aria-label="Réglages">
       <Row icon={Icon.alert} title="Signaler un problème" sub={openTickets ? openTickets + ' signalement' + (openTickets > 1 ? 's' : '') + ' en cours' : 'Dossier bloqué, technicien absent…'}>
-        {Object.entries(REPORT_TYPES).filter(([k]) => reportOk(k, v)).map(([k, l]) => <button type="button" key={k} className="cl-opt" onClick={() => { setModal('report:' + k); setF({}); }}><span>{l}</span>{I2.chev}</button>)}
+        {Object.entries(REPORT_TYPES).filter(([k]) => reportOk(k, v, liveClock(me.ws))).map(([k, l]) => <button type="button" key={k} className="cl-opt" onClick={() => { setModal('report:' + k); setF({}); }}><span>{l}</span>{I2.chev}</button>)}
         {myTickets.map(t => <span key={t.id} className="tiny muted">{TICKET_LAB[t.type] || REPORT_TYPES[t.type.replace('signalement:', '')] || 'Demande'} · {TICKET_STATUS[t.status] || t.status} · {fmtDateTime(t.at)}</span>)}
       </Row>
       {!isRep && <Row icon={Icon.users} title="Délégation" sub={activeDel.length ? activeDel.map(d => firstName(d.delegate)).join(', ') + ' peut vous aider' : 'Confier le rendez-vous à un proche'} right={activeDel.length ? <AvatarStack names={activeDel.map(d => d.delegate)} size={28} /> : null}>

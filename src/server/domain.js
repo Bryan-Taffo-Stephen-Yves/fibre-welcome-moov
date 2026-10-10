@@ -2,7 +2,7 @@
 // c'est backend.js qui contrôle la session, le rôle et le périmètre avant d'appeler ces règles.
 import { stateRank, STATE_INFO, BLOCKER_TYPES, CHECKLIST_TECH, SLOTS, APPT_STATES, DOC_TYPES, DOSSIER_DOCS, PREP_CHECKLIST, SLOT_HOURS, TEAM_BASE, hourLabel } from './model.js';
 import { estimate, fmtDate, stageOf } from './ai.js';
-import { H, DAY, startOfDay } from './seed.js';
+import { H, DAY, startOfDay, isWorkingDay } from './seed.js';
 
 export class AppError extends Error { constructor(code, message, extra) { super(message); this.code = code; this.extra = extra; } }
 export const SYS = { id: 'SYS', role: 'systeme', name: 'Système' };
@@ -13,12 +13,12 @@ const nid = (ws, p) => p + (++ws.seq);
 const userName = (ws, id) => (byId(ws.users, id) || {}).name || id;
 
 export function audit(ws, actor, action, resource, detail = '', extra = {}) {
-  ws.audit.push({ seq: ws.audit.length + 1, at: ws.clock, realAt: ws.lastReal, actorId: actor.id, actor: actor.name, role: actor.role, action, resource, detail, ai: !!extra.ai, correlationId: extra.correlationId || null });
+  ws.audit.push({ seq: (ws.audit.length ? ws.audit[ws.audit.length - 1].seq : 0) + 1, at: ws.clock, realAt: ws.lastReal, actorId: actor.id, actor: actor.name, role: actor.role, action, resource, detail, ai: !!extra.ai, correlationId: extra.correlationId || null });
 }
 
 // Événement métier (CDC 3.3) : identifiant, date effective, date de réception, source, acteur, version.
 export function emit(ws, order, type, { source = 'Fibre Welcome', actor = SYS, payload = {}, effectiveAt, publicText, correlationId } = {}) {
-  const e = { seq: ws.events.length + 1, id: nid(ws, 'E'), orderId: order ? order.id : null, type, source, actorId: actor.id, actor: actor.name, role: actor.role,
+  const e = { seq: (ws.events.length ? ws.events[ws.events.length - 1].seq : 0) + 1, id: nid(ws, 'E'), orderId: order ? order.id : null, type, source, actorId: actor.id, actor: actor.name, role: actor.role,
     effectiveAt: effectiveAt || ws.clock, receivedAt: ws.clock, version: order ? order.version : null, payload, publicText: publicText || null, correlationId: correlationId || null, generation: ws.generation };
   ws.events.push(e);
   return e;
@@ -82,7 +82,7 @@ export const openBlockers = (ws, orderId) => ws.blockers.filter(b => b.orderId =
 // ---------- Notifications (CL-14) : boîte interne toujours, canaux externes simulés selon préférences ----------
 export function notify(ws, userId, { title, body, orderId = null, kind = 'info', channels = true }) {
   const u = byId(ws.users, userId);
-  if (!u) return;
+  if (!u || u.active === false) return;
   const n = { id: nid(ws, 'N'), userId, title, body, orderId, kind, at: ws.clock, read: false };
   ws.notifications.push(n);
   if (channels && ['client', 'representant'].includes(u.role)) {
@@ -106,13 +106,18 @@ export function addMessage(ws, order, { from, author, text, visibility = 'public
 const activeHolds = (ws, capId) => ws.holds.filter(h => h.capId === capId && h.status === 'actif' && h.expiresReal > ws.lastReal).length;
 export const remaining = (ws, c) => c.cap - c.used - activeHolds(ws, c.id);
 
+// Une équipe ne reçoit pas de visite si elle est indisponible ou si son technicien a un compte désactivé.
+export const teamOk = (ws, t) => !!t && !!t.available && (byId(ws.users, t.techUserId) || {}).active !== false;
+// Un jour férié (réglage de l'administrateur) ou un dimanche n'est jamais proposé.
+const openDay = (ws, c) => isWorkingDay(ws, c.date);
+
 export function availability(ws, order) {
-  const teams = ws.teams.filter(t => t.available && t.zones.includes(order.zone));
+  const teams = ws.teams.filter(t => teamOk(ws, t) && t.zones.includes(order.zone));
   const out = [];
   const tomorrow = startOfDay(ws.clock) + DAY;
   const byKey = {};
   for (const c of ws.capacity) {
-    if (c.date < tomorrow || !teams.some(t => t.id === c.teamId)) continue;
+    if (c.date < tomorrow || !teams.some(t => t.id === c.teamId) || !openDay(ws, c)) continue;
     const k = c.date + ':' + c.slot;
     (byKey[k] ||= { date: c.date, slot: c.slot, left: 0, teams: [] });
     const left = ws.sim.saturation ? Math.max(0, remaining(ws, c) - 1) : remaining(ws, c);
@@ -121,18 +126,19 @@ export function availability(ws, order) {
   }
   for (const k in byKey) out.push(byKey[k]);
   out.sort((a, b) => a.date - b.date || (a.slot < b.slot ? 1 : -1));
-  const port = ws.ports[order.zone];
-  const conditional = ws.sim.equipmentShortage ? (ws.config.policyEquipment === 'bloquer' ? 'bloque' : 'conditionnel') : null;
+  const port = ws.ports[order.zone] || { free: 0 };
+  const conditional = ws.sim.equipmentShortage && ws.config.policyEquipment !== 'ignorer' ? (ws.config.policyEquipment === 'bloquer' ? 'bloque' : 'conditionnel') : null;
   return { slots: out.slice(0, 20), conditional, portOk: port.free > 0 || order.portReserved, holdMinutes: ws.config.holdMinutes };
 }
 
 export function holdSlot(ws, order, { date, slot }, actor, realNow) {
+  if (order.cancelled) throw new AppError('annule', 'Ce dossier est annulé : aucun créneau ne peut être pris.');
   if (!canPlan(order)) throw new AppError('etat', 'Le dossier n’est pas encore prêt à être planifié.');
   if (missionUnderway(ws, order)) throw new AppError('etat', UNDERWAY_MSG);
   if (ws.sim.equipmentShortage && ws.config.policyEquipment === 'bloquer') throw new AppError('materiel', 'Matériel indisponible : la prise de rendez-vous est suspendue selon la politique en vigueur. Aucune date ne vous est promise.');
   // Réservation atomique : la vérification et la prise de capacité se font dans la même transaction verrouillée.
-  const teams = ws.teams.filter(t => t.available && t.zones.includes(order.zone));
-  const caps = ws.capacity.filter(c => c.date === date && c.slot === slot && teams.some(t => t.id === c.teamId) && (ws.sim.saturation ? remaining(ws, c) - 1 : remaining(ws, c)) > 0);
+  const teams = ws.teams.filter(t => teamOk(ws, t) && t.zones.includes(order.zone));
+  const caps = ws.capacity.filter(c => c.date === date && c.slot === slot && openDay(ws, c) && teams.some(t => t.id === c.teamId) && (ws.sim.saturation ? remaining(ws, c) - 1 : remaining(ws, c)) > 0);
   if (!caps.length) {
     const alt = availability(ws, order).slots.filter(s => s.left > 0).slice(0, 3);
     throw new AppError('complet', 'Ce créneau vient d’être pris. Voici d’autres possibilités.', { alternatives: alt });
@@ -150,7 +156,7 @@ export function holdSlot(ws, order, { date, slot }, actor, realNow) {
 }
 
 // Un dossier rempli en ligne a déjà choisi son créneau à l'envoi : il peut le changer pendant la vérification.
-export const canPlan = order => ['PRET_A_PLANIFIER', 'RDV_CONFIRME'].includes(order.state) || (order.state === 'PREPARATION' && !!(order.dossier && order.dossier.submittedAt));
+export const canPlan = order => !order.cancelled && ['PRET_A_PLANIFIER', 'RDV_CONFIRME'].includes(order.state) || (order.state === 'PREPARATION' && !!(order.dossier && order.dossier.submittedAt));
 
 // Une fois le technicien parti, le rendez-vous ne se change plus depuis l'application : on passe par le conseiller.
 export function missionUnderway(ws, order) {
@@ -161,6 +167,7 @@ export function missionUnderway(ws, order) {
 const UNDERWAY_MSG = 'Le technicien est déjà en route ou chez vous : le rendez-vous ne peut plus être changé ici. Écrivez à votre conseiller.';
 
 export function bookHold(ws, order, holdId, actor, realNow) {
+  if (order.cancelled) throw new AppError('annule', 'Ce dossier est annulé : aucun créneau ne peut être réservé.');
   if (missionUnderway(ws, order)) throw new AppError('etat', UNDERWAY_MSG);
   const hold = byId(ws.holds, holdId);
   if (!hold || hold.orderId !== order.id) throw new AppError('introuvable', 'Réservation temporaire introuvable.');
@@ -198,7 +205,10 @@ export function bookHold(ws, order, holdId, actor, realNow) {
     if (planner) notify(ws, planner.id, { title: refix ? 'Heure à refixer' : 'Rendez-vous à confirmer', body: order.ref + ' — ' + (refix ? 'le client a déplacé sa visite au ' : '') + fmtDate(appt.date) + ' ' + slotLabel(appt.slot) + (refix ? '. Choisissez à nouveau le technicien et l’heure.' : ''), orderId: order.id, kind: 'tache' });
     notify(ws, order.customerId, { title: 'Créneau réservé', body: 'Votre créneau du ' + fmtDate(appt.date) + ' (' + slotLabel(appt.slot) + ') est réservé. Moov confirme l’équipe sous peu.', orderId: order.id, kind: 'rdv', channels: false });
   }
-  if (ws.config.autoConfirm && appt.status === 'reserve' && order.state === 'PRET_A_PLANIFIER' && !order.dossier) confirmAppointment(ws, order, appt, SYS, {});
+  // Confirmation automatique : si le matériel ou l'équipe manque, le créneau reste « réservé » (confirmation différée), la réservation n'est pas perdue.
+  if (ws.config.autoConfirm && appt.status === 'reserve' && order.state === 'PRET_A_PLANIFIER' && !order.dossier) {
+    try { confirmAppointment(ws, order, appt, SYS, {}); } catch (e) { if (!(e instanceof AppError) || !['materiel', 'equipe', 'complet', 'heure', 'etat'].includes(e.code)) throw e; }
+  }
   return appt;
 }
 
@@ -212,8 +222,10 @@ export function releaseCap(ws, appt) {
 export function confirmAppointment(ws, order, appt, actor, { teamId, time } = {}) {
   if (appt.status !== 'reserve') throw new AppError('etat', 'Ce rendez-vous n’est pas en attente de confirmation.');
   if (order.state !== 'PRET_A_PLANIFIER') throw new AppError('etat', 'Le dossier doit être prêt à planifier.');
+  if (order.cancelled) throw new AppError('annule', 'Ce dossier est annulé : aucune nouvelle étape possible.');
   const team = byId(ws.teams, teamId || appt.teamId);
   if (!team || !team.available) throw new AppError('equipe', 'Équipe indisponible.');
+  if (!teamOk(ws, team)) throw new AppError('equipe', 'Le technicien de cette équipe a un compte désactivé : choisissez une autre équipe.');
   if (!team.zones.includes(order.zone)) throw new AppError('equipe', 'Cette équipe n’intervient pas dans la zone ' + order.address.commune + '.');
   if (time != null) {
     if (!(SLOT_HOURS[appt.slot] || []).includes(time)) throw new AppError('heure', 'Choisissez une heure comprise dans le créneau ' + slotLabel(appt.slot) + '.');
@@ -268,25 +280,50 @@ export function cancelAppointment(ws, order, appt, actor, reason, { force = fals
   audit(ws, actor, 'rdv.annuler', order.ref, reason);
 }
 
+// Annulation validée : tout ce qui restait à faire sur le dossier est arrêté proprement. Les gardes de créneau sont libérées,
+// les rendez-vous annulés, la mission en cours est close (technicien libéré), le matériel remis en stock, et l'activation en cours
+// ne sera plus jouée (elle ne doit jamais lever d'erreur qui bloquerait l'espace).
+export function closeForCancellation(ws, order, actor, reason = 'Commande annulée') {
+  for (const h of ws.holds) if (h.orderId === order.id && h.status === 'actif') h.status = 'libere';
+  for (const a of ws.appointments) if (a.orderId === order.id && ['tenu', 'reserve', 'confirme', 'en_cours'].includes(a.status)) { a.status = 'annule'; a.reason = reason; releaseCap(ws, a); }
+  for (const wo of ws.workOrders) {
+    if (wo.orderId !== order.id || !['affectee', 'en_route', 'sur_place', 'en_cours'].includes(wo.status)) continue;
+    wo.status = 'annulee'; wo.cancelReason = reason; wo.freeAt = ws.clock; wo.version++;
+    closeHelp(ws, wo, 'Commande annulée');
+    notify(ws, wo.techUserId, { title: 'Mission annulée', body: order.ref + ' : la commande est annulée. Vous êtes de nouveau disponible.', orderId: order.id, kind: 'tache' });
+  }
+  for (const e of ws.equipment) if (e.orderId === order.id) { e.status = 'stock'; e.orderId = null; }
+  for (const act of ws.activations) if (act.orderId === order.id && act.status === 'demandee') { act.status = 'annulee'; act.result = 'Commande annulée'; }
+  for (const d of ws.deliveries) if (d.orderId === order.id && d.status === 'en_attente') { d.status = 'ignore'; d.error = 'Commande annulée : envoi abandonné.'; }
+}
+
 // Les images (pièces, photos) sont rangées à part, dans la photothèque de l'espace : le dossier ne garde
 // qu'une référence opaque et, au plus, une petite vignette, pour que l'état partagé reste léger.
 export const imgRef = x => (typeof x === 'string' && /^img_[a-z0-9]{8,40}$/.test(x) ? x : null);
 export const smallThumb = x => (typeof x === 'string' && x.startsWith('data:image/') && x.length < 24000 ? x : null);
 
 // ---------- Terrain (TE-01 à TE-08) ----------
-export function woAction(ws, wo, action, args, actor) {
+// `at` : heure de l'espace à laquelle le technicien a réellement agi (action faite hors ligne puis rejouée). Sans lui, c'est l'horloge actuelle.
+export function woAction(ws, wo, action, args, actor, at) {
   const order = getOrder(ws, wo.orderId);
   const appt = byId(ws.appointments, wo.apptId);
-  const now = ws.clock;
+  const now = Number.isFinite(at) ? at : ws.clock;
   const need = (ok, msg) => { if (!ok) throw new AppError('etat', msg); };
+  args = args && typeof args === 'object' && !Array.isArray(args) ? args : {};
+  // Un technicien n'est jamais sur deux missions à la fois.
+  if (['depart', 'arrive', 'start'].includes(action)) {
+    const other = ws.workOrders.find(w => w.id !== wo.id && w.techUserId === wo.techUserId && ['en_route', 'sur_place', 'en_cours'].includes(w.status));
+    if (other) { const oo = byId(ws.orders, other.orderId); throw new AppError('etat', 'Vous avez déjà une mission en cours' + (oo ? ' (dossier ' + oo.ref + ')' : '') + '. Terminez-la, ou déclarez la visite impossible, avant d’en commencer une autre.'); }
+  }
   switch (action) {
     case 'depart': {
       need(wo.status === 'affectee', 'Mission déjà démarrée.'); wo.status = 'en_route'; wo.times.depart = now;
       // Trajet simulé (démo) : de l'agence de l'équipe jusqu'à la commune du client, en quelques minutes réelles.
       const min = Math.max(1, Math.min(30, Number(ws.config.travelMin) || 4));
       wo.track = { id: nid(ws, 'TRJ'), from: TEAM_BASE[wo.teamId] || 'plateau', to: order.zone, departAt: now, durMs: min * 60e3, near: false, there: false };
-      if (min > 2) ws.jobs.push({ id: nid(ws, 'J'), kind: 'track', step: 'near', ref: wo.id, trackId: wo.track.id, due: now + (min - 2) * 60e3, generation: ws.generation, attempts: 0 });
-      ws.jobs.push({ id: nid(ws, 'J'), kind: 'track', step: 'there', ref: wo.id, trackId: wo.track.id, due: now + min * 60e3, generation: ws.generation, attempts: 0 });
+      // Les alertes du trajet partent de l'horloge actuelle, jamais d'une heure passée (action rejouée après une coupure).
+      if (min > 2) ws.jobs.push({ id: nid(ws, 'J'), kind: 'track', step: 'near', ref: wo.id, trackId: wo.track.id, due: ws.clock + (min - 2) * 60e3, generation: ws.generation, attempts: 0 });
+      ws.jobs.push({ id: nid(ws, 'J'), kind: 'track', step: 'there', ref: wo.id, trackId: wo.track.id, due: ws.clock + min * 60e3, generation: ws.generation, attempts: 0 });
       emit(ws, order, 'TECH_EN_ROUTE', { actor, publicText: 'Le technicien est en route.' });
       // Dernier rappel : ce qui n'est pas encore coché dans la liste de préparation (chien enfermé, accès, présence, prise).
       const todo = PREP_CHECKLIST.filter(i => (!i.when || i.when === order.address.building) && !(order.prep || {})[i.id] && (i.need || i.id === 'animaux')).map(i => i.ask);
@@ -302,10 +339,10 @@ export function woAction(ws, wo, action, args, actor) {
       transition(ws, order, 'INTERVENTION_EN_COURS', { actor, source: 'Application terrain' }); break;
     case 'checklist': {
       need(wo.status === 'en_cours', 'Démarrez la mission avant de remplir la checklist.');
-      const v = { ...(args.values || {}) };
+      const v = { ...(args.values && typeof args.values === 'object' && !Array.isArray(args.values) ? args.values : {}) };
       for (const c of CHECKLIST_TECH.filter(c => c.type !== 'bool')) {
-        if (v[c.id] === '' || v[c.id] == null) { delete v[c.id]; continue; }
-        const n = Number(String(v[c.id]).replace(',', '.').replace('−', '-'));
+        if (v[c.id] == null || String(v[c.id]).trim() === '') { delete v[c.id]; continue; }
+        const n = Number(String(v[c.id]).trim().replace(',', '.').replace('−', '-'));
         if (!Number.isFinite(n)) throw new AppError('checklist', c.label + ' : saisissez un nombre (ex. −19,5).');
         v[c.id] = n;
       }
@@ -325,14 +362,15 @@ export function woAction(ws, wo, action, args, actor) {
       emit(ws, order, 'EQUIPEMENT_ATTRIBUE', { actor, payload: { serial: s } }); break;
     }
     case 'photo': need(wo.status === 'en_cours', 'Démarrez la mission d’abord.');
-      wo.photos.push({ id: nid(ws, 'PH'), name: String(args.name || 'photo.jpg').slice(0, 120), thumb: smallThumb(args.thumb), img: imgRef(args.img), at: now, takenOffline: !!args.offline, capturedAt: args.capturedAt || now, gps: args.gps || null });
+      need(wo.photos.length < 30, 'Trop de photos sur cette mission (30 au maximum).');
+      wo.photos.push({ id: nid(ws, 'PH'), name: String(args.name || 'photo.jpg').slice(0, 120), thumb: smallThumb(args.thumb), img: imgRef(args.img), at: now, takenOffline: !!args.offline, capturedAt: Number.isFinite(Number(args.capturedAt)) && Number(args.capturedAt) > 0 ? Number(args.capturedAt) : now, gps: args.gps && typeof args.gps === 'object' ? args.gps : null });
       emit(ws, order, 'PREUVE_AJOUTEE', { actor, payload: { kind: 'photo', offline: !!args.offline } }); break;
     case 'comment': wo.comment = String(args.text || '').trim().slice(0, 1000); emit(ws, order, 'COMMENTAIRE_TECHNICIEN', { actor, payload: { text: wo.comment } }); break;
     case 'reception': {
       need(wo.status === 'en_cours', 'Démarrez la mission d’abord.');
       if (args.mode === 'code' && String(args.code == null ? '' : args.code).replace(/\s/g, '') !== wo.receptionCode) throw new AppError('code', 'Code de réception incorrect. Demandez au client le code affiché dans son application.');
-      wo.reception = { status: args.status === 'reserve' ? 'reserve' : 'accord', comment: String(args.comment || '').slice(0, 300), mode: args.mode || 'code', at: now };
-      emit(ws, order, 'RECEPTION_CLIENT', { actor, payload: wo.reception, publicText: wo.reception.status === 'accord' ? 'Vous avez validé la réception des travaux.' : 'Réception des travaux avec réserve : ' + (args.comment || '') }); break;
+      wo.reception = { status: args.status === 'reserve' ? 'reserve' : 'accord', comment: String(args.comment || '').slice(0, 300), mode: String(args.mode || 'code').slice(0, 20), at: now };
+      emit(ws, order, 'RECEPTION_CLIENT', { actor, payload: wo.reception, publicText: wo.reception.status === 'accord' ? 'Vous avez validé la réception des travaux.' : 'Réception des travaux avec réserve : ' + wo.reception.comment }); break;
     }
     case 'finish': {
       need(wo.status === 'en_cours', 'La mission n’est pas en cours.');
@@ -358,11 +396,11 @@ export function woAction(ws, wo, action, args, actor) {
       need(['affectee', 'en_route', 'sur_place', 'en_cours'].includes(wo.status), 'Mission déjà clôturée.');
       const type = args.reason;
       if (!['CLIENT_ABSENT', 'ACCES_IMPOSSIBLE', 'MATERIEL_PANNE', 'CAPACITE_RESEAU'].includes(type)) throw new AppError('motif', 'Motif d’échec invalide.');
-      wo.status = 'echec'; wo.failure = { type, comment: args.comment || '', at: now }; wo.times.end = now; wo.freeAt = now;
+      wo.status = 'echec'; wo.failure = { type, comment: String(args.comment || '').slice(0, 500), at: now }; wo.times.end = now; wo.freeAt = now;
       closeHelp(ws, wo, 'Visite non réalisée, sans réponse nécessaire');
       if (appt) { appt.status = type === 'CLIENT_ABSENT' ? 'non_honore' : 'annule'; appt.reason = BLOCKER_TYPES[type].label; releaseCap(ws, appt); }
       if (['RDV_CONFIRME', 'INTERVENTION_EN_COURS'].includes(order.state)) transition(ws, order, 'PRET_A_PLANIFIER', { actor, source: 'Application terrain', reason: BLOCKER_TYPES[type].label });
-      openBlocker(ws, order, type, { actor, detail: args.comment || '' });
+      openBlocker(ws, order, type, { actor, detail: wo.failure.comment });
       notify(ws, order.customerId, { title: 'Visite non réalisée', body: BLOCKER_TYPES[type].clientText + ' Un conseiller vous recontacte pour une nouvelle date.', orderId: order.id, kind: 'alerte' });
       break;
     }
@@ -382,7 +420,7 @@ export function woAction(ws, wo, action, args, actor) {
     }
     default: throw new AppError('action', 'Action inconnue.');
   }
-  wo.version++; order.updatedAt = now;
+  wo.version++; order.updatedAt = ws.clock;
   return wo;
 }
 
@@ -413,10 +451,12 @@ export function ingest(ws, env) {
   const order = ws.orders.find(o => o.ref === env.external_order_id);
   if (!order) { ws.seenEvents[env.event_id] = ws.clock; return log('rejete', 'Commande inconnue dans cet espace.'); }
   ws.seenEvents[env.event_id] = ws.clock;
+  // Une commande annulée ne reçoit plus aucune étape : l'événement est classé sans effet (il ne doit jamais bloquer l'espace).
+  if (order.cancelled) return log('ignore', 'Commande annulée : événement sans effet.');
   const p = env.payload || {};
   switch (env.event_type) {
     case 'payment.confirmed': {
-      if (order.payment.status !== 'en_attente') return log('ignore', 'Paiement déjà rapproché : événement sans effet (' + order.payment.status + ').');
+      if (order.payment.status !== 'en_attente') return log('ignore', 'Paiement déjà rapproché : événement sans effet.');
       const used = ws.orders.find(o => o !== order && o.payment.ref === p.reference && o.payment.status === 'confirme');
       if (used) { openBlocker(ws, order, 'PAIEMENT_NON_RAPPROCHE', { detail: 'Transaction déjà consommée par un autre dossier' }); return log('rejete', 'Transaction déjà utilisée pour un autre dossier.'); }
       if (p.reference !== order.payment.ref || p.amount !== order.payment.amount || p.currency !== order.payment.currency) {
@@ -450,7 +490,7 @@ export function ingest(ws, env) {
     }
     case 'order.status': {
       // Événement de statut venant de Moov Prospect : un événement ancien ne fait jamais reculer le dossier.
-      if (stateRank(p.state) <= stateRank(order.state) || (env.occurred_at && env.occurred_at < order.stateSince)) return log('ignore', 'Événement ancien (' + (STATE_INFO[p.state] || {}).label + ') reçu après un état plus récent : pas de régression.');
+      if (stateRank(p.state) <= stateRank(order.state) || (env.occurred_at && env.occurred_at < order.stateSince)) return log('ignore', 'Événement ancien (' + ((Object.hasOwn(STATE_INFO, p.state) && STATE_INFO[p.state].label) || 'état inconnu') + ') reçu après un état plus récent : pas de régression.');
       return log('ignore', 'Transition non autorisée depuis cette source.');
     }
     default: return log('rejete', 'Type d’événement inconnu.');
@@ -571,8 +611,8 @@ export function reserveSlot(ws, order, { date, slot }, actor) {
   // Mêmes règles que la réservation classique : matériel suspendu, pas de visite aujourd'hui ni dans le passé.
   if (ws.sim.equipmentShortage && ws.config.policyEquipment === 'bloquer') throw new AppError('materiel', 'Matériel indisponible : la prise de rendez-vous est suspendue selon la politique en vigueur. Aucune date ne vous est promise.');
   if (Number(date) < startOfDay(ws.clock) + DAY) throw new AppError('creneau', 'Choisissez un créneau à partir de demain.');
-  const teams = ws.teams.filter(t => t.available && t.zones.includes(order.zone));
-  const caps = ws.capacity.filter(c => c.date === Number(date) && c.slot === slot && teams.some(t => t.id === c.teamId) && (ws.sim.saturation ? remaining(ws, c) - 1 : remaining(ws, c)) > 0);
+  const teams = ws.teams.filter(t => teamOk(ws, t) && t.zones.includes(order.zone));
+  const caps = ws.capacity.filter(c => c.date === Number(date) && c.slot === slot && openDay(ws, c) && teams.some(t => t.id === c.teamId) && (ws.sim.saturation ? remaining(ws, c) - 1 : remaining(ws, c)) > 0);
   if (!caps.length) {
     const alt = availability(ws, order).slots.filter(s => s.left > 0).slice(0, 3);
     throw new AppError('complet', 'Ce créneau vient d’être pris. Choisissez-en un autre.', { alternatives: alt });
@@ -590,7 +630,7 @@ export function reserveSlot(ws, order, { date, slot }, actor) {
 }
 
 // Contrôle automatique d'une photo, à partir de mesures faites sur le téléphone (taille, lumière, netteté).
-// Ce n'est pas une IA : trois règles simples, expliquées au client et à la conseillère.
+// Ce n’est pas une IA : trois règles simples, expliquées au client et à la conseillère.
 export function photoCheck(q) {
   if (!q || typeof q !== 'object') return null;
   const n = (v, lo, hi) => { const x = Number(v); return Number.isFinite(x) ? Math.max(lo, Math.min(hi, x)) : null; };
@@ -614,10 +654,11 @@ export function dossierAdvice(ws, order) {
   const items = review.map(d => {
     const reasons = [];
     if (d.check && !d.check.ok) for (const i of d.check.issues) reasons.push(ADVICE_WORDS[i] || ('Photo ' + i));
-    const twin = live.find(o => o.id !== d.id && o.thumb && o.thumb === d.thumb && o.mime === d.mime);
-    if (twin && !reasons.length) reasons.push('Même photo que « ' + (DOC_TYPES[twin.type].short || DOC_TYPES[twin.type].label).toLowerCase() + ' » : merci d’envoyer la bonne pièce');
+    // Deux photos identiques : seule la seconde est à refaire (la première reste valable).
+    const twin = live.find(o => o.id !== d.id && o.thumb && o.thumb === d.thumb && o.mime === d.mime && live.indexOf(o) < live.indexOf(d));
+    if (twin) reasons.push('Même photo que « ' + (DOC_TYPES[twin.type].short || DOC_TYPES[twin.type].label).toLowerCase() + ' » : merci d’envoyer la bonne pièce');
     const wait = d.status === 'analyse';
-    return { docId: d.id, type: d.type, label: DOC_TYPES[d.type].label, status: d.status, verdict: wait ? 'attendre' : reasons.length ? 'refaire' : 'ok', reason: reasons[0] || null, notes: reasons };
+    return { docId: d.id, type: d.type, label: DOC_TYPES[d.type].label, status: d.status, verdict: wait ? 'attendre' : reasons.length ? 'refaire' : 'ok', reason: reasons.length ? reasons.join(' ; ') : null, notes: reasons };
   });
   const verdict = !items.length ? 'rien' : items.some(i => i.verdict === 'attendre') ? 'attendre' : items.some(i => i.verdict === 'refaire') ? 'refaire' : 'valider';
   const nOk = items.filter(i => i.verdict === 'ok').length, nBad = items.filter(i => i.verdict === 'refaire').length;
