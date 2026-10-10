@@ -669,6 +669,19 @@ function OrderSheet({ token, orderId, role, onClose }) {
 }
 
 // ---------- Fiche : dossier en ligne (photos, contrôle, ce qui manque) ----------
+// Avis automatique sur les photos : une aide pour la conseillère, qui garde la décision (rien n'est validé sans son clic).
+function AdviceCard({ token, adv, isC, closed, orderId }) {
+  if (adv.verdict === 'rien' || closed) return null;
+  const tone = adv.verdict === 'valider' ? 'ok' : adv.verdict === 'refaire' ? 'bad' : 'wait';
+  const n = adv.items.length, nOk = adv.items.filter(i => i.verdict === 'ok').length, nBad = adv.items.filter(i => i.verdict === 'refaire').length;
+  return <div className={'op-advice op-advice-' + tone}>
+    <div className="op-advice-h"><span className="op-advice-ic" aria-hidden="true">{Icon.search}</span><div className="stack-s" style={{ gap: 2 }}><b className="small">Avis automatique</b><span className="tiny muted">Pré-analyse simulée, pas une vraie IA</span></div></div>
+    <p className="small op-advice-sum">{adv.summary}</p>
+    {adv.items.some(i => i.verdict === 'refaire') && <ul className="op-advice-list">{adv.items.filter(i => i.verdict === 'refaire').map(i => <li key={i.docId} className="small"><b>{docShort(i.type)}</b> : {i.reason}</li>)}</ul>}
+    {isC && (adv.verdict === 'valider' || adv.verdict === 'refaire') && <div className="row"><AsyncBtn kind="primary" onClick={() => call(token, 'dossier.followAdvice', { orderId })}>{adv.verdict === 'valider' ? 'Suivre l’avis : valider ' + (n > 1 ? 'les ' + n + ' photos' : 'la photo') : 'Suivre l’avis : ' + (nOk ? 'valider ' + nOk + ', ' : '') + 'refuser ' + nBad}</AsyncBtn><span className="tiny muted">Vous pouvez aussi décider photo par photo.</span></div>}
+  </div>;
+}
+
 function DossierSection({ token, v, isC, ws }) {
   useNow(30000);
   const [asking, setAsking] = useState(false);
@@ -694,6 +707,7 @@ function DossierSection({ token, v, isC, ws }) {
         <ul>{d.missing.map((m, i) => <li key={i} className="small"><span className="op-miss-dot" aria-hidden="true" />{m.label} <span className="muted">· {m.why}</span></li>)}</ul>
       </> : <span className="small op-miss-ok">{Icon.check}{d.status === 'a_verifier' ? 'Tout est envoyé : il reste à regarder les photos.' : 'Rien ne manque.'}</span>}
     </div>
+    {v.internal && v.internal.advice && <AdviceCard token={token} adv={v.internal.advice} isC={isC} closed={closed} orderId={o.id} />}
     <div className="op-dphs">{docs.map(({ t, doc }) => {
       const c = docCheck(doc);
       const [tone, label] = doc ? DOC_STATUS[doc.status] || ['neutral', doc.status] : ['bad', 'Pas envoyée'];

@@ -2565,6 +2565,17 @@ button.op-capbtn:hover { background: var(--surface-3); }
   .op-asked-slot { width: 100%; }
 }
 
+/* Avis automatique sur les photos du dossier (aide à la décision de la conseillère) */
+.op-advice { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; border-radius: var(--r-m, 14px); border: 1px solid var(--line); background: var(--surface-2, var(--surface)); }
+.op-advice-ok { border-color: color-mix(in srgb, var(--ok) 45%, var(--line)); background: color-mix(in srgb, var(--ok) 9%, var(--surface)); }
+.op-advice-bad { border-color: color-mix(in srgb, var(--bad, #e5484d) 45%, var(--line)); background: color-mix(in srgb, var(--bad, #e5484d) 8%, var(--surface)); }
+.op-advice-h { display: flex; align-items: center; gap: 10px; }
+.op-advice-ic { display: inline-flex; width: 28px; height: 28px; align-items: center; justify-content: center; border-radius: 50%; background: var(--surface); color: var(--ink); }
+.op-advice-ic svg { width: 16px; height: 16px; }
+.op-advice-sum { margin: 0; color: var(--ink); }
+.op-advice-list { margin: 0; padding-left: 18px; }
+.op-advice .row { flex-wrap: wrap; gap: 8px 12px; align-items: center; }
+
 /* ---------- Site des offres « Moov Fibre » (préfixe sh-) : un petit site commercial, hors de la coquille ---------- */
 .sh { min-height: 100vh; background: var(--bg); display: flex; flex-direction: column; }
 .sh-wrap { width: 100%; max-width: 1180px; margin: 0 auto; padding-left: 28px; padding-right: 28px; }

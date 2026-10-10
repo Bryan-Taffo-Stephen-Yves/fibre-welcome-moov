@@ -560,6 +560,27 @@ export function photoCheck(q) {
   return { ok: !issues.length, issues, ...m };
 }
 
+// Avis automatique sur les pièces d'un dossier en ligne, pour aider la conseillère. Ce n'est PAS une IA : il lit seulement
+// le contrôle de la photo (netteté, lumière, taille) et repère une même photo envoyée pour deux pièces. La conseillère décide.
+const ADVICE_WORDS = { 'floue': 'Photo floue, merci de la reprendre', 'trop sombre': 'Photo trop sombre, merci de la reprendre à la lumière', 'trop claire (reflet)': 'Photo avec un reflet, merci de la reprendre sans éclairage direct', 'trop petite': 'Photo trop petite, merci de la reprendre de plus près' };
+export function dossierAdvice(ws, order) {
+  if (!order.dossier) return null;
+  const live = (order.requiredDocs || []).map(t => ws.documents.filter(d => d.orderId === order.id && d.type === t && d.status !== 'remplace').at(-1)).filter(Boolean);
+  const review = live.filter(d => ['analyse', 'a_valider'].includes(d.status));
+  const items = review.map(d => {
+    const reasons = [];
+    if (d.check && !d.check.ok) for (const i of d.check.issues) reasons.push(ADVICE_WORDS[i] || ('Photo ' + i));
+    const twin = live.find(o => o.id !== d.id && o.thumb && o.thumb === d.thumb && o.mime === d.mime);
+    if (twin && !reasons.length) reasons.push('Même photo que « ' + (DOC_TYPES[twin.type].short || DOC_TYPES[twin.type].label).toLowerCase() + ' » : merci d’envoyer la bonne pièce');
+    const wait = d.status === 'analyse';
+    return { docId: d.id, type: d.type, label: DOC_TYPES[d.type].label, status: d.status, verdict: wait ? 'attendre' : reasons.length ? 'refaire' : 'ok', reason: reasons[0] || null, notes: reasons };
+  });
+  const verdict = !items.length ? 'rien' : items.some(i => i.verdict === 'attendre') ? 'attendre' : items.some(i => i.verdict === 'refaire') ? 'refaire' : 'valider';
+  const nOk = items.filter(i => i.verdict === 'ok').length, nBad = items.filter(i => i.verdict === 'refaire').length;
+  const summary = verdict === 'rien' ? 'Aucune pièce à regarder pour le moment.' : verdict === 'attendre' ? 'Le contrôle des photos est en cours.' : verdict === 'valider' ? 'Les photos semblent nettes et lisibles : vous pouvez valider.' : nBad + ' photo' + (nBad > 1 ? 's' : '') + ' à refaire' + (nOk ? ', ' + nOk + ' semble' + (nOk > 1 ? 'nt' : '') + ' correcte' + (nOk > 1 ? 's' : '') : '') + '.';
+  return { verdict, summary, items, simulated: true };
+}
+
 export function docCheck(file) {
   const okMime = ['image/jpeg', 'image/png', 'application/pdf', 'image/webp'];
   if (!okMime.includes(file.mime)) throw new AppError('fichier', 'Format refusé. Formats acceptés : JPG, PNG, WEBP, PDF.');

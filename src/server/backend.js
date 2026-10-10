@@ -564,7 +564,7 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
     if (order.customerId) notify(ws, order.customerId, { title: 'Pièce demandée : ' + label, body: (reason ? reason + '. ' : '') + 'Envoyez-la depuis votre dossier, onglet Pièces (dossier ' + order.ref + ').', orderId: order.id, kind: 'action' });
     return { claimed: !!order.customerId };
   }, { order: true });
-  cmd('doc.review', ['conseiller'], ({ ws, user, args }) => {
+  const reviewDoc = ({ ws, user, args }) => {
     const doc = byId(ws.documents, args.docId); if (!doc) throw new AppError('introuvable', 'Pièce introuvable.');
     const order = scopedOrder(ws, user, doc.orderId);
     if (doc.status !== 'a_valider') throw new AppError('etat', 'Cette pièce n’est pas en attente de validation.');
@@ -590,7 +590,21 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
       notify(ws, order.customerId, { title: 'Pièce à remplacer', body: DOC_TYPES[doc.type].label + ' refusée : ' + args.reason, orderId: order.id, kind: 'action' });
     }
     audit(ws, user, 'piece.' + args.decision, order.ref, doc.name);
-  });
+  };
+  cmd('doc.review', ['conseiller'], reviewDoc);
+  // « Suivre l'avis » : applique l'avis automatique (recalculé ici, jamais celui d'un écran périmé). La conseillère reste l'auteure des décisions.
+  cmd('dossier.followAdvice', ['conseiller'], ({ ws, user, order, args }) => {
+    const adv = D.dossierAdvice(ws, order);
+    if (!adv || adv.verdict === 'rien') throw new AppError('etat', 'Aucune pièce à regarder pour le moment.');
+    if (adv.verdict === 'attendre') throw new AppError('etat', 'Le contrôle des photos est encore en cours : patientez quelques secondes.');
+    const done = { valide: 0, refuse: 0 };
+    for (const it of adv.items) {
+      if (it.verdict === 'ok') { reviewDoc({ ws, user, args: { docId: it.docId, decision: 'valide' } }); done.valide++; }
+      else { reviewDoc({ ws, user, args: { docId: it.docId, decision: 'refuse', reason: it.reason } }); done.refuse++; }
+    }
+    audit(ws, user, 'dossier.avis', order.ref, done.valide + ' validée(s), ' + done.refuse + ' refusée(s)');
+    return done;
+  }, { order: true });
   cmd('address.requestPrecision', ['conseiller', 'planificateur'], ({ ws, user, order, args }) => openBlocker(ws, order, 'ADRESSE_AMBIGUE', { actor: user, detail: args.detail || '' }), { order: true });
   cmd('order.markReady', ['planificateur'], ({ ws, user, order }) => {
     // Dossier rempli en ligne : il passe par « Valider le dossier » (pièces vérifiées par la conseillère).
@@ -1167,6 +1181,7 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
         tickets: ws.tickets.filter(t => t.orderId === o.id), approvals: (ws.approvals || []).filter(a => a.orderId === o.id), portReserved: o.portReserved, feedback: ws.feedback.find(f => f.orderId === o.id),
         assistantLog: (ws.assistantLog || []).filter(a => a.orderId === o.id),
         techRatings: (ws.techRatings || []).filter(r => r.orderId === o.id),
+        advice: D.dossierAdvice(ws, o),
       } };
     } },
     // Droit de voir une image (pièce ou photo) : même règle que le dossier, technicien seulement sur sa mission ouverte.

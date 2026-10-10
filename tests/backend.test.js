@@ -520,3 +520,41 @@ test('Démo en direct : le représentant ne voit pas la note interne et n’est 
   ok(await t.api.exec(nadia, 'call.end', { id: c.id, note: 'note interne' }));
   assert.equal(t.api.q(rep, 'client.order', { orderId: 'O1' }).calls.find(x => x.id === c.id).note, undefined);
 });
+
+test('Démo en direct : avis automatique sur les photos (photo floue, même photo deux fois, « suivre l’avis »)', async () => {
+  const t = setup(1);
+  const nadia = t.as('conseiller'); const herve = t.as('planificateur');
+  const b = ok(await t.api.exec(t.token, 'shop.purchase', { offerId: 'essentiel', zone: 'cocody', name: 'Cliente Avis', phone: '0700000004', street: 'Angré, rue 4', landmark: 'face au maquis du carrefour' }, { idemKey: 'avis1' }));
+  const c = t.api.switchUser(t.token, b.userId);
+  const up = (type, quality, thumb) => t.api.exec(c, 'doc.upload', { orderId: b.id, type, name: type + '.jpg', size: 9e4, mime: 'image/jpeg', quality, thumb });
+  const good = { w: 1200, h: 900, bright: 130, sharp: 50 }, blur = { w: 1200, h: 900, bright: 130, sharp: 3 };
+  const same = 'data:image/jpeg;base64,AAAA';
+  ok(await up('cni_recto', good, same)); ok(await up('cni_verso', good, same)); ok(await up('selfie_cni', blur, 'data:image/jpeg;base64,BBBB'));
+  const adviceOf = () => t.api.q(nadia, 'ops.order', { orderId: b.id }).internal.advice;
+  // Pendant l'analyse, l'avis dit d'attendre et « suivre l'avis » est refusé.
+  assert.equal(adviceOf().verdict, 'attendre');
+  assert.equal((await t.api.exec(nadia, 'dossier.followAdvice', { orderId: b.id })).ok, false);
+  t.tick(8000); await t.api.pump(t.wsId);
+  const adv = adviceOf();
+  assert.equal(adv.verdict, 'refaire');
+  assert.equal(adv.simulated, true);
+  const by = type => adv.items.find(i => i.type === type);
+  assert.match(by('selfie_cni').reason, /floue/);
+  assert.match(by('cni_recto').reason, /Même photo/); assert.match(by('cni_verso').reason, /Même photo/);
+  // Seule la conseillère peut suivre l'avis, et les autres rôles n'ont aucun droit de décision par ce chemin.
+  assert.equal((await t.api.exec(herve, 'dossier.followAdvice', { orderId: b.id })).ok, false);
+  assert.equal((await t.api.exec(c, 'dossier.followAdvice', { orderId: b.id })).ok, false);
+  const done = ok(await t.api.exec(nadia, 'dossier.followAdvice', { orderId: b.id }));
+  assert.equal(done.refuse, 3); assert.equal(done.valide, 0);
+  const docs = t.ws().documents.filter(d => d.orderId === b.id);
+  assert.ok(docs.every(d => d.status === 'refuse' && d.reason));
+  assert.ok(t.api.q(c, 'notifications').some(n => /Pièce à remplacer/.test(n.title)));
+  // Le client renvoie trois bonnes photos différentes : l'avis dit de valider, et « suivre l'avis » valide les trois.
+  ok(await up('cni_recto', good, 'data:image/jpeg;base64,CCCC')); ok(await up('cni_verso', good, 'data:image/jpeg;base64,DDDD')); ok(await up('selfie_cni', good, 'data:image/jpeg;base64,EEEE'));
+  t.tick(8000); await t.api.pump(t.wsId);
+  assert.equal(adviceOf().verdict, 'valider');
+  const ok2 = ok(await t.api.exec(nadia, 'dossier.followAdvice', { orderId: b.id }));
+  assert.equal(ok2.valide, 3);
+  assert.equal(t.api.q(herve, 'ops.techFree', { orderId: b.id }).docsOk, true);
+  assert.equal(adviceOf().verdict, 'rien');
+});
