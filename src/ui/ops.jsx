@@ -3,6 +3,7 @@
 import { useQ, call, api, toast, liveClock, useNow } from './platform.js';
 import { Btn, AsyncBtn, Sim, Explain, Field, Modal, StateTag, Progress, Empty, Icon, Picture, NotifBell, NotifPopups, Avatar, AvatarStack, Sparkline, Bars, Ring, Stacked, AbidjanMap, TrackMap, trackInfo, hourLabel, deName, firstName, fmtDate, fmtDateTime, slotLabel, money, STATE_INFO, ORDER_STATES, BLOCKER_TYPES, APPT_STATES, ROLES } from './kit.jsx';
 import { ZONES, DOC_TYPES, PAYMENT_STATES, REPORT_TYPES, CHECKLIST_TECH, DOSSIER_DOCS } from '../server/model.js';
+import { Trips } from './trips.jsx';
 const React = window.React;
 const { useState, useRef, useEffect } = React;
 const DAY = 864e5;
@@ -30,7 +31,7 @@ const QUEUES = {
 };
 const QUEUE_KEYS = Object.keys(QUEUES);
 QUEUES.dossiers = ['Dossiers en ligne', 'Remplis par le client'];
-const TICKETS = { question_assistant: 'Question transmise par l’assistant', escalade: 'Escalade', insatisfaction: 'Client insatisfait', incident_terrain: 'Incident sur le terrain' };
+const TICKETS = { question_assistant: 'Question transmise par l’assistant', escalade: 'Escalade', insatisfaction: 'Client insatisfait', incident_terrain: 'Incident sur le terrain', escalade_terrain: 'Aide demandée par un technicien', visite: 'Visite à revoir' };
 const ticketLabel = t => t.startsWith('signalement:') ? 'Signalement : ' + String(REPORT_TYPES[t.slice(12)] || t.slice(12)).toLowerCase() : TICKETS[t] || t;
 const DOC_STATUS = { analyse: ['info', 'En analyse'], a_valider: ['warn', 'À valider'], valide: ['ok', 'Validée'], refuse: ['bad', 'Refusée'], remplace: ['neutral', 'Remplacée'] };
 const fmtNum = n => String(n).replace('.', ',').replace(/^-/, '−');
@@ -52,6 +53,7 @@ const EVENTS = {
   DELEGATION: 'Délégation', CRENEAU_TENU: 'Créneau gardé', CONTROLE_CLIENT: 'Préparation du client', COMMANDE_ANNULEE: 'Commande annulée', BLOCAGE_RESOLU: 'Blocage résolu',
   BLOCAGE_OUVERT: 'Blocage ouvert', BLOCAGE_AFFECTE: 'Blocage affecté', AVIS_CLIENT: 'Avis du client', ADRESSE_PRECISEE: 'Adresse précisée', ACTIVATION_RELANCEE: 'Activation relancée',
   REMBOURSEMENT_SIMULE: 'Remboursement (simulé)', DOSSIER_RATTACHE: 'Dossier rattaché', INCIDENT_TERRAIN: 'Incident signalé par le technicien', COMMENTAIRE_TECHNICIEN: 'Commentaire du technicien',
+  AIDE_TERRAIN: 'Le technicien a demandé de l’aide', INSTALLATION_VALIDEE: 'Visite validée', INSTALLATION_CONTESTEE: 'Le client signale un souci après la visite',
 };
 const holdNote = e => (e && e.type === 'CRENEAU_TENU' && e.payload && e.payload.expiresInMin ? ' ' + e.payload.expiresInMin + ' min' : '');
 const evLabel = t => EVENTS[t] || (STATE_INFO[t] && STATE_INFO[t].label) || (t.charAt(0) + t.slice(1).toLowerCase().replace(/_/g, ' '));
@@ -176,6 +178,10 @@ export function OpsConsole({ token }) {
   const [sec, setSec] = useState(null);
   const [orderId, setOrderId] = useState(null);
   const [preset, setPreset] = useState(null);
+  // Arrivée depuis une notification : onglet de la file à montrer (n change pour repartir à neuf).
+  const [nav, setNav] = useState({ n: 0 });
+  const nots = useQ(token, 'notifications');
+  const picked = useRef(null);
   const root = useRef(null);
   const isAdv = !!me.data && me.data.user.role === 'conseiller';
   const calls = useQ(token, isAdv ? 'ops.calls' : 'me');
@@ -185,33 +191,50 @@ export function OpsConsole({ token }) {
   useEffect(() => { if (live && live.status === 'en_cours' && !opened.current.has(live.id)) { opened.current.add(live.id); open(live.orderId); } }, [live && live.id, live && live.status]);
   if (me.error) return <div className="alert alert-bad">{me.error.message}</div>;
   const role = me.data.user.role;
-  const sections = role === 'planificateur' ? [['queues', 'Files de travail', Icon.list], ['planning', 'Planning', Icon.cal], ['teams', 'Équipes et ressources', Icon.users], ['search', 'Dossiers', Icon.search]]
-    : role === 'superviseur' ? [['dash', 'Tableau de bord', Icon.grid], ['queues', 'Files et escalades', Icon.list], ['approvals', 'Validations', Icon.shield], ['planning', 'Planning', Icon.cal], ['search', 'Dossiers', Icon.search]]
+  const sections = role === 'planificateur' ? [['queues', 'Files de travail', Icon.list], ['planning', 'Planning', Icon.cal], ['trips', 'Trajets', Icon.compass], ['teams', 'Équipes et ressources', Icon.users], ['search', 'Dossiers', Icon.search]]
+    : role === 'superviseur' ? [['dash', 'Tableau de bord', Icon.grid], ['queues', 'Files et escalades', Icon.list], ['approvals', 'Validations', Icon.shield], ['planning', 'Planning', Icon.cal], ['trips', 'Trajets', Icon.compass], ['search', 'Dossiers', Icon.search]]
     : [['queues', 'Files de travail', Icon.list], ['search', 'Dossiers', Icon.search]];
   const s = sections.some(x => x[0] === sec) ? sec : sections[0][0];
   const q = qs.data;
   const count = q ? { queues: new Set([...QUEUE_KEYS, 'dossiers'].flatMap(k => (q[k] || []).map(r => r.id))).size, approvals: q.approvals.length } : {};
   const toTop = () => requestAnimationFrame(() => { const el = root.current; if (el && el.getBoundingClientRect().top < 0) window.scrollBy(0, el.getBoundingClientRect().top - 90); });
   function open(id) { setOrderId(id); call(token, 'order.open', { orderId: id }, { silent: true }); toTop(); }
-  const go = k => { setSec(k); setOrderId(null); setPreset(null); };
+  const go = k => { setSec(k); setOrderId(null); setPreset(null); setNav(x => ({ n: x.n + 1 })); };
+  // Une notification de l'équipe mène là où l'on agit : planification, file des escalades ou dossier.
+  const openNotif = (n, id) => {
+    const title = (n && n.title) || '';
+    const oid = id || (n && n.orderId);
+    if (/est de nouveau disponible$/.test(title)) { setSec(role === 'superviseur' ? 'planning' : 'queues'); setOrderId(null); setPreset(null); setNav(x => ({ n: x.n + 1, tab: 'dossiers' })); toTop(); }
+    else if (title === 'Un technicien demande de l’aide' && role === 'superviseur') { setSec('queues'); setOrderId(null); setPreset(null); setNav(x => ({ n: x.n + 1, side: 'tickets' })); toTop(); }
+    else if (oid) open(oid);
+  };
+  // La cloche ne donne que le numéro du dossier : on retrouve la notification touchée grâce à sa place dans la liste.
+  const noteBell = e => {
+    const b = e.target.closest && e.target.closest('.nbell-item');
+    picked.current = null;
+    if (!b || !b.parentNode) return;
+    const i = Array.prototype.indexOf.call(b.parentNode.children, b);
+    picked.current = (Array.isArray(nots.data) ? nots.data : [])[i] || null;
+  };
   const goSearch = zone => { setPreset({ zone }); setSec('search'); setOrderId(null); toTop(); };
   const zones = me.data.user.zones || [];
   return <div className={'op-root' + (live ? ' has-call' : '')} ref={root}>
-    <NotifPopups key={token} token={token} variant="desk" onOpen={n => n.orderId && open(n.orderId)} />
+    <NotifPopups key={token} token={token} variant="desk" onOpen={n => openNotif(n)} />
     <div className="op-top">
       <nav className="pills op-nav" role="tablist" aria-label="Sections">
         {sections.map(([k, l, ic]) => <button key={k} type="button" role="tab" aria-selected={s === k} onClick={() => go(k)} data-tour={'ops-' + k}><span className="op-nav-ic" aria-hidden="true">{ic}</span>{l}{count[k] ? <span className="count">{count[k]}</span> : null}</button>)}
       </nav>
-      <NotifBell token={token} onOpen={open} />
+      <span style={{ display: 'contents' }} onClickCapture={noteBell}><NotifBell token={token} onOpen={id => openNotif(picked.current, id)} /></span>
       <div className="op-scope" title="Vous ne voyez que les dossiers de ces communes">
         <span className="small muted">Périmètre</span>
         {zones.length === ZONES.length ? <span className="op-zone">Tout Abidjan</span> : zones.map(z => <span key={z} className="op-zone">{zoneName(z)}</span>)}
       </div>
     </div>
     {orderId ? <OrderSheet key={orderId} token={token} orderId={orderId} role={role} onClose={() => setOrderId(null)} />
-      : s === 'queues' ? <Queues token={token} role={role} open={open} />
+      : s === 'queues' ? <Queues key={'q' + nav.n} token={token} role={role} open={open} initialTab={nav.tab} initialSide={nav.side} />
       : s === 'search' ? <Search key={preset ? preset.zone : 'all'} token={token} open={open} initial={preset} zones={zones} />
       : s === 'planning' ? <Planning token={token} role={role} open={open} />
+      : s === 'trips' ? <Trips token={token} />
       : s === 'teams' ? <Teams token={token} />
       : s === 'dash' ? <Dashboard token={token} open={open} goSearch={goSearch} goApprovals={() => go('approvals')} />
       : <Approvals token={token} open={open} />}
@@ -278,13 +301,13 @@ function DossierTable({ rows, open, now }) {
 }
 
 // ---------- Files de travail ----------
-function Queues({ token, role, open }) {
+function Queues({ token, role, open, initialTab, initialSide }) {
   const r = useQ(token, 'ops.queues');
   const me = useQ(token, 'me');
   useNow(30000);
   // Tant qu'on n'a pas choisi de file : celle des dossiers en ligne quand elle contient quelque chose, sinon comme avant.
-  const [tab, setTab] = useState(null);
-  const [side, setSide] = useState(null);
+  const [tab, setTab] = useState(initialTab || null);
+  const [side, setSide] = useState(initialSide || null);
   if (r.error) return <div className="alert alert-bad">{r.error.message}</div>;
   const q = { ...r.data, dossiers: r.data.dossiers || [] };
   const keys = role === 'planificateur' ? ['dossiers', 'aPreparer', 'aConfirmer', 'bloques', 'enRetard', 'sansAction', 'incomplets'] : role === 'superviseur' ? [...QUEUE_KEYS, 'dossiers'] : ['dossiers', ...QUEUE_KEYS];
@@ -292,7 +315,10 @@ function Queues({ token, role, open }) {
   const cur = keys.includes(tab) ? tab : auto;
   const now = liveClock(me.data && me.data.ws);
   const sides = [['docs', 'Pièces', q.docs], ['callbacks', 'Rappels', q.callbacks], ['tickets', 'Tickets', q.tickets]];
-  const sd = side || (sides.find(x => x[2].length) || sides[0])[0];
+  // Une demande d'aide d'un technicien attend une réponse : on montre d'abord les tickets, les demandes d'aide en tête.
+  const helpAsk = q.tickets.some(t => t.type === 'escalade_terrain');
+  const sd = side || (helpAsk ? 'tickets' : (sides.find(x => x[2].length) || sides[0])[0]);
+  const tickets = [...q.tickets].sort((a, b) => (b.type === 'escalade_terrain') - (a.type === 'escalade_terrain'));
   return <div className="op-queues" data-tour="ops-queues-panel">
     <div className="op-qrow" role="tablist" aria-label="Files de travail" style={{ '--n': keys.length }}>
       {keys.map(k => { const list = q[k]; return <button key={k} type="button" role="tab" aria-selected={cur === k} className="op-q" onClick={() => setTab(k)}>
@@ -325,8 +351,9 @@ function Queues({ token, role, open }) {
             {role === 'conseiller' && <div className="row"><Btn size="s" kind="ghost" onClick={() => open(c.orderId)}>Ouvrir</Btn><AsyncBtn size="s" kind="primary" onClick={() => call(token, 'callback.update', { id: c.id, status: 'fait', note: 'Client rappelé' })}>Marquer rappelé</AsyncBtn></div>}
           </div>
         </div>) : <Empty>Aucun rappel en attente.</Empty>)}
-        {sd === 'tickets' && (q.tickets.length ? q.tickets.map(t => <div key={t.id} className="op-item">
+        {sd === 'tickets' && (tickets.length ? tickets.map(t => t.type === 'escalade_terrain' ? <FieldTicket key={t.id} token={token} t={t} open={open} /> : <div key={t.id} className="op-item">
           <div className="op-item-h"><Avatar name={t.by} size={34} /><div className="grow op-trunc"><b className="small">{ticketLabel(t.type)}</b><div className="tiny muted">{t.ref} · {firstName(t.by)} · {fmtDateTime(t.at)}</div></div></div>
+          {t.type === 'visite' && <p className="tiny muted">{/^Souci signalé/.test(t.text || '') ? 'Le client a signalé un souci juste après la visite, avant de la valider. Écrivez-lui ou appelez-le, puis clôturez ce ticket.' : 'Ce ticket vient de l’avis donné par le client après la visite. Regardez si un suivi est utile, puis clôturez-le.'}</p>}
           {t.text && <p className="small">« {t.text} »</p>}
           <div className="row"><Btn size="s" kind="primary" onClick={() => open(t.orderId)}>Ouvrir le dossier</Btn><AsyncBtn size="s" kind="ghost" onClick={() => call(token, 'ticket.close', { id: t.id })}>Clore</AsyncBtn></div>
         </div>) : <Empty>Aucun ticket ouvert.</Empty>)}
@@ -354,6 +381,33 @@ function DocReview({ token, d, canReview, compact }) {
       <input className="input" aria-label="Motif de refus" placeholder="Pourquoi refuser ? (le client le lira)" value={reason} onChange={e => setReason(e.target.value)} autoFocus />
       <div className="row"><AsyncBtn size="s" kind="danger" onClick={() => call(token, 'doc.review', { docId: d.id, decision: 'refuse', reason })}>Refuser la pièce</AsyncBtn><Btn size="s" kind="ghost" onClick={() => setRefusing(false)}>Annuler</Btn></div>
     </> : <div className="row"><AsyncBtn size="s" kind="primary" onClick={() => call(token, 'doc.review', { docId: d.id, decision: 'valide' })}>Valider</AsyncBtn><Btn size="s" kind="ghost" onClick={() => setRefusing(true)}>Refuser</Btn></div>)}
+  </div>;
+}
+
+// Demande d'aide d'un technicien sur place : le superviseur lit, regarde la photo, puis répond (réponse obligatoire).
+function FieldTicket({ token, t, open }) {
+  const r = useQ(token, 'ops.order', { orderId: t.orderId });
+  const [reply, setReply] = useState('');
+  const v = r.data;
+  const wo = v && v.internal && v.internal.workOrder;
+  const h = wo && (wo.help || []).find(x => x.ticketId === t.id);
+  const who = firstName(t.by);
+  const ready = reply.trim().length >= 2;
+  return <div className="op-item op-field">
+    <div className="op-item-h"><Avatar name={t.by} size={38} /><div className="grow op-trunc"><b className="small">{ticketLabel(t.type)}</b><div className="tiny muted">{who} · technicien · {fmtDateTime(t.at)}</div></div><Pill tone="warn">À répondre</Pill></div>
+    <div className="op-field-doss tiny muted">{Icon.pin}<span>Dossier <b>{t.ref}</b>{v ? ' · ' + v.order.address.commune : ''}</span></div>
+    <div className="op-quote small"><span className="tiny muted">{who} écrit</span><div>« {t.text} »</div></div>
+    {h && h.photo && <div className="op-field-photo">
+      <Picture token={token} img={h.photo.img} thumb={h.photo.thumb} label={'Photo de ' + who + ' · ' + t.ref} alt={'Photo envoyée par ' + who} size={72} />
+      <div className="stack-s" style={{ gap: 4 }}><span className="tiny muted">Photo jointe (touchez pour agrandir)</span><CheckLine c={h.photo.check} /></div>
+    </div>}
+    <label htmlFor={'fr-' + t.id} className="small"><b>Écrivez votre réponse au technicien</b></label>
+    <textarea id={'fr-' + t.id} className="input op-field-reply" required aria-required="true" value={reply} onChange={e => setReply(e.target.value)} placeholder="Une réponse courte et claire. Il la lira sur son téléphone." />
+    {!ready && <span className="tiny muted">La réponse est obligatoire pour pouvoir l’envoyer.</span>}
+    <div className="row">
+      <AsyncBtn size="s" kind="primary" disabled={!ready} onClick={async () => { if ((await call(token, 'ticket.close', { id: t.id, note: reply.trim() })).ok) { setReply(''); toast('Réponse envoyée à ' + who); } }}>Envoyer la réponse</AsyncBtn>
+      <Btn size="s" kind="ghost" onClick={() => open(t.orderId)}>Ouvrir le dossier</Btn>
+    </div>
   </div>;
 }
 
@@ -496,6 +550,9 @@ function OrderSheet({ token, orderId, role, onClose }) {
     {dos && (isP || isC || isS) && appt && <div ref={planRef} className="op-anchor"><PlanPanel token={token} orderId={orderId} v={v} canAct={isP || isC} byC={isC} adv={((staff.data || []).find(u => u.role === 'conseiller') || {}).name} /></div>}
     {v.mission && (['en_route', 'sur_place', 'en_cours'].includes(v.mission.status) || (I.techRatings || []).length > 0) && <LiveVisit v={v} ws={me.data && me.data.ws} ratings={I.techRatings || []} />}
     {dos && <div ref={dosRef} className="op-anchor"><DossierSection token={token} v={v} isC={isC} ws={me.data && me.data.ws} onPlan={(isC || isP) && appt && appt.status === 'reserve' ? () => toRef(planRef) : null} /></div>}
+
+    {wo && wo.signoff && <SignoffLine s={wo.signoff} ws={me.data && me.data.ws} />}
+    {wo && wo.help && wo.help.length > 0 && <FieldHelp token={token} wo={wo} orderRef={o.ref} />}
 
     <div className="op-sgrid">
       <div className="op-col">
@@ -739,6 +796,8 @@ function DossierSection({ token, v, isC, ws, onPlan }) {
 // ---------- Fiche : choisir le technicien et l'heure (planificateur) ----------
 function PlanPanel({ token, orderId, v, canAct, byC, adv }) {
   const r = useQ(token, 'ops.techFree', { orderId });
+  const me = useQ(token, 'me');
+  useNow(30000);
   const [pick, setPick] = useState(null);
   if (r.error) return <div className="alert alert-bad small">{r.error.message}</div>;
   const f = r.data;
@@ -748,6 +807,15 @@ function PlanPanel({ token, orderId, v, canAct, byC, adv }) {
   const ok = team && team.hours.some(h => h.h === pick.time && h.free);
   const own = f.teams.find(t => t.id === f.appt.teamId);
   const nadia = adv ? firstName(adv) : 'la conseillère';
+  // Où en est chaque équipe en ce moment : libre (depuis quand), en route ou chez un client.
+  const nowMs = liveClock(me.data && me.data.ws);
+  const liveOf = t => {
+    const l = t.live; if (!l) return null;
+    if (l.status === 'en_route') return { txt: 'En route vers ' + (l.ref || 'un client'), cls: 'is-road' };
+    if (l.status === 'sur_place' || l.status === 'en_cours') return { txt: 'Chez un client' + (l.ref ? ' (' + l.ref + ')' : ''), cls: 'is-busy' };
+    const min = l.freeSince ? Math.max(0, Math.round((nowMs - l.freeSince) / 60e3)) : null;
+    return { txt: min == null ? 'Libre' : 'Libre depuis ' + leftTxt(min * 60e3), cls: 'is-free', fresh: min != null && min < 30 };
+  };
   if (confirmed) return <section className="card stack op-plan2">
     <div className="card-title"><h2>Technicien et heure</h2><Pill tone="ok">Rendez-vous confirmé</Pill></div>
     <div className="op-item op-item-row">{own ? <Avatar name={own.techName} size={48} /> : <span className="op-ic">{Icon.tool}</span>}<div className="grow op-trunc"><b>{own ? own.techName : 'Équipe affectée'}</b><div className="tiny muted">{own ? teamLine(own) : ''}</div></div>
@@ -759,10 +827,12 @@ function PlanPanel({ token, orderId, v, canAct, byC, adv }) {
       <div className="op-asked-slot">{Icon.cal}<span><span className="tiny muted">Demandé par le client</span><b className="small">{fmtDate(f.appt.date)} · {slotWord(f.appt.slot)} ({slotLabel(f.appt.slot)})</b></span></div></div>
     {f.teams.length === 0 ? <Empty>Aucune équipe ne couvre cette commune.</Empty> : <div className="op-tfs">{f.teams.map(t => {
       const sel = pick && pick.teamId === t.id;
-      return <article key={t.id} className={'op-tf' + (t.canTake ? '' : ' is-off') + (sel ? ' is-sel' : '')}>
+      const lv = liveOf(t);
+      return <article key={t.id} className={'op-tf' + (t.canTake ? '' : ' is-off') + (sel ? ' is-sel' : '') + (lv && lv.fresh ? ' is-fresh' : '')}>
         <div className="op-item-h"><Avatar name={t.techName} size={46} dot={t.available ? 'ok' : 'bad'} />
           <div className="grow op-trunc"><b className="small">{t.techName}</b><div className="tiny muted">{teamLine(t)}</div></div>
           <span className="op-tf-q" title="Note qualité de l’équipe">{Icon.star}{nf1(t.quality)}</span></div>
+        {lv && <div className={'op-tf-live ' + lv.cls}><span className="op-tf-dot" aria-hidden="true" /><span className="small">{lv.txt}</span>{lv.fresh && <span className="op-tf-new">De nouveau disponible</span>}</div>}
         <span className={'tiny op-tf-left' + (t.canTake ? '' : ' op-bad')}>{!t.covers ? 'Ne travaille pas à ' + (f.commune || 'cette commune') : !t.available ? 'Indisponible ce jour-là' : t.own ? 'Place gardée pour ce client' + (t.left > 0 ? ' · ' + t.left + ' autre' + (t.left > 1 ? 's' : '') + ' libre' + (t.left > 1 ? 's' : '') : '') : t.left > 0 ? t.left + ' place' + (t.left > 1 ? 's' : '') + ' libre' + (t.left > 1 ? 's' : '') + ' ce ' + slotWord(f.appt.slot) : 'Complet ce ' + slotWord(f.appt.slot)}</span>
         <div className="op-hours" role="group" aria-label={'Heures de ' + t.techName}>{t.hours.map(h => { const b = t.busy.find(x => x.time === h.h); const on = sel && pick.time === h.h; return <button key={h.h} type="button" className={'op-hour' + (b ? ' is-busy' : '')} disabled={!h.free || !canAct} aria-pressed={!!on} onClick={() => setPick({ teamId: t.id, time: h.h })} title={b ? 'Déjà prise : ' + (b.ref || 'autre client') : h.free ? 'Libre' : 'Pas possible'}>
           <b>{hourLabel(h.h)}</b><small>{b ? b.ref || 'prise' : h.free ? 'libre' : '—'}</small></button>; })}</div>
@@ -772,6 +842,47 @@ function PlanPanel({ token, orderId, v, canAct, byC, adv }) {
       <AsyncBtn kind="primary" disabled={!ok || !f.docsOk} onClick={async () => { const x = await call(token, 'dossier.validate', { orderId, teamId: pick.teamId, time: pick.time }); if (x.ok) { setPick(null); toast('Mission transmise à ' + firstName(team.techName) + ' : ' + fmtDate(f.appt.date) + ' à ' + hourLabel(pick.time) + '. Le client est prévenu.'); } }}>{team ? 'Valider et transmettre à ' + firstName(team.techName) : 'Valider et transmettre au technicien'}</AsyncBtn>
       <span className={'small' + (!f.docsOk ? ' op-wait' : ' muted')}>{!f.docsOk ? (byC ? 'D’abord, validez les photos : ' : 'En attente de ' + nadia + ' : ') + f.docsMissing.map(x => x.toLowerCase()).join(', ') + (byC ? '.' : ' à valider.') : ok ? firstName(team.techName) + ' recevra la mission pour le ' + fmtDate(f.appt.date) + ' à ' + hourLabel(pick.time) + '. Le client sera prévenu.' : 'Choisissez d’abord une heure libre.'}</span>
     </div>}
+  </section>;
+}
+
+// ---------- Fiche : fin de visite (validation du client) et aide demandée par le technicien ----------
+function SignoffLine({ s, ws }) {
+  useNow(30000);
+  const now = liveClock(ws);
+  const left = s.autoAt ? s.autoAt - now : null;
+  const [tone, label, more] = s.state === 'attente'
+    ? ['warn', 'En attente du client', left != null && left > 0 ? 'Validation automatique dans ' + leftTxt(left) + ' (vers ' + hhmm(s.autoAt) + ') s’il ne répond pas.' : 'Il ne répond pas : la validation automatique est imminente.']
+    : s.state === 'validee' ? ['ok', 'Visite validée par le client', 'Il a vérifié la box et Internet' + (s.at ? ', le ' + fmtDateTime(s.at) : '') + '.']
+    : s.state === 'auto' ? ['ok', 'Visite validée automatiquement', (s.mode === 'auto' ? 'Le client a laissé partir le technicien sans vérifier' : 'Le client n’a pas répondu à temps') + (s.at ? ', le ' + fmtDateTime(s.at) : '') + '.']
+    : ['bad', 'Le client signale un souci', s.problem ? '« ' + s.problem + ' »' : 'Un ticket est ouvert pour le superviseur.'];
+  return <section className="card op-signoff" aria-label="Validation de la visite par le client">
+    <span className={'op-ic op-ic-' + tone} aria-hidden="true">{tone === 'ok' ? Icon.check : tone === 'bad' ? Icon.alert : Icon.clock}</span>
+    <div className="grow stack-s" style={{ gap: 2 }}><div className="row" style={{ gap: 8 }}><b className="small">Fin de visite</b><Pill tone={tone}>{label}</Pill></div><span className="small muted">{more}</span></div>
+  </section>;
+}
+function FieldHelp({ token, wo, orderRef }) {
+  const list = [...wo.help].reverse();
+  return <section className="card stack op-help">
+    <div className="card-title"><div className="stack-s" style={{ gap: 2 }}><h2>Aide demandée sur le terrain <span className="op-h-n">{list.length}</span></h2><span className="small muted">Ce que le technicien a demandé chez le client, et ce qu’on lui a répondu.</span></div>
+      <Explain>Le technicien peut poser une question au guide, montrer un problème en photo ou le transmettre à son responsable. Le guide donne une <b>réponse automatique</b> tirée de fiches simples : ce n’est pas une personne.</Explain></div>
+    <div className="op-help-list">{list.map(h => {
+      const [tone, label] = h.escalated ? (h.status === 'repondu' ? ['ok', 'Réponse du responsable'] : ['warn', 'Transmise au superviseur']) : ['neutral', 'Question au guide'];
+      return <article key={h.id} className="op-item op-help-i">
+        <div className="spread"><Pill tone={tone}>{label}</Pill><span className="tiny muted">{fmtDateTime(h.at)}</span></div>
+        <div className="op-quote small"><span className="tiny muted">{h.escalated ? 'Demande' : 'Question'} du technicien</span><div>{h.q ? '« ' + h.q + ' »' : 'Photo envoyée sans texte'}</div></div>
+        {h.photo && <div className="op-field-photo"><Picture token={token} img={h.photo.img} thumb={h.photo.thumb} label={'Photo · ' + orderRef} alt={'Photo jointe : ' + h.photo.name} size={64} /><div className="stack-s" style={{ gap: 4 }}><span className="tiny muted">Photo jointe</span><CheckLine c={h.photo.check} /></div></div>}
+        {h.a && <div className="op-help-a">
+          <span className="tiny muted">Réponse automatique du guide : {h.a.title}</span>
+          {h.a.steps && h.a.steps.length > 0 && <ol className="small">{h.a.steps.map((x, i) => <li key={i}>{x}</li>)}</ol>}
+          {h.a.note && <span className="tiny muted">{h.a.note}</span>}
+          {h.a.source && <span className="tiny muted">Source : {h.a.source}</span>}
+          {h.a.escalate && !h.escalated && <span className="tiny op-amber">{Icon.alert}Le guide conseillait de transmettre au responsable.</span>}
+        </div>}
+        {h.escalated && <span className="tiny muted">{h.escalatedAt ? 'Transmise le ' + fmtDateTime(h.escalatedAt) : 'Transmise'} au superviseur.</span>}
+        {h.reply && <div className="op-help-r"><span className="tiny muted">Réponse de {firstName(h.reply.by)} au technicien, {fmtDateTime(h.reply.at)}</span><div className="small">« {h.reply.text} »</div></div>}
+        {h.escalated && !h.reply && <span className="tiny op-amber">En attente de réponse du superviseur.</span>}
+      </article>;
+    })}</div>
   </section>;
 }
 

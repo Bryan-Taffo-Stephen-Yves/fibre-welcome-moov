@@ -124,3 +124,70 @@ export function TrackMap({ from = 'plateau', to = 'cocody', p = 0, arrived = fal
     </g>
   </svg>;
 }
+
+// Carte d'ensemble des trajets : plusieurs camionnettes sur la carte d'Abidjan, une épingle par client.
+// items : [{ id, from, to, p (0 à 1), arrived, tone ('route' | 'ici' | 'attente' | 'fin'), label }]. L'avancement est calculé par l'appelant.
+// selected : id mis en valeur ; onPick(id) : clic ou touche Entrée sur une camionnette ou une épingle.
+const TONE_COLOR = { route: 'var(--accent)', ici: 'var(--ok)', attente: 'var(--warn)', fin: 'var(--ink-3)' };
+export function TripsMap({ items = [], selected, onPick, height = 260, label }) {
+  // Les épingles d'une même commune sont décalées pour rester toutes visibles.
+  const perTo = {}; for (const it of items) perTo[it.to] = (perTo[it.to] || 0) + 1;
+  const seen = {};
+  const geo = items.map((it, k) => {
+    const A = communeCenter(it.from), B0 = communeCenter(it.to);
+    const i = seen[it.to] = (seen[it.to] || 0) + 1, n = perTo[it.to];
+    const B = [B0[0] + (i - 1 - (n - 1) / 2) * 11, B0[1]];
+    const dx = B[0] - A[0], dy = B[1] - A[1], len = Math.hypot(dx, dy) || 1;
+    // Chaque trajet a sa propre courbure : deux routes entre les mêmes communes ne se superposent pas.
+    const bend = 0.2 + (k % 3) * 0.09;
+    const C = [(A[0] + B[0]) / 2 - dy / len * len * bend, (A[1] + B[1]) / 2 + dx / len * len * bend];
+    const t = it.arrived ? 1 : Math.max(0, Math.min(1, it.p || 0));
+    const Q1 = lerp(A, C, t), P = lerp(Q1, lerp(C, B, t), t);
+    return { it, A, B, C, P, Q1, t };
+  });
+  const sel = geo.find(g => g.it.id === selected);
+  const ordered = sel ? [...geo.filter(g => g !== sel), sel] : geo; // la visite choisie est dessinée en dernier, donc au-dessus
+  const pick = id => onPick && (() => onPick(id));
+  const keyPick = id => onPick && (e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onPick(id); } });
+  const dim = sel ? 0.45 : 1;
+  const lab = sel && sel.it.label ? String(sel.it.label) : '';
+  return <div className="trips-map">
+    <svg className="map trips-map-svg" viewBox="0 0 400 260" style={{ height, width: '100%' }} role="group" aria-label={label || ('Carte des trajets : ' + items.length + ' camionnette' + (items.length > 1 ? 's' : ''))}>
+      <rect x="0" y="0" width="400" height="260" fill="var(--map-ctx)" />
+      <path d={WATER} fill="var(--map-water)" />
+      {COMMUNES.map(c => <path key={c.id} d={c.d} fill={c.ctx ? 'var(--map-ctx)' : 'var(--map-land)'} stroke="var(--map-stroke)" strokeWidth="2.5" strokeLinejoin="round" />)}
+      {COMMUNES.filter(c => c.name).map(c => <text key={c.id} x={c.c[0]} y={c.c[1] + 4} textAnchor="middle" className="map-label" style={{ fontSize: 9, opacity: 0.55 }} pointerEvents="none">{c.name}</text>)}
+      {ordered.map(({ it, A, B, C, P, Q1, t }) => {
+        const on = sel && sel.it.id === it.id, col = TONE_COLOR[it.tone] || 'var(--accent)';
+        const op = on ? 1 : dim;
+        return <g key={it.id} opacity={op}>
+          <path d={`M${A[0]} ${A[1]}Q${C[0]} ${C[1]} ${B[0]} ${B[1]}`} fill="none" stroke="var(--ink)" strokeOpacity={on ? 0.35 : 0.2} strokeWidth={on ? 3.5 : 2} strokeLinecap="round" strokeDasharray="1 6" />
+          <path d={`M${A[0]} ${A[1]}Q${Q1[0]} ${Q1[1]} ${P[0]} ${P[1]}`} fill="none" stroke={col} strokeWidth={on ? 4 : 2.5} strokeLinecap="round" />
+          <g transform={`translate(${B[0]} ${B[1]})`} className={onPick ? 'trips-hit' : undefined} role={onPick ? 'button' : undefined} tabIndex={onPick ? 0 : undefined} aria-label={onPick ? 'Client : ' + (it.label || it.id) : undefined} onClick={pick(it.id)} onKeyDown={keyPick(it.id)}>
+            <path d="M0 2c-5.5-6.5-8.5-9.5-8.5-14a8.5 8.5 0 0117 0c0 4.5-3 7.5-8.5 14z" fill={on ? col : 'var(--ink)'} stroke={on ? 'var(--surface, #fff)' : 'none'} strokeWidth="1.5" />
+            <circle cy="-12" r="3" fill="var(--bg, #fff)" />
+          </g>
+          <g transform={`translate(${P[0]} ${P[1]})`} className={onPick ? 'trips-hit' : undefined} role={onPick ? 'button' : undefined} tabIndex={onPick ? 0 : undefined} aria-label={onPick ? 'Camionnette : ' + (it.label || it.id) : undefined} onClick={pick(it.id)} onKeyDown={keyPick(it.id)}>
+            {on && <circle r="15" fill={col} opacity=".2"><animate attributeName="r" values="11;18;11" dur="1.8s" repeatCount="indefinite" /></circle>}
+            {on && <circle r="12" fill="none" stroke="var(--ink)" strokeWidth="1.6" />}
+            <circle r={on ? 9 : 7} fill={col} stroke="#fff" strokeWidth="2" />
+            <path d={on ? 'M-5 1.5v-4.5h6l2.5 2.5v2h-8.5zM-3 3a1.2 1.2 0 100-.01M2 3a1.2 1.2 0 100-.01' : 'M-3.6 1v-3.2h4.3l1.8 1.8v1.4h-6.1z'} fill="#fff" stroke="#fff" strokeWidth=".8" strokeLinejoin="round" />
+            {t >= 1 && it.tone === 'fin' && <path d="M-3 0l2 2 4-4" fill="none" stroke="#fff" strokeWidth="1.6" strokeLinecap="round" />}
+          </g>
+        </g>;
+      })}
+      {sel && lab && <g transform={`translate(${Math.max(34, Math.min(366, sel.P[0]))} ${sel.P[1] > 40 ? sel.P[1] - 24 : sel.P[1] + 28})`} pointerEvents="none">
+        <rect className="track-pin-label" x={-(lab.length * 2.9 + 7)} y="-8" width={lab.length * 5.8 + 14} height="15" rx="7.5" />
+        <text y="3" textAnchor="middle" className="map-label" style={{ fontSize: 9, fontWeight: 700 }}>{lab}</text>
+      </g>}
+    </svg>
+    <ul className="trips-legend" aria-label="Légende de la carte">
+      <li><i className="trips-lg trips-lg-van" style={{ background: TONE_COLOR.route }} />En route</li>
+      <li><i className="trips-lg trips-lg-van" style={{ background: TONE_COLOR.ici }} />Chez le client</li>
+      <li><i className="trips-lg trips-lg-van" style={{ background: TONE_COLOR.attente }} />Attend la validation</li>
+      <li><i className="trips-lg trips-lg-van" style={{ background: TONE_COLOR.fin }} />Terminé</li>
+      <li><i className="trips-lg trips-lg-pin" />Client</li>
+      <li><i className="trips-lg trips-lg-sel" />Visite choisie</li>
+    </ul>
+  </div>;
+}
