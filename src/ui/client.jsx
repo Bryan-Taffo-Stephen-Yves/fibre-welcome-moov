@@ -342,8 +342,8 @@ function LiveTrack({ v, me }) {
   const rdv = a ? 'Rendez-vous le ' + longDay(a.date) + (a.time ? ' à ' + hourLabel(a.time) : ', ' + slotLabel(a.slot)) : '';
   // Le client ne reçoit pas le numéro du technicien : l'appel du technicien viendra plus tard, le service client reste joignable.
   const person = { name: m.techName, avatar: fullName(m.techName), role: m.company, tag: 'Carte ' + m.badge, call: { label: 'Appel bientôt', disabled: true, note: 'Pour toute question, appelez le service client depuis l’onglet Messages.' } };
-  return <section className="card cl-live" data-tour="client-track" aria-live="polite">
-    <TrackCard track={t} ws={me.ws} status={m.status} times={m.times || {}} receivedHint={rdv} person={person} title={title} sub={sub} toLabel="Chez vous" fromLabel="Agence" mapHeight={186} fallback={<div className="cl-van"><VanScene height={62} /></div>} />
+  return <section className="card cl-live" data-tour="client-track">
+    <TrackCard track={t} ws={me.ws} status={m.status} times={m.times || {}} receivedHint={rdv} person={person} title={title} sub={sub} toLabel="Chez vous" fromLabel="Agence" liveTitle mapHeight={186} fallback={<div className="cl-van"><VanScene height={62} /></div>} />
     <div className="cl-code">
       <span className="tiny">Votre code de réception</span>
       <b className="num">{m.receptionCode}</b>
@@ -400,17 +400,18 @@ function VisitJourney({ v }) {
   if (!m || !VJ_AT[m.status]) return null;
   const so = m.signoff, a = v.appt, t = m.times || {};
   const cur = VJ_AT[m.status];
-  const done = m.status === 'terminee' && signDone(so);
+  // Une visite terminée sur un ancien espace n'a pas de validation : rien à demander au client.
+  const done = m.status === 'terminee' && (!so || signDone(so));
   const name = firstName(m.techName);
   const when = a ? longDay(a.date) + (a.time ? ' à ' + hourLabel(a.time) : ', ' + slotLabel(a.slot)) : '';
   const now = [
-    name + ' (' + m.company + ') vous contactera' + (when ? ' le ' + when : '') + '.',
+    name + ' (' + m.company + ') viendra chez vous' + (when ? ' le ' + when : '') + '.',
     m.track ? 'Suivez-le sur la carte.' : name + ' est en route vers chez vous.',
     name + ' est arrivé. Pensez à lui ouvrir.',
     name + ' installe votre box. Restez joignable.',
-    done ? SIGN_SAYS[signMode(so)](name)[0] + '.' : so && so.state === 'probleme' ? 'Souci signalé : l’équipe Moov vous répond.' : 'À vous : vérifiez et validez.',
+    done ? (so ? SIGN_SAYS[signMode(so)](name)[0] : 'Visite terminée') + '.' : so && so.state === 'probleme' ? 'Souci signalé : l’équipe Moov vous répond.' : 'À vous : vérifiez et validez.',
   ];
-  const past = [null, t.depart && 'Parti à ' + hm(t.depart), t.arrive && 'Arrivé à ' + hm(t.arrive), t.start && 'Commencé à ' + hm(t.start), null];
+  const past = [null, t.depart && 'Parti à ' + hm(t.depart), t.arrive && 'Arrivé à ' + hm(t.arrive), t.start && 'Commencé à ' + hm(t.start), done && !so ? 'Visite terminée.' : null];
   return <section className="card cl-vj" data-tour="client-journey">
     <div className="spread"><span className="eyebrow">Votre visite</span><Tag tone={done ? 'ok' : 'info'}>{done ? 'Terminée' : 'Étape ' + cur + ' sur 5'}</Tag></div>
     <ol className="cl-vj-l" aria-label={'Parcours de la visite : étape ' + cur + ' sur 5'}>{VJ.map((s, i) => {
@@ -425,7 +426,8 @@ function VisitJourney({ v }) {
 }
 
 // Fin de visite : le client regarde la box puis valide, signale un souci, ou laisse partir le technicien.
-const SIGN_CHECKS = [['voyant', 'Le voyant de la box est allumé', true], ['internet', 'Internet fonctionne sur mon téléphone ou mon ordinateur', true], ['propre', 'L’espace est propre et rangé', false]];
+// « Internet fonctionne » n'est exigé qu'une fois le service activé : avant, la ligne n'est pas encore ouverte.
+const SIGN_CHECKS = [['voyant', 'Le voyant de la box est allumé', true], ['internet', 'Internet fonctionne sur mon téléphone ou mon ordinateur', 'actif'], ['propre', 'L’espace est propre et rangé', false]];
 const signDraft = new Map(); // cases cochées, gardées si le client change d'onglet
 function SignoffCard({ token, v, me, isRep }) {
   useNow(1000);
@@ -440,9 +442,10 @@ function SignoffCard({ token, v, me, isRep }) {
   const left = so.autoAt - liveClock(me.ws);
   const count = left > 0 ? 'Sans réponse de votre part, la visite sera validée automatiquement dans ' + frMin(Math.max(1, Math.ceil(left / 60e3))) + '.' : 'La validation automatique est en cours.';
   const toggle = id => { const n = { ...c, [id]: !c[id] }; signDraft.set(key, n); setC(n); setErr(null); };
+  const actif = o.state === 'SERVICE_ACTIF';
   const checks = { voyant: !!c.voyant, internet: !!c.internet, propre: !!c.propre };
   const validate = async () => {
-    if (!checks.voyant || !checks.internet) { setErr('Cochez que le voyant de la box est allumé et qu’Internet fonctionne, ou choisissez « Il y a un souci ».'); return; }
+    if (!checks.voyant || (actif && !checks.internet)) { setErr(actif ? 'Cochez que le voyant de la box est allumé et qu’Internet fonctionne, ou choisissez « Il y a un souci ».' : 'Cochez que le voyant de la box est allumé, ou choisissez « Il y a un souci ».'); return; }
     setErr(null);
     const r = await call(token, 'install.validate', { orderId: o.id, mode: 'verifie', checks });
     if (r.ok) signDraft.delete(key);
@@ -468,15 +471,15 @@ function SignoffCard({ token, v, me, isRep }) {
       <span>Quand c’est réglé, vous pouvez valider la visite ci-dessous.</span>
     </div> : <p className="small muted">Cela prend une minute. Regardez la box, puis cochez ce que vous voyez.</p>}
     <div className="cl-checks" role="group" aria-label="Vérifications de l’installation">
-      {SIGN_CHECKS.map(([id, label, need]) => <label key={id} className={'cl-check cl-check-big' + (c[id] ? ' on' : '')}>
+      {SIGN_CHECKS.map(([id, label, kind]) => { const need = kind === true || (kind === 'actif' && actif); return <label key={id} className={'cl-check cl-check-big' + (c[id] ? ' on' : '')}>
         <input type="checkbox" checked={!!c[id]} onChange={() => toggle(id)} />
         <span className="cl-box" aria-hidden="true">{Icon.check}</span>
-        <span className="grow cl-check-l">{label}{need && <span className="cl-need">Indispensable</span>}</span>
-      </label>)}
+        <span className="grow cl-check-l">{label}{need && <span className="cl-need">Indispensable</span>}{kind === 'actif' && !actif && <span className="tiny muted" style={{ display: 'block' }}>Internet arrivera après l’activation, ça peut prendre quelques minutes</span>}</span>
+      </label>; })}
     </div>
     <Explain open>
       <span className="cl-sign-help">Le voyant est la petite lumière sur le devant de la box. Il doit rester allumé, sans clignoter en rouge.</span>
-      <span className="cl-sign-help">Pour tester Internet, ouvrez n’importe quel site sur votre téléphone, connecté au wifi de la box.</span>
+      <span className="cl-sign-help">{actif ? 'Pour tester Internet, ouvrez n’importe quel site sur votre téléphone, connecté au wifi de la box.' : 'Internet arrivera après l’activation de la ligne : ne cochez cette case que s’il marche déjà.'}</span>
     </Explain>
     {err && <div className="alert alert-bad small" role="alert">{err}</div>}
     {!prob && <span className="small cl-sign-count" role="timer" aria-live="off">{count}</span>}

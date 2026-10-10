@@ -64,7 +64,7 @@ Le scénario SC-17 du Laboratoire vérifie chaque étape.
 | `src/ui/trips.jsx`, `src/ui/trackcard.jsx` | Suivi des trajets (administrateur, superviseur, planificateur) et carte de suivi partagée par le client et le technicien |
 | `src/ui/charts.jsx` | Graphiques sans bibliothèque : courbes, barres, anneau, carte d’Abidjan |
 | `src/ui/styles.css`, `src/ui/css/*.css` | Styles communs, puis un fichier par espace (client, terrain, opérations, admin, labo) |
-| `tests/backend.test.js` | 16 tests de recette (R-01, R-05 à R-15, R-19 à R-23, scénarios, droits sur les images) |
+| `tests/backend.test.js` | 25 tests de recette (R-01, R-05 à R-15, R-19 à R-23, scénarios, droits sur les images) |
 | `tests/sync.test.js` | 51 tests du partage entre appareils contre une imitation du serveur : écritures croisées, action faite sans réseau, réponse perdue (même après de nombreuses écritures), deux onglets, page rechargée ou tuée avant l’envoi, réseau qui ne répond plus, liaison lente, réponse bloquée en route, code tapé pendant la connexion, réinitialisations croisées, ménage en retard, suppression sans réseau, repartage, nettoyage du serveur, refus du serveur, sauvegardes, photos envoyées plus tard, page ouverte sans réseau, lien piégé, données piégées, navigateur ancien |
 | `.github/workflows/` | `pages.yml` met le lien public à jour ; `keepalive.yml` garde le serveur éveillé (lecture tous les deux jours) |
 
@@ -79,7 +79,7 @@ Style « tableau de bord de suivi » (police Plus Jakarta Sans, cartes arrondies
 ```bash
 npm install        # installe esbuild (outil de construction)
 npm run build      # reconstruit app.js et styles.css depuis src/
-npm test           # 73 tests : recette du serveur simulé et partage entre appareils
+npm test           # 76 tests : recette du serveur simulé et partage entre appareils
 ```
 
 `node build.mjs page.html` produit en plus une page autonome (React chargé depuis cdnjs) pour un aperçu en ligne.

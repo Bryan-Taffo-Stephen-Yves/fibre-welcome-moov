@@ -352,6 +352,7 @@ const ACT = {
   'order.close': 'Dossier clôturé', 'activation.retry': 'Activation relancée', 'duplicate.link': 'Doublon rapproché', 'duplicate.unlink': 'Doublon séparé',
   'demo.scenario': 'Scénario lancé', 'demo.clock': 'Horloge avancée', 'demo.webhook': 'Événement simulé', 'demo.integration': 'Panne simulée', 'demo.flag': 'Réglage du simulateur', 'demo.createOrder': 'Commande fictive', 'demo.restore': 'Restauration',
   'sauvegarde.creer': 'Sauvegarde créée', 'sauvegarde.restaurer': 'Sauvegarde restaurée', 'piece.valide': 'Pièce validée', 'piece.refuse': 'Pièce refusée', 'piece.refusee': 'Pièce refusée',
+  'tech.ask': 'Question d’aide du technicien', 'tech.escalate': 'Aide transmise au responsable', 'install.validate': 'Visite validée par le client', 'terrain.aide': 'Question d’aide du technicien', 'terrain.transmettre': 'Aide transmise au responsable',
 };
 const actLabel = a => ACT[a] || a;
 const isRefus = a => a.action === 'acces.refuse' || a.action === 'integration.rejet' || /^REFUS/.test(a.detail || '');

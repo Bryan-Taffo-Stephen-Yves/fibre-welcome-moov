@@ -180,6 +180,7 @@ export function OpsConsole({ token }) {
   const [preset, setPreset] = useState(null);
   // Arrivée depuis une notification : onglet de la file à montrer (n change pour repartir à neuf).
   const [nav, setNav] = useState({ n: 0 });
+  const [planFor, setPlanFor] = useState(null); // dossier à ouvrir directement sur « Transmettre au technicien »
   const nots = useQ(token, 'notifications');
   const picked = useRef(null);
   const root = useRef(null);
@@ -198,13 +199,14 @@ export function OpsConsole({ token }) {
   const q = qs.data;
   const count = q ? { queues: new Set([...QUEUE_KEYS, 'dossiers'].flatMap(k => (q[k] || []).map(r => r.id))).size, approvals: q.approvals.length } : {};
   const toTop = () => requestAnimationFrame(() => { const el = root.current; if (el && el.getBoundingClientRect().top < 0) window.scrollBy(0, el.getBoundingClientRect().top - 90); });
-  function open(id) { setOrderId(id); call(token, 'order.open', { orderId: id }, { silent: true }); toTop(); }
+  function open(id) { setPlanFor(null); setOrderId(id); call(token, 'order.open', { orderId: id }, { silent: true }); toTop(); }
   const go = k => { setSec(k); setOrderId(null); setPreset(null); setNav(x => ({ n: x.n + 1 })); };
   // Une notification de l'équipe mène là où l'on agit : planification, file des escalades ou dossier.
   const openNotif = (n, id) => {
     const title = (n && n.title) || '';
     const oid = id || (n && n.orderId);
-    if (/est de nouveau disponible$/.test(title)) { setSec(role === 'superviseur' ? 'planning' : 'queues'); setOrderId(null); setPreset(null); setNav(x => ({ n: x.n + 1, tab: 'dossiers' })); toTop(); }
+    if (/est de nouveau disponible$/.test(title) && oid) { open(oid); if (role === 'conseiller' || role === 'planificateur') setPlanFor(oid); }
+    else if (/est de nouveau disponible$/.test(title)) { setSec(role === 'superviseur' ? 'planning' : 'queues'); setOrderId(null); setPreset(null); setNav(x => ({ n: x.n + 1, tab: 'dossiers' })); toTop(); }
     else if (title === 'Un technicien demande de l’aide' && role === 'superviseur') { setSec('queues'); setOrderId(null); setPreset(null); setNav(x => ({ n: x.n + 1, side: 'tickets' })); toTop(); }
     else if (oid) open(oid);
   };
@@ -224,13 +226,13 @@ export function OpsConsole({ token }) {
       <nav className="pills op-nav" role="tablist" aria-label="Sections">
         {sections.map(([k, l, ic]) => <button key={k} type="button" role="tab" aria-selected={s === k} onClick={() => go(k)} data-tour={'ops-' + k}><span className="op-nav-ic" aria-hidden="true">{ic}</span>{l}{count[k] ? <span className="count">{count[k]}</span> : null}</button>)}
       </nav>
-      <span style={{ display: 'contents' }} onClickCapture={noteBell}><NotifBell token={token} onOpen={id => openNotif(picked.current, id)} /></span>
+      <span style={{ display: 'contents' }} onClickCapture={noteBell}><NotifBell token={token} onOpen={(id, n) => openNotif(n || picked.current, id)} /></span>
       <div className="op-scope" title="Vous ne voyez que les dossiers de ces communes">
         <span className="small muted">Périmètre</span>
         {zones.length === ZONES.length ? <span className="op-zone">Tout Abidjan</span> : zones.map(z => <span key={z} className="op-zone">{zoneName(z)}</span>)}
       </div>
     </div>
-    {orderId ? <OrderSheet key={orderId} token={token} orderId={orderId} role={role} onClose={() => setOrderId(null)} />
+    {orderId ? <OrderSheet key={orderId} token={token} orderId={orderId} role={role} showPlan={planFor === orderId} onClose={() => setOrderId(null)} />
       : s === 'queues' ? <Queues key={'q' + nav.n} token={token} role={role} open={open} initialTab={nav.tab} initialSide={nav.side} />
       : s === 'search' ? <Search key={preset ? preset.zone : 'all'} token={token} open={open} initial={preset} zones={zones} />
       : s === 'planning' ? <Planning token={token} role={role} open={open} />
@@ -432,7 +434,7 @@ function Search({ token, open, initial, zones }) {
 }
 
 // ---------- Fiche dossier ----------
-function OrderSheet({ token, orderId, role, onClose }) {
+function OrderSheet({ token, orderId, role, showPlan, onClose }) {
   const r = useQ(token, 'ops.order', { orderId });
   const staff = useQ(token, 'ops.staff');
   const [modal, setModal] = useState(null);
@@ -456,6 +458,8 @@ function OrderSheet({ token, orderId, role, onClose }) {
     const ref = role === 'planificateur' && x.appt && x.appt.status === 'reserve' ? planRef : role === 'conseiller' && ['a_verifier', 'incomplet'].includes(x.dossier.status) ? dosRef : null;
     if (ref) setTimeout(() => { const el = ref.current; const box = el && el.closest('.pane-body'); if (box) box.scrollTop += el.getBoundingClientRect().top - box.getBoundingClientRect().top - 8; }, 120);
   }, []);
+  // Arrivée depuis « est de nouveau disponible » : on amène le panneau « Transmettre au technicien » à l'écran.
+  useEffect(() => { if (showPlan && r.data && r.data.appt) setTimeout(() => { const el = planRef.current; if (el && el.scrollIntoView) el.scrollIntoView({ block: 'start', behavior: 'smooth' }); }, 200); }, [showPlan, !!r.data]);
   if (r.error) return <div className="stack"><div><Btn size="s" kind="ghost" onClick={onClose}>{Icon.left} Retour</Btn></div><div className="alert alert-bad">{r.error.message}</div></div>;
   const v = r.data; const o = v.order; const I = v.internal;
   const appt = v.appt;
@@ -812,6 +816,7 @@ function PlanPanel({ token, orderId, v, canAct, byC, adv }) {
   const liveOf = t => {
     const l = t.live; if (!l) return null;
     if (l.status === 'en_route') return { txt: 'En route vers ' + (l.ref || 'un client'), cls: 'is-road' };
+    if (l.status === 'attente_client') return { txt: (l.problem ? 'Souci à régler' : 'Attend la validation du client') + (l.ref ? ' (' + l.ref + ')' : ''), cls: 'is-busy', wait: true };
     if (l.status === 'sur_place' || l.status === 'en_cours') return { txt: 'Chez un client' + (l.ref ? ' (' + l.ref + ')' : ''), cls: 'is-busy' };
     const min = l.freeSince ? Math.max(0, Math.round((nowMs - l.freeSince) / 60e3)) : null;
     return { txt: min == null ? 'Libre' : 'Libre depuis ' + leftTxt(min * 60e3), cls: 'is-free', fresh: min != null && min < 30 };
@@ -828,7 +833,7 @@ function PlanPanel({ token, orderId, v, canAct, byC, adv }) {
     {f.teams.length === 0 ? <Empty>Aucune équipe ne couvre cette commune.</Empty> : <div className="op-tfs">{f.teams.map(t => {
       const sel = pick && pick.teamId === t.id;
       const lv = liveOf(t);
-      return <article key={t.id} className={'op-tf' + (t.canTake ? '' : ' is-off') + (sel ? ' is-sel' : '') + (lv && lv.fresh ? ' is-fresh' : '')}>
+      return <article key={t.id} className={'op-tf' + (t.canTake && !(lv && lv.wait) ? '' : ' is-off') + (sel ? ' is-sel' : '') + (lv && lv.fresh ? ' is-fresh' : '')}>
         <div className="op-item-h"><Avatar name={t.techName} size={46} dot={t.available ? 'ok' : 'bad'} />
           <div className="grow op-trunc"><b className="small">{t.techName}</b><div className="tiny muted">{teamLine(t)}</div></div>
           <span className="op-tf-q" title="Note qualité de l’équipe">{Icon.star}{nf1(t.quality)}</span></div>

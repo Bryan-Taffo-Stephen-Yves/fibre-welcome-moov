@@ -95,7 +95,7 @@ export function FieldApp({ token }) {
             <Avatar name={user.name} size={42} dot={online ? 'ok' : 'off'} />
             <span className="fd-hello-t" title={user.contractor ? user.contractor + ' pour Moov' : 'Moov Terrain'}><span>Bonjour,</span><b>{firstName(user.name)}</b></span>
           </div>
-          <NotifBell token={token} onOpen={oid => { const w = list.find(x => x.orderId === oid); if (!w) return; const mine = (nf.data || []).filter(n => n.orderId === oid).sort((a, b) => (a.read - b.read) || (b.at - a.at)); openMission(w.id, notifTarget(mine[0])); }} />
+          <NotifBell token={token} onOpen={(oid, note) => { const w = list.find(x => x.orderId === oid); if (!w) return; /* la notification touchée décide de la cible ; repli : la plus récente non lue du dossier */ const mine = (nf.data || []).filter(n => n.orderId === oid).sort((a, b) => (a.read - b.read) || (b.at - a.at)); openMission(w.id, notifTarget(note || mine[0])); }} />
           <button type="button" className={'fd-net' + (online ? '' : ' off')} onClick={() => setOnline(!online, token)} data-tour="field-network" aria-pressed={!online} title={online ? 'Couper le réseau de cet onglet (simulation)' : 'Rétablir le réseau'}>
             {online ? Icon.wifi : WIFI_OFF}<span>{online ? 'Connecté' : 'Hors ligne'}</span><i className="fd-knob" aria-hidden="true" />
           </button>

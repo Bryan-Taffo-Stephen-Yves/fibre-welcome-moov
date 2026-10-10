@@ -45,8 +45,9 @@ function Gauge({ kmh }) {
 // received : heure de la transmission si elle est connue ; receivedHint : phrase de repli (ex. le rendez-vous).
 // person : { name, avatar, role, tag, call: { label, onClick, disabled, note } } ; sans call, pas de bouton d'appel.
 // title, sub : phrases du haut (facultatives). notice : message mis en avant (ex. « Vous devriez être arrivé »).
+// liveTitle : le titre est annoncé par le lecteur d'écran quand il change (une fois par minute au plus).
 // fallback : ce qu'on montre à la place de la carte quand le trajet n'est pas connu (ex. la camionnette).
-export function TrackCard({ track, ws, status, times = {}, received, receivedHint, person, title, sub, notice, fromLabel = 'Agence', toLabel = 'Chez vous', mapHeight = 186, dark, fallback, children }) {
+export function TrackCard({ track, ws, status, times = {}, received, receivedHint, person, title, sub, notice, fromLabel = 'Agence', toLabel = 'Chez vous', mapHeight = 186, dark, fallback, liveTitle, children }) {
   useNow(1000);
   const now = liveClock(ws);
   const ti = track ? trackInfo(track, ws) : null;
@@ -65,7 +66,7 @@ export function TrackCard({ track, ws, status, times = {}, received, receivedHin
   const left = ti ? Math.max(1, ti.leftMin) : 0;
   const steps = [
     { k: 'recu', t: 'Mission reçue', at: received, sub: received ? '' : receivedHint, done: true },
-    { k: 'depart', t: 'Départ', at: times.depart, sub: hasDep ? 'Parti de ' + fromLabel : 'Pas encore parti', done: hasDep },
+    { k: 'depart', t: 'Départ', at: times.depart, sub: hasDep ? 'Départ : ' + fromLabel : 'Pas encore parti', done: hasDep },
     { k: 'route', t: 'En route', sub: arrived ? (travel ? 'Trajet de ' + travel + ' min' : 'Trajet terminé') : onRoad ? 'Encore ' + left + ' min' : p >= 1 && hasDep ? 'Presque arrivé' : '', done: arrived },
     { k: 'arrivee', t: 'Arrivée', at: arriveAt, sub: arrived ? 'Sur place' : '', done: arrived },
     { k: 'debut', t: 'Début de l’installation', at: times.start, done: started },
@@ -79,7 +80,7 @@ export function TrackCard({ track, ws, status, times = {}, received, receivedHin
     </div> : fallback}
 
     {(title || sub) && <div className="tc-head">
-      {title && <b className="tc-title">{title}</b>}
+      {title && <b className="tc-title" aria-live={liveTitle ? 'polite' : undefined}>{title}</b>}
       {sub && <span className="tc-sub">{sub}</span>}
     </div>}
 
