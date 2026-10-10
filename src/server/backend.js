@@ -7,6 +7,7 @@ import { AppError, SYS, byId, getOrder, audit, emit, notify, addMessage, openBlo
 import { STATE_INFO, BLOCKER_TYPES, ROLES, DOC_TYPES, REPORT_TYPES, APPT_STATES, PAYMENT_STATES, ZONES, CHECKLIST_TECH, stateRank, ORDER_STATES, OFFERS, SHOP_ZONES, DOSSIER_DOCS, TECH_DOCS, SLOT_HOURS, PREP_CHECKLIST, hourLabel } from './model.js';
 import { estimate, risk, assistantAnswer, summarize, evaluate, fmtDate, fmtDateTime } from './ai.js';
 import { SCENARIOS, runScenarioSetup } from './scenarios.js';
+import { techAnswer } from './techhelp.js';
 
 const READONLY = ['auditeur'];
 const STAFF_ALL = ['conseiller', 'planificateur', 'technicien', 'superviseur', 'admin', 'auditeur'];
@@ -651,7 +652,14 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
     cb.status = args.status; cb.note = args.note || ''; cb.doneAt = ws.clock; cb.ownerName = user.name;
     emit(ws, order, 'RAPPEL_' + args.status.toUpperCase(), { actor: user, publicText: args.status === 'fait' ? 'Un conseiller vous a rappelé.' : null });
   });
-  cmd('ticket.close', ['conseiller', 'planificateur', 'superviseur'], ({ ws, user, args }) => { const t = byId(ws.tickets, args.id); if (!t) throw new AppError('introuvable', 'Ticket introuvable.'); scopedOrder(ws, user, t.orderId); if (t.ownerRole && t.ownerRole !== user.role && user.role !== 'superviseur') throw new AppError('interdit', 'Ce ticket est suivi par le ' + (ROLES[t.ownerRole] || {}).label.toLowerCase() + '.'); t.status = 'traite'; t.closedBy = user.name; t.note = args.note || ''; });
+  cmd('ticket.close', ['conseiller', 'planificateur', 'superviseur'], ({ ws, user, args }) => { const t = byId(ws.tickets, args.id); if (!t) throw new AppError('introuvable', 'Ticket introuvable.'); scopedOrder(ws, user, t.orderId); if (t.ownerRole && t.ownerRole !== user.role && user.role !== 'superviseur') throw new AppError('interdit', 'Ce ticket est suivi par le ' + (ROLES[t.ownerRole] || {}).label.toLowerCase() + '.'); if (t.type === 'escalade_terrain' && !String(args.note || '').trim()) throw new AppError('motif', 'Écrivez une réponse pour le technicien.');
+    t.status = 'traite'; t.closedBy = user.name; t.note = args.note || '';
+    if (t.type === 'escalade_terrain') {
+      const wo = byId(ws.workOrders, t.woId); const h = wo && (wo.help || []).find(x => x.ticketId === t.id);
+      if (h) { h.status = 'repondu'; h.reply = { by: user.name, text: String(args.note).trim().slice(0, 500), at: ws.clock }; }
+      if (wo) notify(ws, wo.techUserId, { title: 'Réponse de ' + user.name.split(' ')[0], body: String(args.note).trim().slice(0, 160), orderId: t.orderId, kind: 'info' });
+    }
+  });
 
   cmd('appt.confirm', ['planificateur'], ({ ws, user, order, args }) => {
     if (order.dossier) { const notOk = unvalidatedDocs(ws, order); if (notOk.length) throw new AppError('pieces', 'Pièces pas encore validées par la conseillère : ' + notOk.map(t => DOC_TYPES[t].label.toLowerCase()).join(', ') + '.'); }
@@ -717,6 +725,76 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
     }
     return D.woAction(ws, wo, args.action, args.args || {}, user);
   }, { idem: true });
+
+  // ----- Boîte à outils du technicien sur place : poser une question, montrer un problème en photo, transmettre au responsable -----
+  const myOpenWo = (ws, user, woId) => {
+    const wo = byId(ws.workOrders, woId);
+    if (!wo || wo.techUserId !== user.id) throw new AppError('introuvable', 'Mission introuvable ou non affectée.');
+    if (!['sur_place', 'en_cours'].includes(wo.status)) throw new AppError('etat', 'L’aide est disponible une fois arrivé chez le client.');
+    return wo;
+  };
+  const helpPhoto = (ws, p) => {
+    if (!p || typeof p !== 'object') return null;
+    return { id: 'PH' + (++ws.seq), name: String(p.name || 'photo.jpg').slice(0, 120), thumb: D.smallThumb(p.thumb), img: D.imgRef(p.img), check: D.photoCheck(p.quality) };
+  };
+  cmd('tech.ask', ['technicien'], ({ ws, user, args }) => {
+    const wo = myOpenWo(ws, user, args.woId);
+    const q = String(args.question || '').trim().slice(0, 500);
+    const photo = helpPhoto(ws, args.photo);
+    if (!q && !photo) throw new AppError('vide', 'Écrivez votre question ou ajoutez une photo.');
+    if ((wo.help || []).length >= 40) throw new AppError('limite', 'Trop de demandes sur cette mission : transmettez au responsable.');
+    const ans = techAnswer(q);
+    const a = { title: ans.title, steps: ans.steps, source: ans.source, escalate: ans.escalate || !!photo && !ans.topic, topic: ans.topic };
+    if (photo) a.note = 'Je ne lis pas les images (aide simulée). ' + (photo.check && !photo.check.ok ? 'La photo est ' + photo.check.issues.join(' et ') + ' : reprenez-la si le responsable doit la voir.' : 'Transmettez la photo au responsable pour qu’il la regarde.');
+    const h = { id: 'HP' + (++ws.seq), kind: 'ask', at: ws.clock, q, a, photo, escalated: false };
+    (wo.help ||= []).push(h);
+    audit(ws, user, 'terrain.aide', byId(ws.orders, wo.orderId).ref, (q || 'photo').slice(0, 120));
+    return h;
+  }, { idem: true, idemFull: true });
+  cmd('tech.escalate', ['technicien'], ({ ws, user, args }) => {
+    const wo = myOpenWo(ws, user, args.woId);
+    const order = byId(ws.orders, wo.orderId);
+    let h = args.helpId ? (wo.help || []).find(x => x.id === args.helpId) : null;
+    if (args.helpId && !h) throw new AppError('introuvable', 'Demande introuvable.');
+    if (h && h.escalated) throw new AppError('doublon', 'Cette demande a déjà été transmise à votre responsable.');
+    const text = String(args.text || (h && h.q) || '').trim().slice(0, 500);
+    const photo = h ? h.photo : helpPhoto(ws, args.photo);
+    if (!text && !photo) throw new AppError('vide', 'Décrivez le problème ou ajoutez une photo pour votre responsable.');
+    if ((wo.help || []).filter(x => x.kind === 'escalade' && x.status === 'ouvert').length >= 3) throw new AppError('limite', 'Trois demandes attendent déjà une réponse de votre responsable.');
+    if (!h) { h = { id: 'HP' + (++ws.seq), kind: 'ask', at: ws.clock, q: text, a: null, photo, escalated: false }; (wo.help ||= []).push(h); }
+    const t = { id: 'TK' + (++ws.seq), orderId: order.id, woId: wo.id, type: 'escalade_terrain', text: text || 'Photo envoyée sans texte', status: 'ouvert', ownerRole: 'superviseur', at: ws.clock, by: user.name };
+    ws.tickets.push(t);
+    h.escalated = true; h.kind = 'escalade'; h.status = 'ouvert'; h.ticketId = t.id; h.escalatedAt = ws.clock;
+    emit(ws, order, 'AIDE_TERRAIN', { actor: user, payload: { help: h.id } });
+    D.notifyRole(ws, 'superviseur', order, { title: 'Un technicien demande de l’aide', body: user.name.split(' ')[0] + ' chez le client ' + order.ref + ' (' + order.address.commune + ') : ' + (t.text.length > 110 ? t.text.slice(0, 110) + '…' : t.text) + (photo ? ' (photo jointe)' : ''), kind: 'alerte' });
+    audit(ws, user, 'terrain.transmettre', order.ref, t.text.slice(0, 120));
+    return h;
+  }, { idem: true, idemFull: true });
+
+  // Le client a regardé la box (ou non) et valide la visite. Sans réponse, la validation se fait toute seule (voir les tâches planifiées).
+  cmd('install.validate', ['client'], ({ ws, user, order, args }) => {
+    const wo = ws.workOrders.filter(w => w.orderId === order.id && w.status === 'terminee').at(-1);
+    if (!wo || !wo.signoff) throw new AppError('etat', 'Il n’y a pas de visite à valider pour le moment.');
+    if (['validee', 'auto'].includes(wo.signoff.state)) throw new AppError('doublon', 'La visite est déjà validée. Merci !');
+    const c = args.checks || {};
+    const checks = { voyant: !!c.voyant, internet: !!c.internet, propre: !!c.propre };
+    if (args.mode === 'probleme') {
+      const text = String(args.text || '').trim().slice(0, 500);
+      if (text.length < 5) throw new AppError('motif', 'Décrivez le souci en une phrase pour que l’équipe puisse vous aider.');
+      if (wo.signoff.state === 'probleme') throw new AppError('doublon', 'Votre signalement est déjà transmis à l’équipe Moov.');
+      wo.signoff = { ...wo.signoff, state: 'probleme', problemAt: ws.clock, problem: text, checks };
+      ws.tickets.push({ id: 'TK' + (++ws.seq), orderId: order.id, woId: wo.id, type: 'visite', text: 'Souci signalé à la fin de la visite : ' + text, status: 'ouvert', ownerRole: 'superviseur', at: ws.clock, by: user.name });
+      emit(ws, order, 'INSTALLATION_CONTESTEE', { actor: user, publicText: 'Vous avez signalé un souci après la visite. L’équipe Moov vous répond.' });
+      D.notifyRole(ws, 'superviseur', order, { title: 'Souci signalé après une visite', body: order.ref + ' : ' + text, kind: 'alerte' });
+      D.notifyRole(ws, 'conseiller', order, { title: 'Le client signale un souci', body: order.ref + ' : ' + text, kind: 'alerte' });
+      notify(ws, wo.techUserId, { title: 'Le client signale un souci', body: order.ref + ' : ' + text, orderId: order.id, kind: 'alerte' });
+      return wo.signoff;
+    }
+    if (args.mode === 'verifie' && !(checks.voyant && checks.internet)) throw new AppError('verif', 'Cochez que le voyant de la box est allumé et qu’Internet fonctionne, ou choisissez « Il y a un souci ».');
+    if (!['verifie', 'auto'].includes(args.mode)) throw new AppError('mode', 'Choix inconnu.');
+    D.finishSignoff(ws, order, wo, args.mode, user, args.mode === 'verifie' ? checks : null);
+    return wo.signoff;
+  }, { order: true });
 
   cmd('payment.manualRequest', ['conseiller'], ({ ws, user, order, args }) => {
     if (order.payment.status !== 'en_attente') throw new AppError('etat', 'Paiement déjà rapproché.');
@@ -820,6 +898,7 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
     else if (args.key === 'holdMinutes') ws.config.holdMinutes = num(1, 60, 'Durée de garde du créneau (minutes)');
     else if (args.key === 'contractDays') ws.config.contractDays = num(1, 120, 'Délai de référence (jours)');
     else if (args.key === 'dossierDeadlineH') ws.config.dossierDeadlineH = num(1, 72, 'Délai pour envoyer le dossier (heures)');
+    else if (args.key === 'autoValidateMin') ws.config.autoValidateMin = num(1, 240, 'Délai avant validation automatique (minutes)');
     else if (args.key === 'travelMin') ws.config.travelMin = num(1, 30, 'Durée du trajet simulé (minutes)');
     else if (args.key === 'policyEquipment') { if (!['bloquer', 'avertir', 'ignorer'].includes(String(args.value))) throw new AppError('valeur', 'Politique inconnue.'); ws.config.policyEquipment = String(args.value); }
     else if (allowed.includes(args.key)) ws.config[args.key] = args.key === 'autoConfirm' ? !!args.value : Number(args.value);
@@ -982,6 +1061,11 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
           if (j.step === 'there' && !wo.track.there) { wo.track.there = true; notify(ws, o.customerId, { title: f + ' est tout près de chez vous', body: 'Gardez votre téléphone à portée de main : il vous cherche peut-être.', orderId: o.id, kind: 'rdv' }); notify(ws, wo.techUserId, { title: 'Arrivé chez le client ?', body: o.ref + ' : touchez « Arrivé » une fois devant le logement.', orderId: o.id, kind: 'tache' }); }
         }
         j.done = true;
+      } else if (j.kind === 'autovalid') {
+        // Le client n'a pas répondu : la visite est validée toute seule, et l'équipe Moov apprend que le technicien est libre.
+        const wo = byId(ws.workOrders, j.ref);
+        if (wo && wo.signoff && wo.signoff.state === 'attente') D.finishSignoff(ws, byId(ws.orders, wo.orderId), wo, 'delai', SYS);
+        j.done = true;
       } else if (j.kind === 'call') {
         // Personne n'a décroché : l'appel devient une demande de rappel, suivie comme les autres.
         const c = (ws.calls || []).find(x => x.id === j.ref);
@@ -1105,7 +1189,7 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
       appointments: appts.map(a => ({ id: a.id, date: a.date, slot: a.slot, status: a.status, reason: a.reason, replaces: a.replaces, time: a.time || null })),
       appt: appt && { id: appt.id, date: appt.date, slot: appt.slot, status: appt.status, time: appt.time || null },
       hold: ws.holds.find(h => h.orderId === o.id && h.status === 'actif' && h.expiresReal > ws.lastReal) || null,
-      mission: wo && wo.status !== 'annulee' ? { status: wo.status, techName: tech ? tech.name.split(' ')[0] + ' ' + tech.name.split(' ').slice(1).map(x => x[0] + '.').join(' ') : '—', company: team && team.contractor ? team.contractor + ' pour Moov' : 'Moov Africa', badge: 'MOOV-' + (tech ? tech.id.replace('U', '') : '') + '7' , times: wo.times, receptionCode: wo.receptionCode, reception: wo.reception, track: wo.track || null, woId: wo.id, report: wo.status === 'terminee' ? { checklist: CHECKLIST_TECH.map(c => ({ label: c.label, value: wo.checklist[c.id], unit: c.unit })), serial: wo.serial, photos: wo.photos.map(p => ({ id: p.id, name: p.name, thumb: p.thumb, img: p.img, at: p.at })), comment: wo.comment } : null, failure: wo.failure } : null,
+      mission: wo && wo.status !== 'annulee' ? { status: wo.status, techName: tech ? tech.name.split(' ')[0] + ' ' + tech.name.split(' ').slice(1).map(x => x[0] + '.').join(' ') : '—', company: team && team.contractor ? team.contractor + ' pour Moov' : 'Moov Africa', badge: 'MOOV-' + (tech ? tech.id.replace('U', '') : '') + '7' , times: wo.times, receptionCode: wo.receptionCode, reception: wo.reception, track: wo.track || null, woId: wo.id, report: wo.status === 'terminee' ? { checklist: CHECKLIST_TECH.map(c => ({ label: c.label, value: wo.checklist[c.id], unit: c.unit })), serial: wo.serial, photos: wo.photos.map(p => ({ id: p.id, name: p.name, thumb: p.thumb, img: p.img, at: p.at })), comment: wo.comment } : null, failure: wo.failure, signoff: wo.signoff || null } : null,
       activation: ws.activations.filter(a => a.orderId === o.id).map(a => ({ ref: a.ref, status: a.status, at: a.requestedAt, confirmedAt: a.confirmedAt })),
       documents: ws.documents.filter(d => d.orderId === o.id).map(d => ({ id: d.id, type: d.type, name: d.name, mime: d.mime, status: d.status, reason: d.reason, at: d.at, thumb: d.thumb, img: d.img, scanNote: d.scanNote, check: d.check })),
       messages: ws.messages.filter(m => m.orderId === o.id && m.visibility === 'public'),
@@ -1121,7 +1205,7 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
       // Projection : jamais la note interne de la conseillère ni les identifiants des personnes.
       calls: (ws.calls || []).filter(c => c.orderId === o.id).slice(-5).map(c => ({ id: c.id, status: c.status, fromName: c.fromName, toName: c.toName, reason: c.reason, startedAt: c.startedAt, answeredAt: c.answeredAt, endedAt: c.endedAt, mine: c.fromId === user.id })),
       techRating: (ws.techRatings || []).filter(r => r.orderId === o.id).at(-1) || null,
-      lastVisit: (w => w && { woId: w.id, techName: (byId(ws.users, w.techUserId) || {}).name || '—', end: w.times.end })(ws.workOrders.filter(w => w.orderId === o.id && w.status === 'terminee').at(-1)),
+      lastVisit: (w => w && { woId: w.id, techName: (byId(ws.users, w.techUserId) || {}).name || '—', end: w.times.end, signoff: w.signoff || null })(ws.workOrders.filter(w => w.orderId === o.id && w.status === 'terminee').at(-1)),
     };
   }
 
@@ -1129,7 +1213,7 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
   const queries = {
     me: { fn: ({ ws, user, s }) => ({
       user: { id: user.id, name: user.name, role: user.role, phone: user.phone, prefs: user.prefs, zones: user.zones, contractor: user.contractor },
-      ws: { id: ws.id, name: ws.name, env: ws.env, generation: ws.generation, expiresAt: ws.expiresAt, clock: ws.clock, seed: ws.seed, degraded: ws.sim.degraded, integrations: ws.integrations, holdMinutes: ws.config.holdMinutes, lastReal: ws.lastReal, travelMin: ws.config.travelMin || 4, dossierDeadlineH: ws.config.dossierDeadlineH || 24 },
+      ws: { id: ws.id, name: ws.name, env: ws.env, generation: ws.generation, expiresAt: ws.expiresAt, clock: ws.clock, seed: ws.seed, degraded: ws.sim.degraded, integrations: ws.integrations, holdMinutes: ws.config.holdMinutes, lastReal: ws.lastReal, travelMin: ws.config.travelMin || 4, autoValidateMin: ws.config.autoValidateMin || 60, dossierDeadlineH: ws.config.dossierDeadlineH || 24 },
       owner: !!s.owner,
       unread: ws.notifications.filter(n => n.userId === user.id && !n.read).length,
       users: s.owner ? ws.users.map(u => ({ id: u.id, name: u.name, role: u.role, active: u.active })) : null,
@@ -1192,6 +1276,8 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
       if (['admin', 'auditeur'].includes(user.role)) return false;
       const d = ws.documents.find(x => x.img === img);
       if (d) { const o = byId(ws.orders, d.orderId); if (!o || user.role === 'representant') return false; return user.role === 'technicien' ? !!activeWo(ws, o.id, user.id) && TECH_DOCS.includes(d.type) : canSee(ws, user, o); }
+      const hw = ws.workOrders.find(x => (x.help || []).some(h => h.photo && h.photo.img === img));
+      if (hw) { const o = byId(ws.orders, hw.orderId); if (!o) return false; return user.role === 'technicien' ? hw.techUserId === user.id : ['superviseur', 'planificateur', 'conseiller'].includes(user.role) && canSee(ws, user, o); }
       const w = ws.workOrders.find(x => (x.photos || []).some(p => p.img === img));
       if (w) { const o = byId(ws.orders, w.orderId); if (!o) return false; return user.role === 'technicien' ? w.techUserId === user.id : user.role === 'representant' ? false : user.role === 'client' ? w.status === 'terminee' && canSee(ws, user, o) : canSee(ws, user, o); }
       return false;
@@ -1212,7 +1298,10 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
         const busy = ws.appointments.filter(a => a.id !== appt.id && a.teamId === t.id && a.date === appt.date && a.slot === appt.slot && ['confirme', 'en_cours', 'realise'].includes(a.status)).map(a => ({ time: a.time || null, ref: (byId(ws.orders, a.orderId) || {}).ref }));
         const tech = byId(ws.users, t.techUserId);
         const canTake = covers && t.available && (own || left > 0);
-        return { id: t.id, covers, name: t.name, techId: t.techUserId, techName: tech ? tech.name : '—', contractor: t.contractor, quality: t.quality, available: t.available, own, left, busy, canTake,
+        const cur = ws.workOrders.find(w => w.techUserId === t.techUserId && ['en_route', 'sur_place', 'en_cours'].includes(w.status));
+        const lastDone = ws.workOrders.filter(w => w.techUserId === t.techUserId && w.freeAt).sort((a, b) => b.freeAt - a.freeAt)[0];
+        const live = cur ? { status: cur.status, ref: (byId(ws.orders, cur.orderId) || {}).ref } : { status: 'libre', freeSince: lastDone ? lastDone.freeAt : null };
+        return { live, id: t.id, covers, name: t.name, techId: t.techUserId, techName: tech ? tech.name : '—', contractor: t.contractor, quality: t.quality, available: t.available, own, left, busy, canTake,
           hours: hours.map(h => ({ h, free: canTake && !busy.some(b => b.time === h) })) };
       });
       teams.sort((a, b) => (b.canTake - a.canTake) || (b.covers - a.covers));
@@ -1236,6 +1325,31 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
         // Pièces utiles à la visite, visibles seulement tant que la mission est ouverte (besoin d'en connaître).
         documents: ['terminee', 'annulee', 'echec'].includes(w.status) ? [] : ws.documents.filter(d => d.orderId === o.id && TECH_DOCS.includes(d.type) && d.status !== 'remplace').map(d => ({ id: d.id, type: d.type, name: d.name, status: d.status, at: d.at, thumb: d.thumb, img: d.img })) };
     }).sort((x, y) => ((x.appt && x.appt.date) || 0) - ((y.appt && y.appt.date) || 0)) },
+    // Suivi des trajets et des visites pour l'administrateur général et le superviseur : qui est où, depuis quand, pendant combien de temps.
+    'admin.trips': { roles: ['admin', 'superviseur', 'planificateur', 'auditeur'], fn: ({ ws, user }) => {
+      const mins = ms => (ms == null ? null : Math.round(ms / 6e4 * 10) / 10);
+      const mine = o => user.role === 'planificateur' ? (user.zones || []).includes(o.zone) : true;
+      const rows = ws.workOrders.filter(w => w.status !== 'annulee' && (w.times.depart || ['affectee'].includes(w.status))).map(w => {
+        const o = byId(ws.orders, w.orderId); if (!o || !mine(o)) return null;
+        const t = w.times, tech = byId(ws.users, w.techUserId), team = byId(ws.teams, w.teamId);
+        const open = (w.help || []).filter(h => h.kind === 'escalade' && h.status === 'ouvert').length;
+        const stage = w.signoff && ['validee', 'auto'].includes(w.signoff.state) ? 6 : w.status === 'terminee' ? 5 : w.status === 'en_cours' ? 4 : w.status === 'sur_place' ? 3 : w.status === 'en_route' ? 2 : w.status === 'echec' ? 4 : 1;
+        return { woId: w.id, orderId: o.id, ref: o.ref, client: o.contactName, commune: o.address.commune, zone: o.zone, techId: w.techUserId, techName: tech ? tech.name : '—', teamName: team ? team.name : null, contractor: team ? team.contractor : null,
+          status: w.status, stage, track: w.track || null, times: { depart: t.depart || null, arrive: t.arrive || null, start: t.start || null, end: t.end || null },
+          travelMin: mins(t.depart && (t.arrive || t.start) ? (t.arrive || t.start) - t.depart : null), onSiteMin: mins((t.arrive || t.start) && t.end ? t.end - (t.arrive || t.start) : null),
+          signoff: w.signoff ? { state: w.signoff.state, mode: w.signoff.mode || null, autoAt: w.signoff.autoAt, at: w.signoff.at || null } : null, freeAt: w.freeAt || null,
+          helpCount: (w.help || []).length, helpOpen: open, failure: w.failure || null };
+      }).filter(Boolean).sort((a, b) => ((b.times.depart || b.times.start || 0) - (a.times.depart || a.times.start || 0)));
+      const done = rows.filter(r => r.travelMin != null), onsite = rows.filter(r => r.onSiteMin != null);
+      const avg = l => (l.length ? Math.round(l.reduce((s, x) => s + x, 0) / l.length * 10) / 10 : null);
+      const techs = ws.teams.filter(tm => user.role !== 'planificateur' || tm.zones.some(z => (user.zones || []).includes(z))).map(tm => {
+        const u = byId(ws.users, tm.techUserId); const cur = rows.find(r => r.techId === tm.techUserId && ['en_route', 'sur_place', 'en_cours'].includes(r.status));
+        const lastFree = rows.filter(r => r.techId === tm.techUserId && r.freeAt).sort((a, b) => b.freeAt - a.freeAt)[0];
+        const waiting = rows.find(r => r.techId === tm.techUserId && r.status === 'terminee' && r.signoff && r.signoff.state === 'attente');
+        return { id: tm.techUserId, name: u ? u.name : '—', teamName: tm.name, contractor: tm.contractor, available: tm.available, status: cur ? cur.status : waiting ? 'attente_client' : 'libre', ref: (cur || waiting || {}).ref || null, freeSince: !cur && !waiting && lastFree ? lastFree.freeAt : null, visits: rows.filter(r => r.techId === tm.techUserId && r.stage >= 5).length };
+      });
+      return { now: ws.clock, kpis: { enRoute: rows.filter(r => r.status === 'en_route').length, surPlace: rows.filter(r => ['sur_place', 'en_cours'].includes(r.status)).length, attenteClient: rows.filter(r => r.status === 'terminee' && r.signoff && r.signoff.state === 'attente').length, validees: rows.filter(r => r.stage === 6).length, aideEnAttente: rows.reduce((n, r) => n + r.helpOpen, 0), travelAvgMin: avg(done.map(r => r.travelMin)), onSiteAvgMin: avg(onsite.map(r => r.onSiteMin)), autoValidateMin: ws.config.autoValidateMin || 60 }, trips: rows.slice(0, 60), techs };
+    } },
     dashboard: { roles: ['superviseur', 'admin', 'auditeur'], fn: ({ ws }) => dashboard(ws) },
     'admin.users': { roles: ['admin', 'auditeur'], ownerOk: true, fn: ({ ws }) => ({ users: ws.users, invites: ws.invites.map(i => ({ ...i, user: (byId(ws.users, i.userId) || {}).name })), privacy: ws.privacy }) },
     'admin.config': { roles: ['admin', 'superviseur', 'auditeur'], fn: ({ ws }) => ({ config: { ...ws.config, webhookSecret: '•••• (stocké dans un coffre en production)' }, zones: ZONES, blockerTypes: BLOCKER_TYPES, docs: ws.docs, ports: ws.ports }) },

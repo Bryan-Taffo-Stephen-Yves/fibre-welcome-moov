@@ -244,6 +244,7 @@ export function confirmAppointment(ws, order, appt, actor, { teamId, time } = {}
   const techFirst = String(userName(ws, team.techUserId)).split(' ')[0];
   const body = appt.time ? (ws.config.templates.rdv_heure || 'Moov Fibre : {tech} viendra le {date} à {heure}.').replace('{tech}', techFirst).replace('{date}', fmtDate(appt.date)).replace('{heure}', hourLabel(appt.time)).replace('{slot}', slotLabel(appt.slot))
     : ws.config.templates.rdv_confirme.replace('{date}', fmtDate(appt.date)).replace('{slot}', slotLabel(appt.slot));
+  // Première notification : un technicien est désigné. La deuxième arrive quand il se met en route.
   notify(ws, order.customerId, { title: appt.time ? techFirst + ' viendra le ' + fmtDate(appt.date) + ' à ' + hourLabel(appt.time) : 'Rendez-vous confirmé', body, orderId: order.id, kind: 'rdv' });
   notify(ws, team.techUserId, { title: 'Nouvelle mission', body: order.ref + ' — ' + order.address.commune + ', ' + fmtDate(appt.date) + ' ' + (appt.time ? 'à ' + hourLabel(appt.time) : slotLabel(appt.slot)), orderId: order.id, kind: 'tache' });
   return appt;
@@ -346,6 +347,10 @@ export function woAction(ws, wo, action, args, actor) {
       if (appt) appt.status = 'realise';
       transition(ws, order, 'INSTALLATION_TERMINEE', { actor, source: 'Application terrain' });
       requestActivation(ws, order, actor);
+      // Le client vérifie la box puis valide, ou laisse partir le technicien : sans réponse, la validation se fait toute seule.
+      wo.signoff = { state: 'attente', since: now, autoAt: now + Math.max(1, Number(ws.config.autoValidateMin) || 60) * 60e3 };
+      ws.jobs.push({ id: nid(ws, 'J'), kind: 'autovalid', ref: wo.id, due: wo.signoff.autoAt, generation: ws.generation, attempts: 0 });
+      notify(ws, order.customerId, { title: 'Installation terminée : vérifiez et validez', body: userName(ws, wo.techUserId) + ' a fini. Regardez les voyants de la box, puis validez, ou laissez-le partir.', orderId: order.id, kind: 'action' });
       break;
     }
     case 'fail': {
@@ -486,6 +491,19 @@ export function markReady(ws, order, actor, { quiet = false } = {}) {
 // Prévient toutes les personnes actives d'un rôle qui suivent la zone du dossier.
 export function notifyRole(ws, role, order, msg) {
   for (const u of ws.users.filter(u => u.role === role && u.active !== false && (!order || !u.zones || u.zones.includes(order.zone)))) notify(ws, u.id, { orderId: order ? order.id : null, ...msg });
+}
+
+// Fin de visite : le client a validé (après vérification), ou laissé partir le technicien, ou n'a pas répondu à temps.
+// L'équipe Moov est prévenue que le technicien est de nouveau disponible pour une autre mission.
+export function finishSignoff(ws, order, wo, mode, actor, checks) {
+  const SAYS = { verifie: ['Vous avez vérifié l’installation et validé la visite.', 'le client a vérifié et validé l’installation.', 'validée par le client'], auto: ['Vous avez laissé le technicien partir : la visite est validée.', 'le client vous a laissé partir sans vérifier, validation automatique.', 'validée (le client l’a laissé partir)'], delai: ['Sans réponse de votre part, la visite a été validée automatiquement.', 'le client n’a pas répondu à temps, validation automatique.', 'validée automatiquement (client sans réponse)'] };
+  const say = SAYS[mode] || SAYS.auto;
+  wo.signoff = { ...(wo.signoff || {}), state: mode === 'verifie' ? 'validee' : 'auto', mode, at: ws.clock, checks: checks || null };
+  wo.freeAt = ws.clock;
+  const first = userName(ws, wo.techUserId).split(' ')[0];
+  emit(ws, order, 'INSTALLATION_VALIDEE', { actor, payload: { mode }, publicText: say[0] });
+  notify(ws, wo.techUserId, { title: 'Visite validée', body: order.ref + ' : ' + say[1] + ' Vous êtes de nouveau disponible.', orderId: order.id, kind: 'succes' });
+  for (const role of ['conseiller', 'planificateur', 'superviseur']) notifyRole(ws, role, order, { title: first + ' est de nouveau disponible', body: order.ref + ' (' + order.contactName + ') : visite ' + say[2] + '. ' + first + ' peut recevoir une nouvelle mission.', kind: 'info' });
 }
 
 // Ce qui manque encore au dossier, en mots simples. Les pièces refusées ou jamais envoyées comptent.
