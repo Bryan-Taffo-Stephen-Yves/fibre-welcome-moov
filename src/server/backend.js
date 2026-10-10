@@ -652,12 +652,18 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
     cb.status = args.status; cb.note = args.note || ''; cb.doneAt = ws.clock; cb.ownerName = user.name;
     emit(ws, order, 'RAPPEL_' + args.status.toUpperCase(), { actor: user, publicText: args.status === 'fait' ? 'Un conseiller vous a rappelé.' : null });
   });
-  cmd('ticket.close', ['conseiller', 'planificateur', 'superviseur'], ({ ws, user, args }) => { const t = byId(ws.tickets, args.id); if (!t) throw new AppError('introuvable', 'Ticket introuvable.'); scopedOrder(ws, user, t.orderId); if (t.ownerRole && t.ownerRole !== user.role && user.role !== 'superviseur') throw new AppError('interdit', 'Ce ticket est suivi par le ' + (ROLES[t.ownerRole] || {}).label.toLowerCase() + '.'); if (t.type === 'escalade_terrain' && !String(args.note || '').trim()) throw new AppError('motif', 'Écrivez une réponse pour le technicien.');
+  cmd('ticket.close', ['conseiller', 'planificateur', 'superviseur'], ({ ws, user, args }) => { const t = byId(ws.tickets, args.id); if (!t) throw new AppError('introuvable', 'Ticket introuvable.'); scopedOrder(ws, user, t.orderId); if (t.ownerRole && t.ownerRole !== user.role && user.role !== 'superviseur') throw new AppError('interdit', 'Ce ticket est suivi par le ' + (ROLES[t.ownerRole] || {}).label.toLowerCase() + '.'); if (t.status !== 'ouvert') throw new AppError('doublon', 'Ce ticket est déjà traité.');
+    if (t.type === 'escalade_terrain' && !String(args.note || '').trim()) throw new AppError('motif', 'Écrivez une réponse pour le technicien.');
     t.status = 'traite'; t.closedBy = user.name; t.note = args.note || '';
     if (t.type === 'escalade_terrain') {
       const wo = byId(ws.workOrders, t.woId); const h = wo && (wo.help || []).find(x => x.ticketId === t.id);
       if (h) { h.status = 'repondu'; h.reply = { by: user.name, text: String(args.note).trim().slice(0, 500), at: ws.clock }; }
       if (wo) notify(ws, wo.techUserId, { title: 'Réponse de ' + user.name.split(' ')[0], body: String(args.note).trim().slice(0, 160), orderId: t.orderId, kind: 'info' });
+    }
+    // Un souci signalé après la visite est réglé : la visite est validée et le technicien est libéré.
+    if (t.type === 'visite' && t.woId) {
+      const wo = byId(ws.workOrders, t.woId);
+      if (wo && wo.signoff && wo.signoff.state === 'probleme') D.finishSignoff(ws, byId(ws.orders, wo.orderId), wo, 'regle', user);
     }
   });
 
@@ -733,9 +739,11 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
     if (!['sur_place', 'en_cours'].includes(wo.status)) throw new AppError('etat', 'L’aide est disponible une fois arrivé chez le client.');
     return wo;
   };
+  // Une photo d'aide ne peut pas reprendre l'image d'une pièce ou d'une photo de mission déjà rangée (elle changerait de règle de visibilité).
+  const freeImg = (ws, img) => (img && (ws.documents.some(d => d.img === img) || ws.workOrders.some(w => (w.photos || []).some(x => x.img === img))) ? null : img);
   const helpPhoto = (ws, p) => {
     if (!p || typeof p !== 'object') return null;
-    return { id: 'PH' + (++ws.seq), name: String(p.name || 'photo.jpg').slice(0, 120), thumb: D.smallThumb(p.thumb), img: D.imgRef(p.img), check: D.photoCheck(p.quality) };
+    return { id: 'PH' + (++ws.seq), name: String(p.name || 'photo.jpg').slice(0, 120), thumb: D.smallThumb(p.thumb), img: freeImg(ws, D.imgRef(p.img)), check: D.photoCheck(p.quality) };
   };
   cmd('tech.ask', ['technicien'], ({ ws, user, args }) => {
     const wo = myOpenWo(ws, user, args.woId);
@@ -743,9 +751,9 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
     const photo = helpPhoto(ws, args.photo);
     if (!q && !photo) throw new AppError('vide', 'Écrivez votre question ou ajoutez une photo.');
     if ((wo.help || []).length >= 40) throw new AppError('limite', 'Trop de demandes sur cette mission : transmettez au responsable.');
-    const ans = techAnswer(q);
-    const a = { title: ans.title, steps: ans.steps, source: ans.source, escalate: ans.escalate || !!photo && !ans.topic, topic: ans.topic };
-    if (photo) a.note = 'Je ne lis pas les images (aide simulée). ' + (photo.check && !photo.check.ok ? 'La photo est ' + photo.check.issues.join(' et ') + ' : reprenez-la si le responsable doit la voir.' : 'Transmettez la photo au responsable pour qu’il la regarde.');
+    const ans = !q && photo ? { topic: null, title: 'Photo reçue', steps: ['Décrivez le problème en une phrase si vous le pouvez.', 'Transmettez la photo au responsable : il vous répond ici.'], source: null, escalate: true } : techAnswer(q);
+    const a = { title: ans.title, steps: ans.steps, source: ans.source, escalate: ans.escalate || !!photo, topic: ans.topic };
+    if (photo) a.note = 'Le guide ne lit pas les images (aide simulée). ' + (photo.check && !photo.check.ok ? 'La photo est ' + photo.check.issues.join(' et ') + ' : reprenez-la si le responsable doit la voir.' : 'Transmettez la photo au responsable pour qu’il la regarde.');
     const h = { id: 'HP' + (++ws.seq), kind: 'ask', at: ws.clock, q, a, photo, escalated: false };
     (wo.help ||= []).push(h);
     audit(ws, user, 'terrain.aide', byId(ws.orders, wo.orderId).ref, (q || 'photo').slice(0, 120));
@@ -760,6 +768,7 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
     const text = String(args.text || (h && h.q) || '').trim().slice(0, 500);
     const photo = h ? h.photo : helpPhoto(ws, args.photo);
     if (!text && !photo) throw new AppError('vide', 'Décrivez le problème ou ajoutez une photo pour votre responsable.');
+    if (!h && (wo.help || []).length >= 40) throw new AppError('limite', 'Trop de demandes sur cette mission.');
     if ((wo.help || []).filter(x => x.kind === 'escalade' && x.status === 'ouvert').length >= 3) throw new AppError('limite', 'Trois demandes attendent déjà une réponse de votre responsable.');
     if (!h) { h = { id: 'HP' + (++ws.seq), kind: 'ask', at: ws.clock, q: text, a: null, photo, escalated: false }; (wo.help ||= []).push(h); }
     const t = { id: 'TK' + (++ws.seq), orderId: order.id, woId: wo.id, type: 'escalade_terrain', text: text || 'Photo envoyée sans texte', status: 'ouvert', ownerRole: 'superviseur', at: ws.clock, by: user.name };
@@ -775,6 +784,7 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
   cmd('install.validate', ['client'], ({ ws, user, order, args }) => {
     const wo = ws.workOrders.filter(w => w.orderId === order.id && w.status === 'terminee').at(-1);
     if (!wo || !wo.signoff) throw new AppError('etat', 'Il n’y a pas de visite à valider pour le moment.');
+    if (order.cancelled) throw new AppError('etat', 'Cette commande est annulée : il n’y a plus rien à valider.');
     if (['validee', 'auto'].includes(wo.signoff.state)) throw new AppError('doublon', 'La visite est déjà validée. Merci !');
     const c = args.checks || {};
     const checks = { voyant: !!c.voyant, internet: !!c.internet, propre: !!c.propre };
@@ -790,7 +800,9 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
       notify(ws, wo.techUserId, { title: 'Le client signale un souci', body: order.ref + ' : ' + text, orderId: order.id, kind: 'alerte' });
       return wo.signoff;
     }
-    if (args.mode === 'verifie' && !(checks.voyant && checks.internet)) throw new AppError('verif', 'Cochez que le voyant de la box est allumé et qu’Internet fonctionne, ou choisissez « Il y a un souci ».');
+    // Internet arrive après l'activation : on ne l'exige qu'une fois le service actif.
+    const needNet = order.state === 'SERVICE_ACTIF';
+    if (args.mode === 'verifie' && !(checks.voyant && (checks.internet || !needNet))) throw new AppError('verif', needNet ? 'Cochez que le voyant de la box est allumé et qu’Internet fonctionne, ou choisissez « Il y a un souci ».' : 'Cochez que le voyant de la box est allumé, ou choisissez « Il y a un souci ».');
     if (!['verifie', 'auto'].includes(args.mode)) throw new AppError('mode', 'Choix inconnu.');
     D.finishSignoff(ws, order, wo, args.mode, user, args.mode === 'verifie' ? checks : null);
     return wo.signoff;
@@ -1064,7 +1076,16 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
       } else if (j.kind === 'autovalid') {
         // Le client n'a pas répondu : la visite est validée toute seule, et l'équipe Moov apprend que le technicien est libre.
         const wo = byId(ws.workOrders, j.ref);
-        if (wo && wo.signoff && wo.signoff.state === 'attente') D.finishSignoff(ws, byId(ws.orders, wo.orderId), wo, 'delai', SYS);
+        if (wo && wo.signoff && wo.signoff.state === 'attente') {
+          const o = byId(ws.orders, wo.orderId);
+          if (o.cancelled) D.finishSignoff(ws, o, wo, 'annule', SYS);
+          else if (wo.reception && wo.reception.status === 'reserve') {
+            // Le client avait fait une réserve devant le technicien : pas de validation automatique, le superviseur s'en occupe.
+            wo.signoff = { ...wo.signoff, state: 'probleme', problemAt: now, problem: 'Réserve faite à la réception' + (wo.reception.comment ? ' : ' + wo.reception.comment : '') };
+            ws.tickets.push({ id: 'TK' + (++ws.seq), orderId: o.id, woId: wo.id, type: 'visite', text: 'Visite terminée avec une réserve du client' + (wo.reception.comment ? ' : ' + wo.reception.comment : ''), status: 'ouvert', ownerRole: 'superviseur', at: now, by: 'Système' });
+            D.notifyRole(ws, 'superviseur', o, { title: 'Visite à revoir : réserve du client', body: o.ref + (wo.reception.comment ? ' : ' + wo.reception.comment : ''), kind: 'alerte' });
+          } else D.finishSignoff(ws, o, wo, 'delai', SYS);
+        }
         j.done = true;
       } else if (j.kind === 'call') {
         // Personne n'a décroché : l'appel devient une demande de rappel, suivie comme les autres.
@@ -1298,9 +1319,9 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
         const busy = ws.appointments.filter(a => a.id !== appt.id && a.teamId === t.id && a.date === appt.date && a.slot === appt.slot && ['confirme', 'en_cours', 'realise'].includes(a.status)).map(a => ({ time: a.time || null, ref: (byId(ws.orders, a.orderId) || {}).ref }));
         const tech = byId(ws.users, t.techUserId);
         const canTake = covers && t.available && (own || left > 0);
-        const cur = ws.workOrders.find(w => w.techUserId === t.techUserId && ['en_route', 'sur_place', 'en_cours'].includes(w.status));
-        const lastDone = ws.workOrders.filter(w => w.techUserId === t.techUserId && w.freeAt).sort((a, b) => b.freeAt - a.freeAt)[0];
-        const live = cur ? { status: cur.status, ref: (byId(ws.orders, cur.orderId) || {}).ref } : { status: 'libre', freeSince: lastDone ? lastDone.freeAt : null };
+        const now = D.techNow(ws, t.techUserId);
+        const nowOrder = now.orderId ? byId(ws.orders, now.orderId) : null;
+        const live = { status: now.status, problem: !!now.problem, freeSince: now.freeSince || null, ref: nowOrder && canSee(ws, user, nowOrder) ? nowOrder.ref : null };
         return { live, id: t.id, covers, name: t.name, techId: t.techUserId, techName: tech ? tech.name : '—', contractor: t.contractor, quality: t.quality, available: t.available, own, left, busy, canTake,
           hours: hours.map(h => ({ h, free: canTake && !busy.some(b => b.time === h) })) };
       });
@@ -1329,26 +1350,29 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
     'admin.trips': { roles: ['admin', 'superviseur', 'planificateur', 'auditeur'], fn: ({ ws, user }) => {
       const mins = ms => (ms == null ? null : Math.round(ms / 6e4 * 10) / 10);
       const mine = o => user.role === 'planificateur' ? (user.zones || []).includes(o.zone) : true;
-      const rows = ws.workOrders.filter(w => w.status !== 'annulee' && (w.times.depart || ['affectee'].includes(w.status))).map(w => {
-        const o = byId(ws.orders, w.orderId); if (!o || !mine(o)) return null;
+      // Toutes les visites qui ont commencé ou sont prévues ; le périmètre ne limite que ce qui s'affiche (pas l'état des techniciens).
+      const all = ws.workOrders.filter(w => w.status !== 'annulee' && (w.times.depart || w.times.arrive || w.times.start || ['affectee', 'echec'].includes(w.status))).map(w => {
+        const o = byId(ws.orders, w.orderId); if (!o) return null;
         const t = w.times, tech = byId(ws.users, w.techUserId), team = byId(ws.teams, w.teamId);
         const open = (w.help || []).filter(h => h.kind === 'escalade' && h.status === 'ouvert').length;
-        const stage = w.signoff && ['validee', 'auto'].includes(w.signoff.state) ? 6 : w.status === 'terminee' ? 5 : w.status === 'en_cours' ? 4 : w.status === 'sur_place' ? 3 : w.status === 'en_route' ? 2 : w.status === 'echec' ? 4 : 1;
-        return { woId: w.id, orderId: o.id, ref: o.ref, client: o.contactName, commune: o.address.commune, zone: o.zone, techId: w.techUserId, techName: tech ? tech.name : '—', teamName: team ? team.name : null, contractor: team ? team.contractor : null,
+        const sign = w.signoff && ['validee', 'auto'].includes(w.signoff.state);
+        // Étape atteinte : mission transmise (1), en route (2), arrivé (3), en cours (4), terminé (5), validé (6). Une visite en échec n'a pas d'étape de plus que celle où elle s'est arrêtée.
+        const stage = w.status === 'echec' ? (t.start ? 4 : t.arrive ? 3 : t.depart ? 2 : 1) : sign ? 6 : w.status === 'terminee' ? 5 : w.status === 'en_cours' ? 4 : w.status === 'sur_place' ? 3 : w.status === 'en_route' ? 2 : 1;
+        return { inScope: mine(o), woId: w.id, orderId: o.id, ref: o.ref, client: o.contactName, commune: o.address.commune, zone: o.zone, techId: w.techUserId, techName: tech ? tech.name : 'Technicien inconnu', teamName: team ? team.name : null, contractor: team ? team.contractor : null,
           status: w.status, stage, track: w.track || null, times: { depart: t.depart || null, arrive: t.arrive || null, start: t.start || null, end: t.end || null },
-          travelMin: mins(t.depart && (t.arrive || t.start) ? (t.arrive || t.start) - t.depart : null), onSiteMin: mins((t.arrive || t.start) && t.end ? t.end - (t.arrive || t.start) : null),
+          travelMin: w.status === 'terminee' ? mins(t.depart && (t.arrive || t.start) ? (t.arrive || t.start) - t.depart : null) : null, onSiteMin: w.status === 'terminee' ? mins((t.arrive || t.start) && t.end ? t.end - (t.arrive || t.start) : null) : null,
           signoff: w.signoff ? { state: w.signoff.state, mode: w.signoff.mode || null, autoAt: w.signoff.autoAt, at: w.signoff.at || null } : null, freeAt: w.freeAt || null,
-          helpCount: (w.help || []).length, helpOpen: open, failure: w.failure || null };
-      }).filter(Boolean).sort((a, b) => ((b.times.depart || b.times.start || 0) - (a.times.depart || a.times.start || 0)));
+          helpCount: (w.help || []).length, helpOpen: ['en_cours', 'sur_place'].includes(w.status) ? open : 0, failure: w.failure || null };
+      }).filter(Boolean);
+      const rows = all.filter(r => r.inScope).map(({ inScope, ...r }) => r).sort((a, b) => ((b.times.depart || b.times.start || 0) - (a.times.depart || a.times.start || 0)));
       const done = rows.filter(r => r.travelMin != null), onsite = rows.filter(r => r.onSiteMin != null);
       const avg = l => (l.length ? Math.round(l.reduce((s, x) => s + x, 0) / l.length * 10) / 10 : null);
       const techs = ws.teams.filter(tm => user.role !== 'planificateur' || tm.zones.some(z => (user.zones || []).includes(z))).map(tm => {
-        const u = byId(ws.users, tm.techUserId); const cur = rows.find(r => r.techId === tm.techUserId && ['en_route', 'sur_place', 'en_cours'].includes(r.status));
-        const lastFree = rows.filter(r => r.techId === tm.techUserId && r.freeAt).sort((a, b) => b.freeAt - a.freeAt)[0];
-        const waiting = rows.find(r => r.techId === tm.techUserId && r.status === 'terminee' && r.signoff && r.signoff.state === 'attente');
-        return { id: tm.techUserId, name: u ? u.name : '—', teamName: tm.name, contractor: tm.contractor, available: tm.available, status: cur ? cur.status : waiting ? 'attente_client' : 'libre', ref: (cur || waiting || {}).ref || null, freeSince: !cur && !waiting && lastFree ? lastFree.freeAt : null, visits: rows.filter(r => r.techId === tm.techUserId && r.stage >= 5).length };
+        const u = byId(ws.users, tm.techUserId); const n = D.techNow(ws, tm.techUserId);
+        const o = n.orderId ? byId(ws.orders, n.orderId) : null;
+        return { id: tm.techUserId, name: u ? u.name : 'Technicien inconnu', teamName: tm.name, contractor: tm.contractor, available: tm.available, status: n.status, problem: !!n.problem, ref: o && mine(o) ? o.ref : null, freeSince: n.freeSince || null, visits: all.filter(r => r.techId === tm.techUserId && r.stage >= 5).length };
       });
-      return { now: ws.clock, kpis: { enRoute: rows.filter(r => r.status === 'en_route').length, surPlace: rows.filter(r => ['sur_place', 'en_cours'].includes(r.status)).length, attenteClient: rows.filter(r => r.status === 'terminee' && r.signoff && r.signoff.state === 'attente').length, validees: rows.filter(r => r.stage === 6).length, aideEnAttente: rows.reduce((n, r) => n + r.helpOpen, 0), travelAvgMin: avg(done.map(r => r.travelMin)), onSiteAvgMin: avg(onsite.map(r => r.onSiteMin)), autoValidateMin: ws.config.autoValidateMin || 60 }, trips: rows.slice(0, 60), techs };
+      return { now: ws.clock, total: rows.length, kpis: { enRoute: rows.filter(r => r.status === 'en_route').length, surPlace: rows.filter(r => ['sur_place', 'en_cours'].includes(r.status)).length, attenteClient: rows.filter(r => r.status === 'terminee' && r.signoff && ['attente', 'probleme'].includes(r.signoff.state)).length, validees: rows.filter(r => r.stage === 6).length, aideEnAttente: rows.reduce((n, r) => n + r.helpOpen, 0), travelAvgMin: avg(done.map(r => r.travelMin)), onSiteAvgMin: avg(onsite.map(r => r.onSiteMin)), autoValidateMin: ws.config.autoValidateMin || 60 }, trips: rows.slice(0, 60), techs };
     } },
     dashboard: { roles: ['superviseur', 'admin', 'auditeur'], fn: ({ ws }) => dashboard(ws) },
     'admin.users': { roles: ['admin', 'auditeur'], ownerOk: true, fn: ({ ws }) => ({ users: ws.users, invites: ws.invites.map(i => ({ ...i, user: (byId(ws.users, i.userId) || {}).name })), privacy: ws.privacy }) },

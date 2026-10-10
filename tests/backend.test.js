@@ -639,7 +639,7 @@ test('Fin de visite : aide du technicien, transmission au superviseur, validatio
   assert.equal((await t.api.exec(v.tech, 'tech.ask', { woId: v.wo.id, question: '  ' })).ok, false);
   // Photo du problème : l'aide dit qu'elle ne lit pas les images et propose de transmettre.
   const a3 = ok(await t.api.exec(v.tech, 'tech.ask', { woId: v.wo.id, question: 'câble écrasé', photo: { name: 'cable.jpg', quality: { w: 1200, h: 900, bright: 20, sharp: 50 } } }));
-  assert.match(a3.a.note, /ne lis pas les images/); assert.match(a3.a.note, /sombre/);
+  assert.match(a3.a.note, /ne lit pas les images/); assert.match(a3.a.note, /sombre/);
   // Transmission au superviseur : ticket, notification, puis réponse qui revient au technicien.
   const e1 = ok(await t.api.exec(v.tech, 'tech.escalate', { woId: v.wo.id, helpId: a3.id }));
   assert.equal(e1.status, 'ouvert');
@@ -666,7 +666,7 @@ test('Fin de visite : aide du technicien, transmission au superviseur, validatio
   assert.equal(trips0.kpis.attenteClient, 1);
   assert.equal(trips0.techs.find(x => x.id === v.wo.techUserId).status, 'attente_client');
   // Le client doit cocher le voyant et Internet pour valider ; sinon il peut signaler un souci.
-  const miss = await t.api.exec(v.c, 'install.validate', { orderId: v.b.id, mode: 'verifie', checks: { voyant: true } });
+  const miss = await t.api.exec(v.c, 'install.validate', { orderId: v.b.id, mode: 'verifie', checks: { internet: true } });
   assert.equal(miss.ok, false); assert.equal(miss.error.code, 'verif');
   assert.equal((await t.api.exec(v.c, 'install.validate', { orderId: v.b.id, mode: 'probleme', text: 'x' })).ok, false);
   ok(await t.api.exec(v.c, 'install.validate', { orderId: v.b.id, mode: 'verifie', checks: { voyant: true, internet: true, propre: true } }));
@@ -715,4 +715,68 @@ test('Fin de visite : sans réponse du client, la visite se valide toute seule ;
   assert.equal((await t.api.exec(adm, 'config.set', { key: 'autoValidateMin', value: '0' })).ok, false);
   ok(await t.api.exec(adm, 'config.set', { key: 'autoValidateMin', value: '30' }));
   assert.equal(t.api.q(v2.c, 'me').ws.autoValidateMin, 30);
+});
+
+test('Fin de visite : souci réglé par le superviseur, aide close, commande annulée, réserve du client, doublons', async () => {
+  const t = setup(1);
+  const sup = t.as('superviseur');
+  // Souci signalé, puis réglé par le superviseur : la visite est validée et le technicien libéré.
+  const v = await visitReady(t, 21, 'Cliente Reglee');
+  await v.act('depart', {}); await v.act('arrive', {}); await v.act('start', {});
+  const h = ok(await t.api.exec(v.tech, 'tech.ask', { woId: v.wo.id, question: 'accès impossible', photo: { name: 'p.jpg' } }));
+  ok(await t.api.exec(v.tech, 'tech.escalate', { woId: v.wo.id, helpId: h.id }));
+  assert.equal(h.a.escalate, true);
+  await v.act('checklist', { values: { puissance: -18, pto: true, cheminement: true, ont_led: true } });
+  await v.act('serial', { serial: t.ws().equipment.find(e => e.status === 'stock' && e.model.includes('ZTE')).serial });
+  await v.act('photo', { name: 'box.jpg' });
+  await v.act('reception', { mode: 'code', code: v.cur().receptionCode, status: 'accord' });
+  await v.act('finish', {});
+  // La demande sans réponse est close à la fin de la visite.
+  assert.equal(v.cur().help.find(x => x.id === h.id).status, 'caduque');
+  assert.equal(t.ws().tickets.find(x => x.type === 'escalade_terrain').status, 'traite');
+  assert.equal(t.api.q(t.as('admin'), 'admin.trips').kpis.aideEnAttente, 0);
+  ok(await t.api.exec(v.c, 'install.validate', { orderId: v.b.id, mode: 'probleme', text: 'La box clignote en rouge' }));
+  // Le technicien reste occupé pour la planification tant que le souci n'est pas réglé.
+  const nadia = t.as('conseiller');
+  assert.equal(t.api.q(nadia, 'ops.techFree', { orderId: v.b.id }).teams.find(x => x.techId === v.wo.techUserId).live.status, 'attente_client');
+  assert.equal(t.api.q(t.as('admin'), 'admin.trips').techs.find(x => x.id === v.wo.techUserId).problem, true);
+  const tk = t.ws().tickets.find(x => x.type === 'visite' && x.woId === v.wo.id);
+  ok(await t.api.exec(sup, 'ticket.close', { id: tk.id, note: 'Box remplacée' }));
+  assert.equal((await t.api.exec(sup, 'ticket.close', { id: tk.id, note: 'encore' })).ok, false); // déjà traité
+  assert.equal(v.cur().signoff.state, 'auto'); assert.equal(v.cur().signoff.mode, 'regle');
+  assert.equal(t.api.q(nadia, 'ops.techFree', { orderId: v.b.id }).teams.find(x => x.techId === v.wo.techUserId).live.status, 'libre');
+  // Une mission démarrée sans « Je pars » apparaît quand même dans les trajets.
+  const v2 = await visitReady(t, 22, 'Cliente Directe');
+  await v2.act('start', {});
+  const tr = t.api.q(t.as('admin'), 'admin.trips');
+  assert.ok(tr.trips.some(r => r.woId === v2.wo.id && r.stage === 4));
+  assert.equal(tr.techs.find(x => x.id === v2.wo.techUserId).status, 'en_cours');
+  // Commande annulée entre la fin de la visite et la validation automatique : pas de texte « validée » au client, technicien libéré.
+  const v3 = await visitReady(t, 23, 'Cliente Annulee');
+  await v3.act('depart', {}); await v3.act('arrive', {});
+  await finishVisit(t, v3);
+  t.tick(6 * 60e3); await t.api.pump(t.wsId); // l'activation se termine
+  t.ws().orders.find(o => o.id === v3.b.id).cancelled = true;
+  ok(await t.api.exec(t.as('admin'), 'config.set', { key: 'travelMin', value: '4' })); // une écriture enregistre la modification
+  assert.equal((await t.api.exec(v3.c, 'install.validate', { orderId: v3.b.id, mode: 'auto' })).ok, false);
+  t.tick(65 * 60e3); await t.api.pump(t.wsId);
+  assert.equal(v3.cur().signoff.state, 'auto'); assert.equal(v3.cur().signoff.mode, 'annule');
+  assert.ok(!t.ws().events.some(e => e.orderId === v3.b.id && e.type === 'INSTALLATION_VALIDEE'));
+  // Réserve du client devant le technicien : la validation automatique n'a pas lieu, le superviseur est prévenu.
+  const v4 = await visitReady(t, 24, 'Cliente Reserve');
+  await v4.act('depart', {}); await v4.act('arrive', {}); await v4.act('start', {});
+  await v4.act('checklist', { values: { puissance: -18, pto: true, cheminement: true, ont_led: true } });
+  await v4.act('serial', { serial: t.ws().equipment.find(e => e.status === 'stock' && e.model.includes('ZTE')).serial });
+  await v4.act('photo', { name: 'box.jpg' });
+  await v4.act('reception', { mode: 'code', code: v4.cur().receptionCode, status: 'reserve', comment: 'Câble trop visible' });
+  await v4.act('finish', {});
+  t.tick(65 * 60e3); await t.api.pump(t.wsId);
+  assert.equal(v4.cur().signoff.state, 'probleme');
+  assert.ok(t.ws().tickets.some(x => x.type === 'visite' && x.woId === v4.wo.id && /réserve/.test(x.text)));
+  // Une photo d'aide ne peut pas reprendre l'image d'une pièce du dossier.
+  const v5 = await visitReady(t, 25, 'Cliente Image');
+  await v5.act('depart', {}); await v5.act('arrive', {}); await v5.act('start', {});
+  t.ws().documents.find(d => d.orderId === v5.b.id).img = 'img_abcdefgh12';
+  const hp = ok(await t.api.exec(v5.tech, 'tech.ask', { woId: v5.wo.id, question: 'câble', photo: { name: 'x.jpg', img: 'img_abcdefgh12' } }));
+  assert.equal(hp.photo.img, null);
 });

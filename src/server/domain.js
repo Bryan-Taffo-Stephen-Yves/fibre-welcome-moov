@@ -348,6 +348,7 @@ export function woAction(ws, wo, action, args, actor) {
       transition(ws, order, 'INSTALLATION_TERMINEE', { actor, source: 'Application terrain' });
       requestActivation(ws, order, actor);
       // Le client vérifie la box puis valide, ou laisse partir le technicien : sans réponse, la validation se fait toute seule.
+      closeHelp(ws, wo, 'Visite terminée sans réponse nécessaire');
       wo.signoff = { state: 'attente', since: now, autoAt: now + Math.max(1, Number(ws.config.autoValidateMin) || 60) * 60e3 };
       ws.jobs.push({ id: nid(ws, 'J'), kind: 'autovalid', ref: wo.id, due: wo.signoff.autoAt, generation: ws.generation, attempts: 0 });
       notify(ws, order.customerId, { title: 'Installation terminée : vérifiez et validez', body: userName(ws, wo.techUserId) + ' a fini. Regardez les voyants de la box, puis validez, ou laissez-le partir.', orderId: order.id, kind: 'action' });
@@ -357,7 +358,8 @@ export function woAction(ws, wo, action, args, actor) {
       need(['affectee', 'en_route', 'sur_place', 'en_cours'].includes(wo.status), 'Mission déjà clôturée.');
       const type = args.reason;
       if (!['CLIENT_ABSENT', 'ACCES_IMPOSSIBLE', 'MATERIEL_PANNE', 'CAPACITE_RESEAU'].includes(type)) throw new AppError('motif', 'Motif d’échec invalide.');
-      wo.status = 'echec'; wo.failure = { type, comment: args.comment || '', at: now }; wo.times.end = now;
+      wo.status = 'echec'; wo.failure = { type, comment: args.comment || '', at: now }; wo.times.end = now; wo.freeAt = now;
+      closeHelp(ws, wo, 'Visite non réalisée, sans réponse nécessaire');
       if (appt) { appt.status = type === 'CLIENT_ABSENT' ? 'non_honore' : 'annule'; appt.reason = BLOCKER_TYPES[type].label; releaseCap(ws, appt); }
       if (['RDV_CONFIRME', 'INTERVENTION_EN_COURS'].includes(order.state)) transition(ws, order, 'PRET_A_PLANIFIER', { actor, source: 'Application terrain', reason: BLOCKER_TYPES[type].label });
       openBlocker(ws, order, type, { actor, detail: args.comment || '' });
@@ -493,17 +495,38 @@ export function notifyRole(ws, role, order, msg) {
   for (const u of ws.users.filter(u => u.role === role && u.active !== false && (!order || !u.zones || u.zones.includes(order.zone)))) notify(ws, u.id, { orderId: order ? order.id : null, ...msg });
 }
 
-// Fin de visite : le client a validé (après vérification), ou laissé partir le technicien, ou n'a pas répondu à temps.
-// L'équipe Moov est prévenue que le technicien est de nouveau disponible pour une autre mission.
+// Fin de visite : le client a validé (après vérification), ou laissé partir le technicien, ou n'a pas répondu à temps,
+// ou l'équipe Moov a réglé le souci signalé. L'équipe Moov est prévenue que le technicien est de nouveau disponible.
 export function finishSignoff(ws, order, wo, mode, actor, checks) {
-  const SAYS = { verifie: ['Vous avez vérifié l’installation et validé la visite.', 'le client a vérifié et validé l’installation.', 'validée par le client'], auto: ['Vous avez laissé le technicien partir : la visite est validée.', 'le client vous a laissé partir sans vérifier, validation automatique.', 'validée (le client l’a laissé partir)'], delai: ['Sans réponse de votre part, la visite a été validée automatiquement.', 'le client n’a pas répondu à temps, validation automatique.', 'validée automatiquement (client sans réponse)'] };
+  const SAYS = { verifie: ['Vous avez vérifié l’installation et validé la visite.', 'le client a vérifié et validé l’installation.', 'validée par le client'], auto: ['Vous avez laissé le technicien partir : la visite est validée.', 'le client vous a laissé partir sans vérifier, validation automatique.', 'validée (le client l’a laissé partir)'], delai: ['Sans réponse de votre part, la visite a été validée automatiquement.', 'le client n’a pas répondu à temps, validation automatique.', 'validée automatiquement (client sans réponse)'], regle: ['Le souci signalé est réglé : la visite est validée.', 'le souci du client est réglé, la visite est validée.', 'validée (souci réglé)'], annule: [null, null, 'sans suite (commande annulée)'] };
   const say = SAYS[mode] || SAYS.auto;
-  wo.signoff = { ...(wo.signoff || {}), state: mode === 'verifie' ? 'validee' : 'auto', mode, at: ws.clock, checks: checks || null };
-  wo.freeAt = ws.clock;
+  // Validation automatique : la date retenue est l'échéance, même si le serveur ne l'a jouée que plus tard.
+  const at = mode === 'delai' && wo.signoff && wo.signoff.autoAt ? Math.min(ws.clock, wo.signoff.autoAt) : ws.clock;
+  wo.signoff = { ...(wo.signoff || {}), state: mode === 'verifie' ? 'validee' : 'auto', mode, at, checks: checks || null };
+  wo.freeAt = at;
+  // Un souci encore ouvert sur cette visite est clos : la visite est validée.
+  for (const t of ws.tickets) if (t.woId === wo.id && t.type === 'visite' && t.status === 'ouvert') { t.status = 'traite'; t.closedBy = actor && actor.name ? actor.name : 'Système'; t.note = 'Visite validée'; }
   const first = userName(ws, wo.techUserId).split(' ')[0];
-  emit(ws, order, 'INSTALLATION_VALIDEE', { actor, payload: { mode }, publicText: say[0] });
-  notify(ws, wo.techUserId, { title: 'Visite validée', body: order.ref + ' : ' + say[1] + ' Vous êtes de nouveau disponible.', orderId: order.id, kind: 'succes' });
+  if (say[0]) emit(ws, order, 'INSTALLATION_VALIDEE', { actor, payload: { mode }, publicText: say[0] });
+  if (say[1]) notify(ws, wo.techUserId, { title: 'Visite validée', body: order.ref + ' : ' + say[1] + ' Vous êtes de nouveau disponible.', orderId: order.id, kind: 'succes' });
   for (const role of ['conseiller', 'planificateur', 'superviseur']) notifyRole(ws, role, order, { title: first + ' est de nouveau disponible', body: order.ref + ' (' + order.contactName + ') : visite ' + say[2] + '. ' + first + ' peut recevoir une nouvelle mission.', kind: 'info' });
+}
+
+// La visite se termine sans réponse du superviseur : les demandes d'aide encore ouvertes sont closes.
+export function closeHelp(ws, wo, note) {
+  for (const h of wo.help || []) if (h.status === 'ouvert') h.status = 'caduque';
+  for (const t of ws.tickets) if (t.woId === wo.id && t.type === 'escalade_terrain' && t.status === 'ouvert') { t.status = 'traite'; t.closedBy = 'Système'; t.note = note; }
+}
+
+// Où en est un technicien en ce moment : sur la route, chez un client, en attente de la validation du client, ou libre.
+export function techNow(ws, techUserId) {
+  const wos = ws.workOrders.filter(w => w.techUserId === techUserId);
+  const cur = wos.find(w => ['en_route', 'sur_place', 'en_cours'].includes(w.status));
+  if (cur) return { status: cur.status, woId: cur.id, orderId: cur.orderId };
+  const wait = wos.find(w => w.status === 'terminee' && w.signoff && ['attente', 'probleme'].includes(w.signoff.state));
+  if (wait) return { status: 'attente_client', problem: wait.signoff.state === 'probleme', woId: wait.id, orderId: wait.orderId };
+  const last = wos.filter(w => w.freeAt).sort((a, b) => b.freeAt - a.freeAt)[0];
+  return { status: 'libre', freeSince: last ? last.freeAt : null };
 }
 
 // Ce qui manque encore au dossier, en mots simples. Les pièces refusées ou jamais envoyées comptent.

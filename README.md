@@ -23,7 +23,10 @@ Dans l’aperçu claude.ai, c’est la petite base de l’aperçu qui joue ce r�
 2. Téléphone : choisir une offre, payer (paiement simulé, code à 4 chiffres affiché à l'écran), l'application s'ouvre avec le compte à rebours de 24 h, envoyer le dossier (photos, repère, créneau). Des photos « spécimen » sont proposées : aucune vraie pièce n'est nécessaire.
 3. Ordinateur, Équipe Moov : Nadia reçoit la notification, regarde les photos (contrôle automatique simple : netteté, lumière, taille, même photo envoyée deux fois). Un « avis automatique » (simulé, pas une vraie IA) lui propose de valider ou de refuser, avec un bouton « Suivre l’avis » : c’est toujours elle qui décide. Elle peut aussi dire au client ce qui manque. Une fois les photos validées, le bouton « Valider et transmettre au technicien » montre les trois techniciens et leurs heures libres au créneau du client ; la mission arrive alors sur le téléphone du technicien choisi (« Nouvelle course », agenda de la semaine). Le planificateur peut aussi le faire.
 4. Téléphone : « le technicien viendra le … à … », préparation à cocher. Technicien : « Je pars », le client suit le trajet en direct (durée réglable dans Admin, Réglages), puis arrivée, installation, note du technicien.
-5. Téléphone : « Appeler » le service client ; Nadia décroche sur l'ordinateur (appel simulé, sans son).
+5. Chez le client : le technicien a une « boîte à outils » (poser une question, montrer un problème en photo, prévenir son superviseur). L'aide répond par étapes à partir d'un petit guide (mots-clés, **pas une IA** : elle ne lit pas les photos) et conseille de transmettre au superviseur quand le sujet est risqué ; le superviseur répond dans l'application (réponse obligatoire). Le client et le technicien se suivent sur la carte (distance, vitesse et position simulées).
+6. Fin de visite : le client reçoit « Installation terminée : vérifiez et validez ». Il coche le voyant de la box et Internet puis valide, ou signale un souci, ou laisse partir le technicien sans vérifier (validation tout de suite). Sans réponse, la visite se valide seule après un délai réglable (Admin, Réglages, 60 minutes par défaut). Ensuite Nadia, Hervé et le superviseur reçoivent « <Prénom> est de nouveau disponible » et le technicien peut recevoir une autre mission.
+7. Administrateur : l'onglet « Trajets » montre les visites en cours avec leurs étapes et leurs durées (trajet, temps sur place, attente de validation), la carte d'ensemble et la liste des techniciens libres ou occupés. Le superviseur et le planificateur y ont accès aussi.
+8. Téléphone : « Appeler » le service client ; Nadia décroche sur l'ordinateur (appel simulé, sans son).
 
 Le scénario SC-17 du Laboratoire vérifie chaque étape.
 
@@ -45,6 +48,7 @@ Le scénario SC-17 du Laboratoire vérifie chaque étape.
 | `src/server/model.js` | États, motifs de blocage, rôles, référentiels, lexique |
 | `src/server/domain.js` | Règles métier : transitions, blocages, créneaux atomiques, terrain, activation, webhooks signés et dédoublonnés |
 | `src/server/backend.js` | « API » : sessions, droits par rôle et périmètre, commandes, lectures filtrées, tâches, reprises, espaces de test |
+| `src/server/techhelp.js` | Guide du technicien sur place : réponses par mots-clés (pas une IA), avec la source et le conseil de transmettre |
 | `src/server/ai.js` | Estimation (référence et modèle par quantiles), risque, assistant, résumé, évaluation temporelle |
 | `src/server/scenarios.js` | Préparation et vérification des 17 scénarios |
 | `src/server/seed.js` | Génération des données fictives par graine |
@@ -57,6 +61,7 @@ Le scénario SC-17 du Laboratoire vérifie chaque étape.
 | `src/ui/vendor/qrcode.js` | Dessin du code QR (bibliothèque libre qrcode-generator, licence MIT) |
 | `src/ui/*.jsx` | Interfaces (React, sans framework) |
 | `src/ui/people.jsx` | Personnages dessinés (avatars des rôles, Aya la guide, petites scènes) |
+| `src/ui/trips.jsx`, `src/ui/trackcard.jsx` | Suivi des trajets (administrateur, superviseur, planificateur) et carte de suivi partagée par le client et le technicien |
 | `src/ui/charts.jsx` | Graphiques sans bibliothèque : courbes, barres, anneau, carte d’Abidjan |
 | `src/ui/styles.css`, `src/ui/css/*.css` | Styles communs, puis un fichier par espace (client, terrain, opérations, admin, labo) |
 | `tests/backend.test.js` | 16 tests de recette (R-01, R-05 à R-15, R-19 à R-23, scénarios, droits sur les images) |

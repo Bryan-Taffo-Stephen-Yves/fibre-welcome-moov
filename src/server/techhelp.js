@@ -29,7 +29,7 @@ const norm = s => String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ
 export function techAnswer(question) {
   const q = ' ' + norm(question).replace(/\s+/g, ' ') + ' ';
   const scored = TECH_TOPICS.map(t => ({ t, hits: t.words.filter(w => { const x = norm(w).trim(); return x.length <= 4 ? q.includes(' ' + x + ' ') : q.includes(x); }) })).filter(x => x.hits.length).sort((a, b) => b.hits.length - a.hits.length);
-  if (!scored.length) return { topic: null, title: 'Je n’ai pas de réponse sûre', steps: ['Reformulez avec des mots simples (par exemple « box », « puissance », « câble », « accès »).', 'Ajoutez une photo et transmettez au responsable : il vous répond ici.'], source: null, escalate: true, matched: [] };
+  if (!scored.length) return { topic: null, title: 'Pas de réponse sûre dans le guide', steps: ['Reformulez avec des mots simples (par exemple « box », « puissance », « câble », « accès »).', 'Ajoutez une photo et transmettez au responsable : il vous répond ici.'], source: null, escalate: true, matched: [] };
   const best = scored[0];
   return { topic: best.t.id, title: best.t.title, steps: best.t.steps, source: best.t.source, escalate: best.t.escalate, matched: best.hits };
 }
