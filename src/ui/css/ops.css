@@ -548,3 +548,9 @@ button.op-capbtn:hover { background: var(--surface-3); }
 .op-advice-sum { margin: 0; color: var(--ink); }
 .op-advice-list { margin: 0; padding-left: 18px; }
 .op-advice .row { flex-wrap: wrap; gap: 8px 12px; align-items: center; }
+
+/* Étape suivante après la validation des photos */
+.op-next { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 12px 14px; border-radius: var(--r-m, 14px); border: 1px solid color-mix(in srgb, var(--ok) 45%, var(--line)); background: color-mix(in srgb, var(--ok) 9%, var(--surface)); }
+.op-next-ic { display: inline-flex; width: 28px; height: 28px; align-items: center; justify-content: center; border-radius: 50%; background: var(--ok); color: #fff; flex: none; }
+.op-next-ic svg { width: 16px; height: 16px; }
+.op-next .grow { min-width: 180px; }

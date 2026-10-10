@@ -321,3 +321,17 @@
 .fd-stars svg { width: 17px; height: 17px; }
 .fd-rate-tags { display: flex; flex-wrap: wrap; gap: 6px; }
 .fd-rate-c { margin: 0; color: var(--ink); background: var(--surface); border-radius: 12px; padding: 8px 12px; }
+
+/* Nouvelle course et agenda de la semaine (mission transmise par l'équipe Moov) */
+.fd-offer { border: 0; text-align: left; cursor: pointer; display: flex; flex-direction: column; gap: 10px; width: 100%; font: inherit; color: var(--ink); background: var(--surface); outline: 2px solid color-mix(in srgb, var(--accent) 55%, transparent); animation: fd-pop .5s ease-out; }
+.fd-offer-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.fd-offer .fd-go { margin-left: auto; }
+@keyframes fd-pop { from { transform: scale(.97); opacity: .4; } to { transform: none; opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .fd-offer { animation: none; } }
+.fd-week { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; }
+.fd-day { display: flex; flex-direction: column; align-items: center; gap: 1px; padding: 6px 0 8px; border-radius: 12px; background: var(--surface); border: 1px solid var(--line); color: var(--ink-2); position: relative; }
+.fd-day small { font-size: 11px; text-transform: capitalize; }
+.fd-day b { font-size: 15px; color: var(--ink); }
+.fd-day i { font-style: normal; font-size: 11px; min-height: 14px; min-width: 14px; line-height: 14px; text-align: center; border-radius: 7px; }
+.fd-day.has { border-color: var(--ink); }
+.fd-day.has i { background: var(--ink); color: var(--surface); }

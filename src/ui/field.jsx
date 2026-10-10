@@ -1,6 +1,6 @@
 // Espace terrain (TE-01 à TE-08) : l’application du technicien. Missions, étapes, preuves, travail hors ligne.
 // Sur grand écran, le téléphone est entouré de cartes d’accompagnement (profil, carte, synchronisation).
-import { api, useQ, call, toast, useOnline, setOnline, isOnline, readQueue, updateQueue, replay, watchQueue, prepareImage, putImage, useNow } from './platform.js';
+import { api, useQ, call, toast, useOnline, setOnline, isOnline, readQueue, updateQueue, replay, watchQueue, prepareImage, putImage, useNow, tabGet, tabSet } from './platform.js';
 import { Btn, AsyncBtn, Tag, Sim, Explain, Field, Modal, Empty, Icon, Picture, NotifBell, Avatar, Say, Ring, Bars, AbidjanMap, VanScene, HouseScene, firstName, fmtDate, fmtDateTime, fmtAgo, slotLabel, BLOCKER_TYPES, NotifPopups, TrackMap, hourLabel, trackInfo, deName } from './kit.jsx';
 import { CHECKLIST_TECH, ZONES, DOC_TYPES, BASE_NAMES, PREP_CHECKLIST } from '../server/model.js';
 const React = window.React;
@@ -65,7 +65,8 @@ export function FieldApp({ token }) {
   const pending = q.filter(x => ['en attente de réseau', 'refusé'].includes(x.status)).length;
   const waitBy = {}; for (const x of q) if (x.status === 'en attente de réseau') waitBy[x.args.woId] = (waitBy[x.args.woId] || 0) + 1;
   const cur = list.find(w => w.id === sel);
-  const openMission = id => { setSel(id); setTab('missions'); };
+  const [seen, setSeen] = useState(() => tabGet('fw:seenMissions:' + token, []));
+  const openMission = id => { setSel(id); setTab('missions'); if (!seen.includes(id)) { const n = [...seen, id]; setSeen(n); tabSet('fw:seenMissions:' + token, n); } };
   const live = list.filter(w => LIVE.includes(w.status)).sort(byRank);
   return <div className="fd-wrap">
     <div className="fd-stage">
@@ -88,7 +89,7 @@ export function FieldApp({ token }) {
           </div>}
           {tab === 'queue' ? <Queue token={token} missions={list} />
             : cur ? <Mission key={cur.id} token={token} wo={cur} ws={me.data.ws} onBack={() => setSel(null)} online={online} onQueue={() => setTab('queue')} />
-            : <Home list={list} live={live} waitBy={waitBy} onOpen={openMission} />}
+            : <Home list={list} live={live} waitBy={waitBy} onOpen={openMission} seen={seen} />}
         </div>
         <nav className="phone-tabs fd-tabs" aria-label="Application terrain">
           <button type="button" aria-current={tab === 'missions' ? 'page' : undefined} onClick={() => { if (tab === 'missions') setSel(null); else setTab('missions'); }}>{Icon.list}Missions</button>
@@ -111,9 +112,19 @@ export function FieldApp({ token }) {
 }
 
 // ---------- Accueil : la mission du moment, puis les suivantes ----------
-function Home({ list, live, waitBy, onOpen }) {
+function Home({ list, live, waitBy, onOpen, seen }) {
   const next = live[0];
   const rest = live.slice(1);
+  // Nouvelles courses : missions confiées par la conseillère ou le planificateur et pas encore ouvertes (comme une course proposée sur Yango).
+  const fresh = live.filter(w => w.status === 'affectee' && w.appt && !seen.includes(w.id));
+  const isNew = w => fresh.some(x => x.id === w.id);
+  // Agenda : les sept prochains jours, avec le nombre de missions de chacun.
+  const dated = live.filter(w => w.appt && w.appt.date).map(w => w.appt.date).sort((a, b) => a - b);
+  const day0 = dated[0];
+  const week = day0 ? Array.from({ length: 7 }, (_, i) => day0 + i * 864e5) : [];
+  const countOn = d => live.filter(w => w.appt && Math.abs(w.appt.date - d) < 43200e3).length;
+  // La liste « Ensuite » est rangée par jour.
+  const groups = []; for (const w of rest) { const d = (w.appt && w.appt.date) || 0; const g = groups.find(x => x.d === d); if (g) g.items.push(w); else groups.push({ d, items: [w] }); }
   const closed = list.filter(w => !LIVE.includes(w.status)).sort((a, b) => ((b.appt && b.appt.date) || 0) - ((a.appt && a.appt.date) || 0));
   return <>
     <div className="fd-h"><h2>Vos missions</h2>{list.length > 0 && <span className="small muted">{live.length} à faire</span>}</div>
@@ -121,9 +132,16 @@ function Home({ list, live, waitBy, onOpen }) {
       <VanScene height={64} />
       <Empty>Aucune mission pour l’instant. Elles arrivent ici dès que le planificateur confirme un rendez-vous.</Empty>
     </div>}
+    {fresh.map(w => <button key={w.id} type="button" className="card fd-offer" onClick={() => onOpen(w.id)}>
+      <span className="fd-offer-top"><span className="tag tag-lime">Nouvelle course</span><span className="tiny">{when(w)}</span></span>
+      <span className="fd-who"><Avatar name={w.contactName} size={40} /><span className="fd-who-t"><b>{w.contactName}</b><span>{w.address.commune} · {w.offer}</span></span><span className="fd-go" aria-hidden="true">{Icon.arrow}</span></span>
+    </button>)}
+    {week.length > 0 && <div className="fd-week" role="group" aria-label="Agenda de la semaine">{week.map(d => { const n = countOn(d); return <span key={d} className={'fd-day' + (n ? ' has' : '')} aria-label={dayLong(d) + ' : ' + (n ? n + ' mission' + (n > 1 ? 's' : '') : 'rien de prévu')}><small>{new Intl.DateTimeFormat('fr-FR', { ...tz, weekday: 'short' }).format(d).replace('.', '')}</small><b>{new Intl.DateTimeFormat('fr-FR', { ...tz, day: 'numeric' }).format(d)}</b><i aria-hidden="true">{n || ''}</i></span>; })}</div>}
     {next && <NextCard wo={next} waiting={waitBy[next.id]} onOpen={onOpen} />}
-    {rest.length > 0 && <span className="fd-sec">Ensuite</span>}
-    {rest.map(w => <MissionCard key={w.id} wo={w} waiting={waitBy[w.id]} onOpen={onOpen} />)}
+    {groups.map(g => <React.Fragment key={g.d}>
+      <span className="fd-sec">{g.d ? dayLong(g.d).replace(/^./, c => c.toUpperCase()) : 'Date à fixer'}</span>
+      {g.items.map(w => <MissionCard key={w.id} wo={w} waiting={waitBy[w.id]} onOpen={onOpen} fresh={isNew(w)} />)}
+    </React.Fragment>)}
     {closed.length > 0 && <span className="fd-sec">Terminées ou clôturées</span>}
     {closed.map(w => <MissionCard key={w.id} wo={w} waiting={waitBy[w.id]} onOpen={onOpen} closed />)}
     <div className="fd-narrow-only"><Explain>Le technicien ne voit que <b>ses</b> missions, jamais l’ensemble des clients. Il ne peut pas valider un paiement ni confirmer une activation.</Explain></div>
@@ -144,10 +162,10 @@ function NextCard({ wo, waiting, onOpen }) {
   </button>;
 }
 
-function MissionCard({ wo, waiting, onOpen, closed }) {
+function MissionCard({ wo, waiting, onOpen, closed, fresh }) {
   const a = wo.address;
   return <button type="button" className={'card fd-mcard' + (closed ? ' closed' : '')} onClick={() => onOpen(wo.id)}>
-    <span className="fd-who"><Avatar name={wo.contactName} size={40} /><span className="fd-who-t"><b>{wo.contactName}</b><span>{wo.ref}</span></span><Tag tone={WO_TONE[wo.status]}>{WO_LABEL[wo.status]}</Tag></span>
+    <span className="fd-who"><Avatar name={wo.contactName} size={40} /><span className="fd-who-t"><b>{wo.contactName}</b><span>{wo.ref}</span></span><Tag tone={WO_TONE[wo.status]}>{fresh ? 'Nouvelle' : WO_LABEL[wo.status]}</Tag></span>
     <span className="fd-mc-meta">
       <span>{Icon.clock}{when(wo)}</span>
       <span>{Icon.pin}{a.commune} · {a.street}</span>

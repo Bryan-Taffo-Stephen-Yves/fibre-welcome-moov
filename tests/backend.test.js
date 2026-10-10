@@ -558,3 +558,39 @@ test('Démo en direct : avis automatique sur les photos (photo floue, même phot
   assert.equal(t.api.q(herve, 'ops.techFree', { orderId: b.id }).docsOk, true);
   assert.equal(adviceOf().verdict, 'rien');
 });
+
+test('Démo en direct : la conseillère valide et transmet au technicien, rappel de préparation au départ', async () => {
+  const t = setup(1);
+  const nadia = t.as('conseiller'); const herve = t.as('planificateur');
+  const b = ok(await t.api.exec(t.token, 'shop.purchase', { offerId: 'essentiel', zone: 'cocody', name: 'Cliente Transmet', phone: '0700000005', street: 'Angré, rue 5', landmark: 'face au maquis du carrefour' }, { idemKey: 'trans1' }));
+  const c = t.api.switchUser(t.token, b.userId);
+  for (const type of ['cni_recto', 'cni_verso', 'selfie_cni']) ok(await t.api.exec(c, 'doc.upload', { orderId: b.id, type, name: type + '.jpg', size: 9e4, mime: 'image/jpeg', quality: { w: 1200, h: 900, bright: 130, sharp: 50 } }));
+  const slot = t.api.q(c, 'client.availability', { orderId: b.id }).slots.find(s => s.left > 0);
+  ok(await t.api.exec(c, 'dossier.submit', { orderId: b.id, info: {}, date: slot.date, slot: slot.slot }));
+  // Avant la validation des photos : refusé, même pour la conseillère.
+  const free0 = t.api.q(nadia, 'ops.techFree', { orderId: b.id });
+  const team0 = free0.teams.find(x => x.canTake && x.hours.some(h => h.free));
+  const early = await t.api.exec(nadia, 'dossier.validate', { orderId: b.id, teamId: team0.id, time: team0.hours.find(h => h.free).h });
+  assert.equal(early.ok, false); assert.equal(early.error.code, 'pieces');
+  // Elle valide les photos (« Suivre l'avis »), puis transmet : mission chez le technicien, client prévenu.
+  t.tick(8000); await t.api.pump(t.wsId);
+  ok(await t.api.exec(nadia, 'dossier.followAdvice', { orderId: b.id }));
+  const free = t.api.q(nadia, 'ops.techFree', { orderId: b.id });
+  assert.equal(free.docsOk, true);
+  const team = free.teams.find(x => x.canTake && x.hours.some(h => h.free));
+  const hour = team.hours.find(h => h.free).h;
+  ok(await t.api.exec(nadia, 'dossier.validate', { orderId: b.id, teamId: team.id, time: hour }));
+  const wo = t.ws().workOrders.find(w => w.orderId === b.id);
+  assert.ok(wo && wo.status === 'affectee');
+  assert.ok(t.ws().notifications.some(n => n.userId === wo.techUserId && /Nouvelle mission/.test(n.title) && n.orderId === b.id));
+  assert.ok(t.ws().notifications.some(n => n.userId === b.userId && /viendra le .* à /.test(n.title)));
+  // Un autre rôle ne peut pas transmettre à sa place : le superviseur lit seulement.
+  assert.equal((await t.api.exec(t.as('superviseur'), 'dossier.validate', { orderId: b.id, teamId: team.id, time: hour })).ok, false);
+  // Le client n'a rien coché : au départ, la notification dit quoi vérifier (chien, accès, présence, prise).
+  const tech = t.api.switchUser(t.token, wo.techUserId);
+  ok(await t.api.exec(tech, 'wo.action', { woId: wo.id, action: 'depart', key: 'k-dep-1' }));
+  const dep = t.ws().notifications.filter(n => n.userId === b.userId && /^Technicien en route/.test(n.title)).at(-1);
+  assert.ok(dep, 'notification de départ');
+  assert.match(dep.title, /arrive dans \d+ min/);
+  for (const w of ['chiens', 'gardien', 'présent', 'prise']) assert.match(dep.body, new RegExp(w));
+});

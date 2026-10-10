@@ -461,8 +461,9 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
     return { sent: true };
   }, { order: true });
 
-  // Le planificateur choisit l'équipe et l'heure : le dossier passe « prêt » et le rendez-vous est confirmé d'un coup.
-  cmd('dossier.validate', ['planificateur'], ({ ws, user, order, args }) => {
+  // La conseillère (qui vient de valider les photos) ou le planificateur choisit le technicien et l'heure : le dossier passe « prêt »,
+  // le rendez-vous est confirmé et la mission arrive d'un coup sur le téléphone du technicien.
+  cmd('dossier.validate', ['planificateur', 'conseiller'], ({ ws, user, order, args }) => {
     if (!order.dossier || !order.dossier.submittedAt) throw new AppError('etat', 'Le client n’a pas encore envoyé son dossier.');
     const appt = byId(ws.appointments, order.apptId);
     if (!appt || appt.status !== 'reserve') throw new AppError('etat', 'Aucun créneau en attente de validation sur ce dossier.');
@@ -1202,17 +1203,20 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
       const notOk = unvalidatedDocs(ws, o);
       if (!appt) return { appt: null, hours: [], teams: [], docsOk: !notOk.length, docsMissing: notOk.map(t => DOC_TYPES[t].label) };
       const hours = SLOT_HOURS[appt.slot] || [];
-      const teams = ws.teams.filter(t => t.zones.includes(o.zone)).map(t => {
+      // Toutes les équipes sont montrées : celles qui ne travaillent pas dans la commune du client sont grisées (et expliquées).
+      const teams = ws.teams.map(t => {
+        const covers = t.zones.includes(o.zone);
         const cap = ws.capacity.find(c => c.teamId === t.id && c.date === appt.date && c.slot === appt.slot);
         const own = appt.teamId === t.id && ['reserve', 'confirme'].includes(appt.status);
         const left = cap ? D.remaining(ws, cap) : 0;
         const busy = ws.appointments.filter(a => a.id !== appt.id && a.teamId === t.id && a.date === appt.date && a.slot === appt.slot && ['confirme', 'en_cours', 'realise'].includes(a.status)).map(a => ({ time: a.time || null, ref: (byId(ws.orders, a.orderId) || {}).ref }));
         const tech = byId(ws.users, t.techUserId);
-        const canTake = t.available && (own || left > 0);
-        return { id: t.id, name: t.name, techId: t.techUserId, techName: tech ? tech.name : '—', contractor: t.contractor, quality: t.quality, available: t.available, own, left, busy, canTake,
+        const canTake = covers && t.available && (own || left > 0);
+        return { id: t.id, covers, name: t.name, techId: t.techUserId, techName: tech ? tech.name : '—', contractor: t.contractor, quality: t.quality, available: t.available, own, left, busy, canTake,
           hours: hours.map(h => ({ h, free: canTake && !busy.some(b => b.time === h) })) };
       });
-      return { appt: { id: appt.id, date: appt.date, slot: appt.slot, status: appt.status, teamId: appt.teamId, time: appt.time || null }, hours, teams, docsOk: !notOk.length, docsMissing: notOk.map(t => DOC_TYPES[t].label), state: o.state };
+      teams.sort((a, b) => (b.canTake - a.canTake) || (b.covers - a.covers));
+      return { commune: o.address.commune, appt: { id: appt.id, date: appt.date, slot: appt.slot, status: appt.status, teamId: appt.teamId, time: appt.time || null }, hours, teams, docsOk: !notOk.length, docsMissing: notOk.map(t => DOC_TYPES[t].label), state: o.state };
     } },
     'ops.calls': { roles: ['conseiller', 'superviseur'], fn: ({ ws, user }) => (ws.calls || []).filter(c => (c.toId === user.id || user.role === 'superviseur') && (LIVE_CALL.includes(c.status) || ws.clock - c.startedAt < 15 * 60e3)).map(c => ({ ...c, ref: (byId(ws.orders, c.orderId) || {}).ref })).reverse() },
     'ops.summary': { roles: ['conseiller', 'superviseur'], fn: ({ ws, user, args }) => { const o = scopedOrder(ws, user, args.orderId); return summarize(ws, o); } },

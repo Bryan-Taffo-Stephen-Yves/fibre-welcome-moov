@@ -415,7 +415,7 @@ function OrderSheet({ token, orderId, role, onClose }) {
   const idx = ORDER_STATES.indexOf(o.state);
   const [ptone, plabel] = PRIO[I.risk.level] || ['neutral', I.risk.level];
   // « À faire ensuite » : sans blocage, on dit qui agit selon le dossier en ligne ou l'étape (pas « Aucune action requise »).
-  const NEXT_DOS = { a_completer: ['Le client complète son dossier', 'client'], en_retard: ['Relancer le client : délai dépassé', 'conseiller'], incomplet: ['Relancer le client : il manque des pièces', 'conseiller'], a_verifier: ['Vérifier les photos', 'conseiller'], verifie: ['Choisir le technicien et l’heure', 'planificateur'] };
+  const NEXT_DOS = { a_completer: ['Le client complète son dossier', 'client'], en_retard: ['Relancer le client : délai dépassé', 'conseiller'], incomplet: ['Relancer le client : il manque des pièces', 'conseiller'], a_verifier: ['Vérifier les photos', 'conseiller'], verifie: ['Transmettre au technicien', isC ? 'conseiller' : 'planificateur'] };
   const NEXT_STATE = { PRET_A_PLANIFIER: ['Le client choisit son créneau', 'client'], RDV_CONFIRME: ['Le technicien fait la visite', 'technicien'], INTERVENTION_EN_COURS: ['Le technicien installe la fibre', 'technicien'], INSTALLATION_TERMINEE: ['Activation de la ligne (automatique)', null], ACTIVATION_EN_ATTENTE: ['Activation de la ligne (automatique)', null] };
   const nx = I.risk.to ? [I.risk.action, I.risk.to] : (v.dossier && NEXT_DOS[v.dossier.status]) || NEXT_STATE[o.state] || [I.risk.action, null];
 
@@ -424,7 +424,7 @@ function OrderSheet({ token, orderId, role, onClose }) {
   const dos = v.dossier;
   const toRef = ref => setTimeout(() => { const el = ref.current; if (el) el.scrollIntoView({ block: 'start', behavior: 'smooth' }); }, 30);
   const acts = [];
-  if (dos && isP && appt && appt.status === 'reserve') acts.push({ k: 'plan', label: 'Choisir le technicien et l’heure', run: () => toRef(planRef) });
+  if (dos && (isP || (isC && dos.status === 'verifie')) && appt && appt.status === 'reserve') acts.push({ k: 'plan', label: isC ? 'Valider et transmettre au technicien' : 'Choisir le technicien et l’heure', run: () => toRef(planRef) });
   if (dos && isC && ['a_verifier', 'incomplet'].includes(dos.status)) acts.push({ k: 'photos', label: dos.status === 'a_verifier' ? 'Vérifier les photos' : 'Voir ce qui manque', run: () => toRef(dosRef) });
   if (!dos && isP && o.state === 'PREPARATION') acts.push({ k: 'ready', async: true, label: 'Valider la vérification technique', run: () => call(token, 'order.markReady', { orderId }) });
   if (!dos && isP && appt && appt.status === 'reserve') acts.push({ k: 'confirm', label: 'Confirmer le RDV et affecter', run: () => { setModal('confirm'); setF({ teamId: '' }); } });
@@ -493,9 +493,9 @@ function OrderSheet({ token, orderId, role, onClose }) {
       {more && rest.length > 0 && <div className="op-more">{rest.map(a => act(a, false))}</div>}
     </section>
 
-    {dos && (isP || isS) && appt && <div ref={planRef} className="op-anchor"><PlanPanel token={token} orderId={orderId} v={v} canAct={isP} adv={((staff.data || []).find(u => u.role === 'conseiller') || {}).name} /></div>}
+    {dos && (isP || isC || isS) && appt && <div ref={planRef} className="op-anchor"><PlanPanel token={token} orderId={orderId} v={v} canAct={isP || isC} byC={isC} adv={((staff.data || []).find(u => u.role === 'conseiller') || {}).name} /></div>}
     {v.mission && (['en_route', 'sur_place', 'en_cours'].includes(v.mission.status) || (I.techRatings || []).length > 0) && <LiveVisit v={v} ws={me.data && me.data.ws} ratings={I.techRatings || []} />}
-    {dos && <div ref={dosRef} className="op-anchor"><DossierSection token={token} v={v} isC={isC} ws={me.data && me.data.ws} /></div>}
+    {dos && <div ref={dosRef} className="op-anchor"><DossierSection token={token} v={v} isC={isC} ws={me.data && me.data.ws} onPlan={(isC || isP) && appt && appt.status === 'reserve' ? () => toRef(planRef) : null} /></div>}
 
     <div className="op-sgrid">
       <div className="op-col">
@@ -682,7 +682,7 @@ function AdviceCard({ token, adv, isC, closed, orderId }) {
   </div>;
 }
 
-function DossierSection({ token, v, isC, ws }) {
+function DossierSection({ token, v, isC, ws, onPlan }) {
   useNow(30000);
   const [asking, setAsking] = useState(false);
   const [text, setText] = useState('');
@@ -707,6 +707,7 @@ function DossierSection({ token, v, isC, ws }) {
         <ul>{d.missing.map((m, i) => <li key={i} className="small"><span className="op-miss-dot" aria-hidden="true" />{m.label} <span className="muted">· {m.why}</span></li>)}</ul>
       </> : <span className="small op-miss-ok">{Icon.check}{d.status === 'a_verifier' ? 'Tout est envoyé : il reste à regarder les photos.' : 'Rien ne manque.'}</span>}
     </div>
+    {d.status === 'verifie' && onPlan && <div className="op-next"><span className="op-next-ic" aria-hidden="true">{Icon.check}</span><div className="grow stack-s" style={{ gap: 2 }}><b className="small">Photos validées. Étape suivante : transmettre au technicien.</b><span className="tiny muted">Vous verrez qui est libre à l’heure demandée par le client.</span></div><Btn kind="primary" onClick={onPlan}>Valider et transmettre</Btn></div>}
     {v.internal && v.internal.advice && <AdviceCard token={token} adv={v.internal.advice} isC={isC} closed={closed} orderId={o.id} />}
     <div className="op-dphs">{docs.map(({ t, doc }) => {
       const c = docCheck(doc);
@@ -736,7 +737,7 @@ function DossierSection({ token, v, isC, ws }) {
 }
 
 // ---------- Fiche : choisir le technicien et l'heure (planificateur) ----------
-function PlanPanel({ token, orderId, v, canAct, adv }) {
+function PlanPanel({ token, orderId, v, canAct, byC, adv }) {
   const r = useQ(token, 'ops.techFree', { orderId });
   const [pick, setPick] = useState(null);
   if (r.error) return <div className="alert alert-bad small">{r.error.message}</div>;
@@ -751,10 +752,10 @@ function PlanPanel({ token, orderId, v, canAct, adv }) {
     <div className="card-title"><h2>Technicien et heure</h2><Pill tone="ok">Rendez-vous confirmé</Pill></div>
     <div className="op-item op-item-row">{own ? <Avatar name={own.techName} size={48} /> : <span className="op-ic">{Icon.tool}</span>}<div className="grow op-trunc"><b>{own ? own.techName : 'Équipe affectée'}</b><div className="tiny muted">{own ? teamLine(own) : ''}</div></div>
       <div className="op-when"><b>{fmtDate(f.appt.date)}</b><span className="small">{f.appt.time ? 'à ' + hourLabel(f.appt.time) : slotLabel(f.appt.slot)}</span></div></div>
-    {f.appt.status === 'confirme' && <span className="tiny muted">Le client et le technicien sont prévenus.{canAct ? ' Pour changer d’équipe : « Plus d’actions », Réaffecter la mission.' : ''}</span>}
+    {f.appt.status === 'confirme' && <span className="tiny muted">Le client et le technicien sont prévenus.{canAct && !byC ? ' Pour changer d’équipe : « Plus d’actions », Réaffecter la mission.' : ''}</span>}
   </section>;
   return <section className="card stack op-plan2">
-    <div className="card-title"><div className="stack-s" style={{ gap: 2 }}><h2>Choisir le technicien et l’heure</h2><span className="small muted">{canAct ? 'Touchez une heure libre dans la carte d’un technicien.' : 'Lecture seule : c’est le planificateur qui choisit.'}</span></div>
+    <div className="card-title"><div className="stack-s" style={{ gap: 2 }}><h2>Transmettre au technicien</h2><span className="small muted">{canAct ? 'Voyez qui est libre à l’heure du client, touchez une heure libre : la mission arrive sur le téléphone du technicien.' : 'Lecture seule : c’est la conseillère ou le planificateur qui choisit.'}</span></div>
       <div className="op-asked-slot">{Icon.cal}<span><span className="tiny muted">Demandé par le client</span><b className="small">{fmtDate(f.appt.date)} · {slotWord(f.appt.slot)} ({slotLabel(f.appt.slot)})</b></span></div></div>
     {f.teams.length === 0 ? <Empty>Aucune équipe ne couvre cette commune.</Empty> : <div className="op-tfs">{f.teams.map(t => {
       const sel = pick && pick.teamId === t.id;
@@ -762,14 +763,14 @@ function PlanPanel({ token, orderId, v, canAct, adv }) {
         <div className="op-item-h"><Avatar name={t.techName} size={46} dot={t.available ? 'ok' : 'bad'} />
           <div className="grow op-trunc"><b className="small">{t.techName}</b><div className="tiny muted">{teamLine(t)}</div></div>
           <span className="op-tf-q" title="Note qualité de l’équipe">{Icon.star}{nf1(t.quality)}</span></div>
-        <span className={'tiny op-tf-left' + (t.canTake ? '' : ' op-bad')}>{!t.available ? 'Indisponible ce jour-là' : t.own ? 'Place gardée pour ce client' + (t.left > 0 ? ' · ' + t.left + ' autre' + (t.left > 1 ? 's' : '') + ' libre' + (t.left > 1 ? 's' : '') : '') : t.left > 0 ? t.left + ' place' + (t.left > 1 ? 's' : '') + ' libre' + (t.left > 1 ? 's' : '') + ' ce ' + slotWord(f.appt.slot) : 'Complet ce ' + slotWord(f.appt.slot)}</span>
+        <span className={'tiny op-tf-left' + (t.canTake ? '' : ' op-bad')}>{!t.covers ? 'Ne travaille pas à ' + (f.commune || 'cette commune') : !t.available ? 'Indisponible ce jour-là' : t.own ? 'Place gardée pour ce client' + (t.left > 0 ? ' · ' + t.left + ' autre' + (t.left > 1 ? 's' : '') + ' libre' + (t.left > 1 ? 's' : '') : '') : t.left > 0 ? t.left + ' place' + (t.left > 1 ? 's' : '') + ' libre' + (t.left > 1 ? 's' : '') + ' ce ' + slotWord(f.appt.slot) : 'Complet ce ' + slotWord(f.appt.slot)}</span>
         <div className="op-hours" role="group" aria-label={'Heures de ' + t.techName}>{t.hours.map(h => { const b = t.busy.find(x => x.time === h.h); const on = sel && pick.time === h.h; return <button key={h.h} type="button" className={'op-hour' + (b ? ' is-busy' : '')} disabled={!h.free || !canAct} aria-pressed={!!on} onClick={() => setPick({ teamId: t.id, time: h.h })} title={b ? 'Déjà prise : ' + (b.ref || 'autre client') : h.free ? 'Libre' : 'Pas possible'}>
           <b>{hourLabel(h.h)}</b><small>{b ? b.ref || 'prise' : h.free ? 'libre' : '—'}</small></button>; })}</div>
       </article>;
     })}</div>}
     {canAct && <div className="op-plan-go">
-      <AsyncBtn kind="primary" disabled={!ok || !f.docsOk} onClick={async () => { const x = await call(token, 'dossier.validate', { orderId, teamId: pick.teamId, time: pick.time }); if (x.ok) { setPick(null); toast('Rendez-vous confirmé : ' + firstName(v.order.contactName) + ' et ' + firstName(team.techName) + ' sont prévenus.'); } }}>Valider le dossier et confirmer le rendez-vous</AsyncBtn>
-      <span className={'small' + (!f.docsOk ? ' op-wait' : ' muted')}>{!f.docsOk ? 'En attente de ' + nadia + ' : ' + f.docsMissing.map(x => x.toLowerCase()).join(', ') + ' à valider.' : ok ? firstName(team.techName) + ' viendra le ' + fmtDate(f.appt.date) + ' à ' + hourLabel(pick.time) + '. Le client et le technicien seront prévenus.' : 'Choisissez d’abord une heure libre.'}</span>
+      <AsyncBtn kind="primary" disabled={!ok || !f.docsOk} onClick={async () => { const x = await call(token, 'dossier.validate', { orderId, teamId: pick.teamId, time: pick.time }); if (x.ok) { setPick(null); toast('Mission transmise à ' + firstName(team.techName) + ' : ' + fmtDate(f.appt.date) + ' à ' + hourLabel(pick.time) + '. Le client est prévenu.'); } }}>{team ? 'Valider et transmettre à ' + firstName(team.techName) : 'Valider et transmettre au technicien'}</AsyncBtn>
+      <span className={'small' + (!f.docsOk ? ' op-wait' : ' muted')}>{!f.docsOk ? (byC ? 'D’abord, validez les photos : ' : 'En attente de ' + nadia + ' : ') + f.docsMissing.map(x => x.toLowerCase()).join(', ') + (byC ? '.' : ' à valider.') : ok ? firstName(team.techName) + ' recevra la mission pour le ' + fmtDate(f.appt.date) + ' à ' + hourLabel(pick.time) + '. Le client sera prévenu.' : 'Choisissez d’abord une heure libre.'}</span>
     </div>}
   </section>;
 }

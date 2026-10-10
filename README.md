@@ -21,7 +21,7 @@ Dans l’aperçu claude.ai, c’est la petite base de l’aperçu qui joue ce r�
 
 1. Sur l'ordinateur, ouvrir l'application, toucher « Partagé » pour créer une salle, puis sur l'accueil « Ouvrir sur le téléphone » : scanner le code QR (lien `?salle=CODE&vue=client#offres`).
 2. Téléphone : choisir une offre, payer (paiement simulé, code à 4 chiffres affiché à l'écran), l'application s'ouvre avec le compte à rebours de 24 h, envoyer le dossier (photos, repère, créneau). Des photos « spécimen » sont proposées : aucune vraie pièce n'est nécessaire.
-3. Ordinateur, Équipe Moov : Nadia reçoit la notification, regarde les photos (contrôle automatique simple : netteté, lumière, taille, même photo envoyée deux fois). Un « avis automatique » (simulé, pas une vraie IA) lui propose de valider ou de refuser, avec un bouton « Suivre l’avis » : c’est toujours elle qui décide. Elle peut aussi dire au client ce qui manque. Hervé choisit le technicien et l'heure puis valide.
+3. Ordinateur, Équipe Moov : Nadia reçoit la notification, regarde les photos (contrôle automatique simple : netteté, lumière, taille, même photo envoyée deux fois). Un « avis automatique » (simulé, pas une vraie IA) lui propose de valider ou de refuser, avec un bouton « Suivre l’avis » : c’est toujours elle qui décide. Elle peut aussi dire au client ce qui manque. Une fois les photos validées, le bouton « Valider et transmettre au technicien » montre les trois techniciens et leurs heures libres au créneau du client ; la mission arrive alors sur le téléphone du technicien choisi (« Nouvelle course », agenda de la semaine). Le planificateur peut aussi le faire.
 4. Téléphone : « le technicien viendra le … à … », préparation à cocher. Technicien : « Je pars », le client suit le trajet en direct (durée réglable dans Admin, Réglages), puis arrivée, installation, note du technicien.
 5. Téléphone : « Appeler » le service client ; Nadia décroche sur l'ordinateur (appel simulé, sans son).
 
@@ -74,7 +74,7 @@ Style « tableau de bord de suivi » (police Plus Jakarta Sans, cartes arrondies
 ```bash
 npm install        # installe esbuild (outil de construction)
 npm run build      # reconstruit app.js et styles.css depuis src/
-npm test           # 72 tests : recette du serveur simulé et partage entre appareils
+npm test           # 73 tests : recette du serveur simulé et partage entre appareils
 ```
 
 `node build.mjs page.html` produit en plus une page autonome (React chargé depuis cdnjs) pour un aperçu en ligne.

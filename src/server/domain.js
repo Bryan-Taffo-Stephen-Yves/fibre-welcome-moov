@@ -1,6 +1,6 @@
 // Règles métier du serveur simulé (CDC 3, 4, 5). Aucune fonction ici ne vérifie les droits :
 // c'est backend.js qui contrôle la session, le rôle et le périmètre avant d'appeler ces règles.
-import { stateRank, STATE_INFO, BLOCKER_TYPES, CHECKLIST_TECH, SLOTS, APPT_STATES, DOC_TYPES, DOSSIER_DOCS, SLOT_HOURS, TEAM_BASE, hourLabel } from './model.js';
+import { stateRank, STATE_INFO, BLOCKER_TYPES, CHECKLIST_TECH, SLOTS, APPT_STATES, DOC_TYPES, DOSSIER_DOCS, PREP_CHECKLIST, SLOT_HOURS, TEAM_BASE, hourLabel } from './model.js';
 import { estimate, fmtDate, stageOf } from './ai.js';
 import { H, DAY, startOfDay } from './seed.js';
 
@@ -287,7 +287,10 @@ export function woAction(ws, wo, action, args, actor) {
       if (min > 2) ws.jobs.push({ id: nid(ws, 'J'), kind: 'track', step: 'near', ref: wo.id, trackId: wo.track.id, due: now + (min - 2) * 60e3, generation: ws.generation, attempts: 0 });
       ws.jobs.push({ id: nid(ws, 'J'), kind: 'track', step: 'there', ref: wo.id, trackId: wo.track.id, due: now + min * 60e3, generation: ws.generation, attempts: 0 });
       emit(ws, order, 'TECH_EN_ROUTE', { actor, publicText: 'Le technicien est en route.' });
-      notify(ws, order.customerId, { title: 'Technicien en route', body: userName(ws, wo.techUserId) + ' est en route vers chez vous. Arrivée dans environ ' + min + ' min.', orderId: order.id, kind: 'rdv' }); break;
+      // Dernier rappel : ce qui n'est pas encore coché dans la liste de préparation (chien enfermé, accès, présence, prise).
+      const todo = PREP_CHECKLIST.filter(i => (!i.when || i.when === order.address.building) && !(order.prep || {})[i.id] && (i.need || i.id === 'animaux')).map(i => i.ask);
+      const remind = todo.length ? ' Vérifiez maintenant : ' + todo.join(', ') + '.' : ' Tout est prêt de votre côté, merci.';
+      notify(ws, order.customerId, { title: 'Technicien en route : arrive dans ' + min + ' min', body: userName(ws, wo.techUserId) + ' est en route vers chez vous.' + remind, orderId: order.id, kind: 'rdv' }); break;
     }
     case 'arrive': need(['affectee', 'en_route'].includes(wo.status), 'Étape impossible.'); wo.status = 'sur_place'; wo.times.arrive = now;
       if (wo.track) wo.track.arrivedAt = now;

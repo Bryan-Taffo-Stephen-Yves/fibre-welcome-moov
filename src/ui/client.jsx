@@ -199,7 +199,7 @@ function dossierNext(v, isRep) {
     case 'en_retard': return { title: 'Le délai est dépassé', icon: Icon.clock, text: 'Vous pouvez encore envoyer votre dossier. Plus tôt il arrive, plus tôt le technicien passe.' + onlyHer, wizard: !isRep, cta: 'Terminer mon dossier' };
     case 'incomplet': return { title: 'Il manque : ' + andList(missLabels(dz)), icon: Icon.alert, text: 'Ajoutez ce qui manque : Nadia vérifie dès que c’est arrivé.' + onlyHer, go: isRep ? null : 'file', sub: 'docs', cta: 'Ajouter ce qui manque' };
     case 'a_verifier': return { title: 'Nadia vérifie vos photos', icon: Icon.clock, text: 'Rien à faire pour l’instant. Vous recevrez une notification dès que c’est bon, ou s’il faut reprendre une photo.' };
-    default: return { title: 'Pièces validées', icon: Icon.check, text: 'Hervé choisit l’heure et le technicien de votre visite. Vous recevrez une notification.' };
+    default: return { title: 'Pièces validées', icon: Icon.check, text: 'Moov choisit le technicien et l’heure de votre visite. Vous recevrez une notification.' };
   }
 }
 
@@ -478,7 +478,7 @@ function DossierWizard({ token, v, me, wiz, setWiz, go }) {
     </section>}
 
     {step === 2 && <section className="card cl-book">
-      <p className="small muted">Choisissez une demi-journée. Hervé vous confirmera l’heure exacte et le technicien après la vérification de vos photos.</p>
+      <p className="small muted">Choisissez une demi-journée. Moov vous confirmera l’heure exacte et le technicien après la vérification de vos photos.</p>
       {av.data && av.data.conditional && <div className={'alert small ' + (av.data.conditional === 'bloque' ? 'alert-bad' : 'alert-warn')}>{av.data.conditional === 'bloque' ? 'Matériel indisponible : aucune date ne vous est promise pour l’instant.' : 'Matériel en tension : votre créneau sera confirmé quand l’équipement sera disponible.'} <Sim /></div>}
       {slots.length === 0 && av.data && <Empty>Aucun créneau libre pour le moment. Envoyez votre dossier plus tard ou appelez le service client.</Empty>}
       <SlotGrid slots={slots} isSel={s => wiz.date === s.date && wiz.slot === s.slot} onPick={s => setWiz({ date: s.date, slot: s.slot })} />
@@ -660,6 +660,7 @@ function Home({ token, orderId, go, me, isRep }) {
   return <>
     <Stale at={v.stale} />
     {live && <LiveTrack v={v} me={me} />}
+    {live && v.mission.status === 'en_route' && !isRep && <Prep token={token} v={v} arriving />}
     {rate && <RateTech key={v.lastVisit.woId} token={token} v={v} />}
     {dzCard}
     {dz && !o.cancelled && !finished && <DossierSteps v={v} />}
@@ -808,7 +809,7 @@ function Appointments({ token, orderId, go }) {
         </div>
         {appt.time && v.mission && <Avatar name={fullName(v.mission.techName)} size={44} />}
       </div>
-      {!underway && <p className="small muted">{appt.status === 'reserve' ? (dz ? 'Créneau demandé. Hervé confirme l’heure exacte et le technicien après la vérification de vos photos.' : 'Le créneau vous est réservé. Moov confirme l’équipe sous peu.') : appt.time ? 'Le technicien vient à cette heure. Vous recevrez un rappel la veille, puis son trajet en direct.' : 'Une équipe est affectée. Vous recevrez un rappel la veille.'}</p>}
+      {!underway && <p className="small muted">{appt.status === 'reserve' ? (dz ? 'Créneau demandé. Moov confirme l’heure exacte et le technicien après la vérification de vos photos.' : 'Le créneau vous est réservé. Moov confirme l’équipe sous peu.') : appt.time ? 'Le technicien vient à cette heure. Vous recevrez un rappel la veille, puis son trajet en direct.' : 'Une équipe est affectée. Vous recevrez un rappel la veille.'}</p>}
       {underway && <p className="small cl-note">Le technicien est déjà en route ou chez vous : pour changer ce rendez-vous, écrivez à votre conseiller dans Messages.</p>}
       {!changing && !underway && <div className="row"><Btn size="s" onClick={() => setChanging(true)}>Modifier</Btn><Btn size="s" kind="ghost" className="cl-danger-link" onClick={() => setCancelAsk(true)}>Annuler le rendez-vous</Btn></div>}
     </section>}
@@ -867,7 +868,7 @@ function HoldTimer({ hold }) {
   </span>;
 }
 
-function Prep({ token, v }) {
+function Prep({ token, v, arriving }) {
   const o = v.order;
   const items = PREP_CHECKLIST.filter(i => !i.when || i.when === o.address.building);
   // Le compteur suit les points indispensables, comme sur l'accueil (les autres sont conseillés).
@@ -877,7 +878,7 @@ function Prep({ token, v }) {
   const locked = o.cancelled || ORDER_STATES.indexOf(o.state) >= ORDER_STATES.indexOf('INSTALLATION_TERMINEE');
   return <section className="card cl-prep" data-tour="client-prep">
     <div className="card-title">
-      <div className="stack-s" style={{ gap: 0 }}><h3>Préparer la visite</h3><span className="tiny muted">{items.every(i => o.prep[i.id]) ? 'Tout est prêt, merci !' : all ? 'L’indispensable est prêt, merci !' : 'Indispensable : ' + done + ' sur ' + need.length + ' · pour éviter un second déplacement'}</span></div>
+      <div className="stack-s" style={{ gap: 0 }}><h3>{arriving ? 'Avant son arrivée : vérifiez' : 'Préparer la visite'}</h3><span className="tiny muted">{arriving && !all ? 'Cochez ce qui est prêt : le technicien le voit sur son téléphone.' : items.every(i => o.prep[i.id]) ? 'Tout est prêt, merci !' : all ? 'L’indispensable est prêt, merci !' : 'Indispensable : ' + done + ' sur ' + need.length + ' · pour éviter un second déplacement'}</span></div>
       <span role="img" aria-label={done + ' sur ' + need.length + ' indispensables cochés'}><Ring value={done} max={need.length} size={50} stroke={5} color="var(--ok)"><span className="cl-ring-s num">{done}/{need.length}</span></Ring></span>
     </div>
     <div className="cl-checks">
@@ -1358,7 +1359,7 @@ function Notifications({ token, me, onBack, onOpen }) {
       {unread > 0 && <AsyncBtn size="s" kind="ghost" onClick={() => call(token, 'notif.read', { all: true })}>Tout marquer lu</AsyncBtn>}
     </div>
     {list.length === 0 ? <div className="card cl-empty"><Empty>Aucune notification pour l’instant.</Empty></div>
-      : <section className="card cl-notifs">{list.map(n => { const who = /^Réponse de (.+)$/.exec(n.title || '') || (n.title === 'Technicien en route' && /^(.+?) est en route/.exec(n.body || '')); return <div key={n.id} className={'cl-notif' + (n.read ? '' : ' unread') + (n.orderId ? ' cl-notif-go' : '')} role={n.orderId ? 'button' : undefined} tabIndex={n.orderId ? 0 : undefined} onClick={() => { if (!n.read) call(token, 'notif.read', { id: n.id }, { silent: true }); if (n.orderId && onOpen) onOpen(n); }} onKeyDown={e => { if (e.key === 'Enter' && n.orderId && onOpen) { call(token, 'notif.read', { id: n.id }, { silent: true }); onOpen(n); } }}>
+      : <section className="card cl-notifs">{list.map(n => { const who = /^Réponse de (.+)$/.exec(n.title || '') || (/^Technicien en route/.test(n.title || '') && /^(.+?) est en route/.exec(n.body || '')); return <div key={n.id} className={'cl-notif' + (n.read ? '' : ' unread') + (n.orderId ? ' cl-notif-go' : '')} role={n.orderId ? 'button' : undefined} tabIndex={n.orderId ? 0 : undefined} onClick={() => { if (!n.read) call(token, 'notif.read', { id: n.id }, { silent: true }); if (n.orderId && onOpen) onOpen(n); }} onKeyDown={e => { if (e.key === 'Enter' && n.orderId && onOpen) { call(token, 'notif.read', { id: n.id }, { silent: true }); onOpen(n); } }}>
         {who ? <span className={'cl-notif-av' + (n.read ? '' : ' cl-ic-dot')}><Avatar name={who[1]} size={40} /></span> : <span className={'cl-ic' + (NOTIF_TONE[n.kind] ? ' cl-ic-' + NOTIF_TONE[n.kind] : '') + (n.read ? '' : ' cl-ic-dot')}>{NOTIF_ICON[n.kind] || Icon.bell}</span>}
         <div className="grow stack-s" style={{ gap: 2 }}>
           <div className="spread" style={{ flexWrap: 'nowrap', alignItems: 'baseline' }}><b className="small">{n.title}</b><span className="tiny muted cl-nowrap">{fmtDateTime(n.at)}</span></div>
