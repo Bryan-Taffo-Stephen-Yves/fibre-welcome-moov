@@ -256,15 +256,15 @@ test('Sauvegarde après réinitialisation : la restauration donne la nouvelle sa
   const { A, B, id } = await pair();
   done(await flag(A, 'saturation'));
   done(await A.api.exec(admin(A), 'backup.create', {}));
-  done(await A.api.exec(A.owner, 'demo.clock', { hours: 0 }));
-  done(await B.api.exec(B.owner, 'demo.clock', { hours: 0 }));
+  done(await A.api.exec(A.owner, 'demo.clock', { hours: 0.01 }));
+  done(await B.api.exec(B.owner, 'demo.clock', { hours: 0.01 }));
   assert.ok(B.storage.get('fw:bk:' + id + ':1'), 'B a rapatrié la sauvegarde 1');
   const r = await A.api.resetWorkspace(A.owner); A.owner = r.token;
   assert.ok(await until(() => ![...srv.docs.keys()].some(k => k.startsWith('fwws/' + id + '/bk/'))), 'anciennes sauvegardes effacées du serveur');
   assert.ok(await until(() => B.ws().generation === A.api._load(id).generation));
   done(await flag(A, 'degraded'));
   done(await A.api.exec(admin(A), 'backup.create', {}));
-  done(await A.api.exec(A.owner, 'demo.clock', { hours: 0 }));
+  done(await A.api.exec(A.owner, 'demo.clock', { hours: 0.01 }));
   assert.ok(await until(() => B.ws().backups.length === 1));
   done(await B.api.exec(B.owner, 'demo.restore', { n: 1 }));
   assert.equal(B.ws().sim.degraded, true);

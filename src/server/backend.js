@@ -1045,18 +1045,19 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
   cmd('config.set', ['admin'], ({ ws, user, args }) => {
     if (typeof args.key !== 'string' || !args.key) throw new AppError('cle', 'Choisissez le réglage à modifier.');
     const key = args.key;
-    const num = (min, max, what) => { const n = args.value == null || args.value === '' || typeof args.value === 'object' ? NaN : Number(String(args.value).replace(',', '.')); if (!Number.isFinite(n) || n < min || n > max) throw new AppError('valeur', what + ' : saisissez un nombre entre ' + min + ' et ' + max + '.'); return n; };
+    const num = (min, max, what) => { const n = args.value == null || args.value === '' || typeof args.value === 'object' ? NaN : Number(String(args.value).replace(',', '.')); if (!Number.isFinite(n) || !Number.isInteger(n) || n < min || n > max) throw new AppError('valeur', what + ' : saisissez un nombre entre ' + min + ' et ' + max + '.'); return n; };
     let shown = String(args.value), label = CONFIG_LABELS[key] || key;
     if (key.startsWith('slaH.')) { const st = key.slice(5); if (!ORDER_STATES.includes(st)) throw new AppError('cle', 'État inconnu.'); ws.config.slaH[st] = num(1, 2000, 'Délai en heures'); label = 'Délai pour « ' + STATE_INFO[st].label + ' » (heures)'; }
     else if (key.startsWith('templates.')) {
       const tk = key.slice(10);
       if (!Object.hasOwn(ws.config.templates, tk)) throw new AppError('cle', 'Modèle de message inconnu.');
       if (typeof args.value !== 'string' || !args.value.trim()) throw new AppError('valeur', 'Le texte du message ne peut pas être vide.');
-      ws.config.templates[tk] = args.value.trim().slice(0, 300); shown = ws.config.templates[tk]; label = 'Modèle de message « ' + tk.replace(/_/g, ' ') + ' »';
+      if (args.value.trim().length > 300) throw new AppError('valeur', 'Le texte est trop long (300 caractères au plus).');
+      ws.config.templates[tk] = args.value.trim(); shown = ws.config.templates[tk]; label = 'Modèle de message « ' + tk.replace(/_/g, ' ') + ' »';
     }
     else if (key === 'holidays') {
       const parts = (typeof args.value === 'string' ? args.value : args.value == null ? '' : String(args.value)).split(/[ ,;]+/).filter(Boolean);
-      const bad = parts.filter(x => !/^\d{4}-\d{2}-\d{2}$/.test(x) || Number.isNaN(Date.parse(x + 'T00:00:00Z')));
+      const bad = parts.filter(x => !/^\d{4}-\d{2}-\d{2}$/.test(x) || Number.isNaN(Date.parse(x + 'T00:00:00Z')) || new Date(x + 'T00:00:00Z').toISOString().slice(0, 10) !== x);
       if (bad.length) throw new AppError('valeur', 'Date non reconnue : ' + bad.join(', ') + '. Écrivez-la ainsi : 2026-12-25.');
       ws.config.holidays = [...new Set(parts)]; shown = ws.config.holidays.join(', ') || 'aucun';
     }

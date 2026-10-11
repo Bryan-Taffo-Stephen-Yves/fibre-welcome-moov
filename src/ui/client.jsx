@@ -1213,8 +1213,8 @@ function FileTab({ token, orderId, isRep, initial }) {
       {[['timeline', 'Historique'], ['docs', 'Pièces', need], ['addr', 'Adresse'], ['report', 'Compte rendu']].map(([k, l, n]) => <button type="button" key={k} role="tab" aria-selected={sub === k} onClick={() => setSub(k)}>{l}{n > 0 && <span className="count">{n}</span>}</button>)}
     </div>
     {sub === 'timeline' && <Timeline v={v} />}
-    {sub === 'docs' && <Docs token={token} v={v} readOnly={isRep} />}
-    {sub === 'addr' && <Address token={token} v={v} readOnly={isRep} />}
+    {sub === 'docs' && <Docs token={token} v={v} readOnly={isRep || v.order.cancelled} />}
+    {sub === 'addr' && <Address token={token} v={v} readOnly={isRep || v.order.cancelled} />}
     {sub === 'report' && <Report token={token} v={v} />}
   </>;
 }
@@ -1257,7 +1257,7 @@ export async function sendDoc(token, orderId, type, f, pre, opts = {}) {
   if (pic) { try { img = await putImage(api.session(token).wsId, pic.full); } catch { img = null; } }
   const r = await call(token, 'doc.upload', { orderId, type, name: f.name, size: pic ? pic.bytes : f.size, mime: pic ? 'image/jpeg' : f.type, thumb: pic ? pic.thumb : null, img, quality: pic ? pic.quality : null });
   if (r.ok && r.data && r.data.check) checkMem.set(r.data.id, r.data.check);
-  if (r.ok && !opts.quiet) toast(opts.draft ? 'Pièce enregistrée (' + DOC_TYPES[type].label.toLowerCase() + ') : elle partira avec votre dossier.' : 'Pièce envoyée (' + DOC_TYPES[type].label.toLowerCase() + ') : votre conseiller la reçoit tout de suite.');
+  if (r.ok && !opts.quiet) toast(opts.draft ? 'Pièce enregistrée : ' + DOC_TYPES[type].label.toLowerCase() + '. Elle partira avec votre dossier.' : 'Pièce envoyée : ' + DOC_TYPES[type].label.toLowerCase() + '. Votre conseiller la reçoit tout de suite.');
   return r.ok;
 }
 
@@ -1337,7 +1337,7 @@ function Address({ token, v, readOnly }) {
         const r = await call(token, 'order.updateAddress', { orderId: v.order.id, ...f, ...(gps ? (a.lat != null ? {} : { lat: 5.35 + Math.random() * 0.05, lng: -3.98 + Math.random() * 0.05 }) : { gps: false }) });
         if (r.ok) toast(r.data && r.data.unchanged ? 'Rien n’a changé.' : 'Adresse enregistrée : le conseiller et le technicien la voient.');
       }}>Enregistrer</AsyncBtn>}
-      {readOnly && <span className="tiny muted">Lecture seule : seule la cliente peut modifier l’adresse.</span>}
+      {readOnly && <span className="tiny muted">{v.order.cancelled ? 'La commande est annulée : l’adresse ne peut plus être modifiée.' : 'Lecture seule : seule la cliente peut modifier l’adresse.'}</span>}
     </section>
   </div>;
 }

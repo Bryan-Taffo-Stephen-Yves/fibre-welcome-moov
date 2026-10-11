@@ -547,6 +547,7 @@ export function finishSignoff(ws, order, wo, mode, actor, checks) {
   // Un souci encore ouvert sur cette visite est clos : la visite est validée.
   for (const t of ws.tickets) if (t.woId === wo.id && t.type === 'visite' && t.status === 'ouvert') { t.status = 'traite'; t.closedBy = actor && actor.name ? actor.name : 'Système'; t.note = 'Visite validée'; }
   const first = userName(ws, wo.techUserId).split(' ')[0];
+  if (mode === 'regle') notify(ws, order.customerId, { title: 'Votre souci est réglé', body: 'L’équipe Moov a réglé le souci signalé : la visite est validée. Merci de votre patience.', orderId: order.id, kind: 'succes' });
   if (say[0]) emit(ws, order, 'INSTALLATION_VALIDEE', { actor, payload: { mode }, publicText: say[0] });
   if (say[1]) notify(ws, wo.techUserId, { title: 'Visite validée', body: order.ref + ' : ' + say[1] + ' Vous êtes de nouveau disponible.', orderId: order.id, kind: 'succes' });
   for (const role of ['conseiller', 'planificateur', 'superviseur']) notifyRole(ws, role, order, { title: first + ' est de nouveau disponible', body: order.ref + ' (' + order.contactName + ') : visite ' + say[2] + '. ' + first + ' peut recevoir une nouvelle mission.', kind: 'info' });
