@@ -4,6 +4,7 @@ import { useQ, call, toast } from './platform.js';
 import { Btn, AsyncBtn, Tag, Sim, Explain, Field, Modal, Panel, Empty, Avatar, AvatarStack, Say, Ring, Stacked, Icon, firstName, money, fmtDate, fmtDateTime, fmtAgo, STATE_INFO, ORDER_STATES, ROLES } from './kit.jsx';
 import { ZONES } from '../server/model.js';
 import { Trips } from './trips.jsx';
+import { Impact } from './impact.jsx';
 const React = window.React;
 const { useState, useEffect, useRef } = React;
 
@@ -69,6 +70,7 @@ function More({ shown, total, onMore, dark }) {
 // ---------- Console ----------
 const SECTIONS = [
   ['trips', 'Trajets', Icon.compass],
+  ['impact', 'Impact', Icon.grid],
   ['users', 'Comptes', Icon.users],
   ['config', 'Réglages', Icon.settings],
   ['integrations', 'Intégrations', Icon.plug],
@@ -104,7 +106,7 @@ export function AdminConsole({ token }) {
       {ro && <span className="ad-ro" title="L’auditeur peut tout lire mais ne peut rien modifier. C’est le serveur qui le vérifie.">{Icon.lock}Lecture seule</span>}
     </div>
     <div className="ad-body" role="tabpanel" aria-label={(SECTIONS.find(s => s[0] === sec) || [])[1]}>
-      {sec === 'trips' ? <Trips token={token} /> : sec === 'users' ? <Users {...P} /> : sec === 'config' ? <Config {...P} /> : sec === 'integrations' ? <Integrations {...P} /> : sec === 'audit' ? <Audit {...P} /> : sec === 'models' ? <Models {...P} /> : sec === 'kb' ? <Kb {...P} /> : sec === 'health' ? <Health {...P} /> : <Payments {...P} />}
+      {sec === 'trips' ? <Trips token={token} /> : sec === 'impact' ? <Impact token={token} /> : sec === 'users' ? <Users {...P} /> : sec === 'config' ? <Config {...P} /> : sec === 'integrations' ? <Integrations {...P} /> : sec === 'audit' ? <Audit {...P} /> : sec === 'models' ? <Models {...P} /> : sec === 'kb' ? <Kb {...P} /> : sec === 'health' ? <Health {...P} /> : <Payments {...P} />}
     </div>
   </div>;
 }

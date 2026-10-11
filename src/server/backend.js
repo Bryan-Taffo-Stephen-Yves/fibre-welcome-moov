@@ -8,6 +8,7 @@ import { STATE_INFO, BLOCKER_TYPES, ROLES, DOC_TYPES, REPORT_TYPES, APPT_STATES,
 import { estimate, risk, assistantAnswer, summarize, evaluate, fmtDate, fmtDateTime } from './ai.js';
 import { SCENARIOS, runScenarioSetup } from './scenarios.js';
 import { techAnswer } from './techhelp.js';
+import { smsReply, ussdScreen, SHORT_CODE } from './lowtech.js';
 
 const READONLY = ['auditeur'];
 const STAFF_ALL = ['conseiller', 'planificateur', 'technicien', 'superviseur', 'admin', 'auditeur'];
@@ -72,6 +73,7 @@ function trimWorkspace(ws, now) {
   ws.outbox = keepLast(ws.outbox, 300, o => pendingSend.has(o.id));
   ws.alerts = keepLast(ws.alerts, 200, a => !a.ack);
   if (ws.assistantLog) ws.assistantLog = keepLast(ws.assistantLog, 300);
+  if (ws.ussdLog) ws.ussdLog = keepLast(ws.ussdLog, 100);
   if (ws.techRatings) ws.techRatings = keepLast(ws.techRatings, 300);
   if (ws.privacy) ws.privacy = keepLast(ws.privacy, 200);
   ws.documents = keepLast(ws.documents, 700, d => d.status !== 'remplace');
@@ -364,6 +366,30 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
     audit(ws, user, 'ia.assistant', order ? order.ref : '—', (ans.trace.refused ? 'REFUS : ' : (ans.trace.intent || 'abstention') + ' : ') + q.slice(0, 80), { ai: true });
     return ans;
   }, { order: true, scope: 'messages' });
+  // Suivi sans smartphone : SMS à mots-clés et code USSD (simulés). Même dossier que l'application, réservé au client lui-même.
+  const lowCallback = (ws, user) => (order, why) => {
+    if (ws.callbacks.some(c => c.orderId === order.id && c.status === 'demande')) return;
+    C['callback.request'].fn({ ws, user, order, args: { reason: why, availability: 'Dès que possible' } });
+  };
+  cmd('sms.inbound', ['client'], ({ ws, user, args }) => {
+    const text = txt(args.text, 160);
+    if (!text) throw new AppError('valeur', 'Écrivez votre message (160 caractères au plus).');
+    const rep = smsReply(ws, user, canSee, text, { callback: lowCallback(ws, user), setSms: v => { user.prefs.sms = v; } });
+    const base = { userId: user.id, channel: 'sms', at: ws.clock, attempts: 1, orderId: rep.order ? rep.order.id : null };
+    ws.outbox.push({ id: 'SMS' + (++ws.seq), ...base, to: SHORT_CODE, direction: 'entrant', text, status: 'reçu', provider: 'numéro court ' + SHORT_CODE + ' (démo)' });
+    ws.outbox.push({ id: 'SMS' + (++ws.seq), ...base, to: user.phone, direction: 'sortant', text: rep.text, status: 'livré (accusé simulé)', provider: 'numéro court ' + SHORT_CODE + ' (démo)' });
+    audit(ws, user, 'sms.inbound', rep.order ? rep.order.ref : '', 'SMS « ' + text.slice(0, 40) + ' » : ' + rep.kind);
+    return { reply: rep.text, kind: rep.kind, at: ws.clock };
+  });
+  cmd('ussd.step', ['client'], ({ ws, user, args }) => {
+    const path = Array.isArray(args.path) ? args.path.map(x => txt(String(x), 3)).slice(0, 4) : [];
+    const scr = ussdScreen(ws, user, canSee, { code: args.code == null ? null : txt(String(args.code), 12), path }, { callback: lowCallback(ws, user) });
+    if (scr.action) {
+      (ws.ussdLog ||= []).push({ id: 'US' + (++ws.seq), userId: user.id, orderId: scr.order.id, action: scr.action, at: ws.clock });
+      audit(ws, user, 'ussd.step', scr.order.ref, 'USSD : ' + scr.action);
+    }
+    return { text: scr.text, end: !!scr.end };
+  }, { noAudit: true });
   cmd('assistant.handoff', ['client', 'representant'], ({ ws, user, order, args }) => {
     const t = { id: 'TK' + (++ws.seq), orderId: order.id, type: 'question_assistant', text: txt(args.question, 500), status: 'ouvert', ownerRole: 'conseiller', at: ws.clock, by: user.name };
     ws.tickets.push(t);
@@ -1616,6 +1642,19 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
         documents: ['terminee', 'annulee', 'echec'].includes(w.status) ? [] : ws.documents.filter(d => d.orderId === o.id && TECH_DOCS.includes(d.type) && d.status !== 'remplace').map(d => ({ id: d.id, type: d.type, name: d.name, status: d.status, at: d.at, thumb: d.thumb, img: d.img })) };
     }).sort((x, y) => ((x.appt && x.appt.date) || 0) - ((y.appt && y.appt.date) || 0)) },
     // Suivi des trajets et des visites pour l'administrateur général et le superviseur : qui est où, depuis quand, pendant combien de temps.
+    // Impact : ce qui est réellement mesuré dans l'espace de test (réponses sans conseiller, contacts avec un conseiller).
+    'admin.impact': { roles: ['admin', 'superviseur', 'auditeur'], fn: ({ ws }) => {
+      const assistant = (ws.assistantLog || []).filter(a => a.intent && !a.refused).length;
+      const sms = ws.outbox.filter(o => o.direction === 'entrant').length;
+      const ussd = (ws.ussdLog || []).length;
+      const messages = ws.messages.filter(m => m.from === 'client').length;
+      const calls = (ws.calls || []).length, callbacks = ws.callbacks.length;
+      const handoffs = ws.tickets.filter(t => t.type === 'question_assistant').length;
+      const clients = new Set(ws.users.filter(u => ['client', 'representant'].includes(u.role)).map(u => u.id));
+      const proactive = ws.notifications.filter(n => clients.has(n.userId)).length;
+      const done = ws.appointments.filter(a => a.status === 'realise').length, missed = ws.appointments.filter(a => a.status === 'non_honore').length;
+      return { orders: ws.orders.length, self: { assistant, sms, ussd, total: assistant + sms + ussd }, human: { messages, calls, callbacks, handoffs, total: messages + calls + callbacks }, proactive, appts: { done, missed } };
+    } },
     'admin.trips': { roles: ['admin', 'superviseur', 'planificateur', 'auditeur'], fn: ({ ws, user }) => {
       const mins = ms => (ms == null ? null : Math.round(ms / 6e4 * 10) / 10);
       const mine = o => user.role === 'planificateur' ? (user.zones || []).includes(o.zone) : true;

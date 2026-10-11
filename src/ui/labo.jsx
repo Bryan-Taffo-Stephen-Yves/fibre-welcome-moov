@@ -143,7 +143,7 @@ export function Home({ go, startTour, hasWs, createWs, users = [], pick, owner, 
           <span className="lb-player-body">
             <span className="lb-player-role">Bac à sable</span>
             <b className="lb-player-name">Laboratoire</b>
-            <span className="lb-player-line">17 scénarios guidés et des pannes à provoquer</span>
+            <span className="lb-player-line">18 scénarios guidés et des pannes à provoquer</span>
           </span>
           <span className="arrow-btn lb-player-go" aria-hidden="true">{Icon.arrow}</span>
         </button>

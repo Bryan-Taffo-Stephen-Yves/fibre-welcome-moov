@@ -290,7 +290,7 @@ test('R-22 / R-23 : évaluation reproductible avec la même graine', () => {
 
 test('Tous les scénarios se préparent sans erreur', async () => {
   const t = setup(99);
-  for (const code of ['SC-01', 'SC-02', 'SC-03', 'SC-04', 'SC-05', 'SC-06', 'SC-07', 'SC-08', 'SC-09', 'SC-10', 'SC-11', 'SC-12', 'SC-13', 'SC-14', 'SC-15', 'SC-16', 'SC-17']) {
+  for (const code of ['SC-01', 'SC-02', 'SC-03', 'SC-04', 'SC-05', 'SC-06', 'SC-07', 'SC-08', 'SC-09', 'SC-10', 'SC-11', 'SC-12', 'SC-13', 'SC-14', 'SC-15', 'SC-16', 'SC-17', 'SC-18']) {
     const r = await t.api.exec(t.token, 'demo.scenario', { code });
     assert.equal(r.ok, true, code + ' : ' + (r.error && r.error.message));
   }
@@ -1273,4 +1273,67 @@ test('Rapprochement manuel : paiement arrivé entre-temps, demandeuse prévenue,
   const conf = await t.api.exec(plan, 'appt.confirm', { orderId: oid });
   assert.equal(conf.ok, false); assert.equal(conf.error.code, 'equipe');
   assert.ok(!t.api.q(awa, 'client.availability', { orderId: oid }).slots.some(s => s.teams.includes(team.id)));
+});
+
+test('SC-18 : suivi par SMS et USSD, réservé au client, sans fuite ni date inventée', async () => {
+  const t = setup(7);
+  const run = ok(await t.api.exec(t.token, 'demo.scenario', { code: 'SC-18' }));
+  const awa = t.as('client');
+  const mine = t.api.q(awa, 'client.orders')[0];
+  const sms = async text => ok(await t.api.exec(awa, 'sms.inbound', { text }));
+  // Un mot-clé donne l'étape du dossier, en un seul SMS.
+  const r1 = await sms('suivi');
+  assert.ok(r1.reply.length <= 160, 'un SMS tient en 160 caractères');
+  assert.match(r1.reply, /FW-\d{4}-\d+/);
+  // Plusieurs dossiers sans référence : réponse pour le plus récent, avec un rappel pour viser l'autre.
+  assert.match(r1.reply, /Autre dossier/);
+  const unknown = await sms('BONJOUR');
+  assert.equal(unknown.kind, 'inconnu');
+  assert.equal((await sms('SUIVI FW-2026-999999')).kind, 'ref', 'une référence inconnue ne révèle rien');
+  assert.equal((await sms('aide')).kind, 'aide');
+  // Les SMS entrants et les réponses sont dans la boîte d'envoi du client seulement.
+  const box = t.api.q(awa, 'outbox');
+  assert.ok(box.some(o => o.direction === 'entrant') && box.some(o => o.direction === 'sortant'));
+  assert.equal(t.api.q(t.api.switchUser(t.token, 'U2'), 'outbox').some(o => o.direction === 'entrant'), false);
+  // USSD : mauvais code, menu, délai, rappel (une seule demande ouverte même si on le refait).
+  assert.equal(ok(await t.api.exec(awa, 'ussd.step', { code: '*999#', path: [] })).end, true);
+  const pick = ok(await t.api.exec(awa, 'ussd.step', { code: '*123#', path: [] }));
+  assert.match(pick.text, /1 FW-/, 'plusieurs dossiers : on choisit d’abord');
+  const menu = ok(await t.api.exec(awa, 'ussd.step', { code: '*123#', path: ['1'] }));
+  assert.match(menu.text, /Être rappelé/);
+  assert.match(ok(await t.api.exec(awa, 'ussd.step', { code: '*123#', path: ['1', '3'] })).text, /délai|estim|paiement/i);
+  ok(await t.api.exec(awa, 'ussd.step', { code: '*123#', path: ['1', '4'] }));
+  ok(await t.api.exec(awa, 'ussd.step', { code: '*123#', path: ['1', '4'] }));
+  const cbs = t.ws().callbacks.filter(c => /USSD/.test(c.reason));
+  assert.equal(cbs.length, 1);
+  assert.equal(ok(await t.api.exec(awa, 'ussd.step', { code: '*123#', path: ['1', '9'] })).end, false, 'choix invalide : on reste dans le menu');
+  // Seul le client utilise ce canal.
+  const adv = t.as('conseiller');
+  const refused = await t.api.exec(adv, 'ussd.step', { code: '*123#', path: [] });
+  assert.equal(refused.ok, false);
+  // STOP coupe les SMS de suivi, REPRENDRE les rétablit.
+  await sms('STOP'); assert.equal(t.ws().users.find(u => u.id === 'U1').prefs.sms, false);
+  await sms('REPRENDRE'); assert.equal(t.ws().users.find(u => u.id === 'U1').prefs.sms, true);
+  // Le scénario coche les trois premières étapes à partir de l'état réel.
+  const sc = t.api.q(t.token, 'labo.state').scenarios.find(x => x.code === 'SC-18');
+  assert.deepEqual(sc.steps.map(s => !!s.done), [true, true, true, false]);
+  assert.ok(mine && run);
+});
+
+test('Impact : les chiffres viennent de l’état réel et restent réservés à l’administration', async () => {
+  const t = setup(11);
+  const awa = t.as('client');
+  const before = t.api.q(t.as('admin'), 'admin.impact');
+  assert.equal(before.self.total, 0);
+  ok(await t.api.exec(awa, 'sms.inbound', { text: 'SUIVI' }));
+  ok(await t.api.exec(awa, 'assistant.ask', { orderId: t.api.q(awa, 'client.orders')[0].id, question: 'Où en est mon dossier ?' }));
+  const after = t.api.q(t.as('admin'), 'admin.impact');
+  assert.equal(after.self.sms, 1);
+  assert.equal(after.self.assistant, 1);
+  assert.equal(after.self.total, 2);
+  assert.ok(after.orders > 5);
+  assert.throws(() => t.api.q(awa, 'admin.impact'), /non autoris/i);
+  assert.throws(() => t.api.q(t.as('technicien'), 'admin.impact'), /non autoris/i);
+  assert.ok(t.api.q(t.as('superviseur'), 'admin.impact'));
+  assert.ok(t.api.q(t.as('auditeur'), 'admin.impact'));
 });

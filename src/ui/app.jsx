@@ -403,7 +403,7 @@ const TOUR = [
   { route: 'terrain', sel: 'field-network', title: 'Brice, même sans réseau', text: 'Ce bouton coupe le réseau de cet onglet. Les actions de Brice restent sur son téléphone et partent une seule fois au retour du réseau.' },
   { route: 'admin', sel: 'admin-audit-panel', click: 'admin-audit', pick: { admin: 'admin' }, title: 'Tout est tracé', text: 'Le journal garde chaque action, chaque accès refusé et chaque décision de l’IA. L’auditrice peut le lire sans rien modifier.' },
   { route: 'salle', sel: 'room', title: 'Plusieurs rôles à la fois', text: 'Ici, la cliente, le planificateur et le technicien sont côte à côte. Agissez dans un volet : les autres se mettent à jour.' },
-  { route: 'labo', sel: 'labo-scenarios', title: 'À vous de jouer', text: 'Lancez « SC-01 Installation nominale » : le guide vous dit quoi faire et coche chaque étape quand elle est vraiment faite. Il y a 17 scénarios.' },
+  { route: 'labo', sel: 'labo-scenarios', title: 'À vous de jouer', text: 'Lancez « SC-01 Installation nominale » : le guide vous dit quoi faire et coche chaque étape quand elle est vraiment faite. Il y a 18 scénarios.' },
   { route: 'labo', sel: 'labo-sim', title: 'Provoquer des pannes', text: 'Le simulateur envoie des paiements, les double, coupe un système Moov ou fait échouer une activation, pour voir comment l’application réagit.' },
 ];
 

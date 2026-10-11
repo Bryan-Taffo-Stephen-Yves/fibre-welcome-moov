@@ -4,6 +4,7 @@ import { useQ, call, api, toast, liveClock, useNow } from './platform.js';
 import { Btn, AsyncBtn, Sim, Explain, Field, Modal, StateTag, Progress, Empty, Icon, Picture, NotifBell, NotifPopups, Avatar, AvatarStack, Sparkline, Bars, Ring, Stacked, AbidjanMap, TrackMap, trackInfo, hourLabel, deName, firstName, fmtDate, fmtDateTime, slotLabel, money, STATE_INFO, ORDER_STATES, BLOCKER_TYPES, APPT_STATES, ROLES } from './kit.jsx';
 import { ZONES, DOC_TYPES, PAYMENT_STATES, REPORT_TYPES, CHECKLIST_TECH, DOSSIER_DOCS } from '../server/model.js';
 import { Trips } from './trips.jsx';
+import { Impact } from './impact.jsx';
 const React = window.React;
 const { useState, useRef, useEffect } = React;
 const DAY = 864e5;
@@ -220,7 +221,7 @@ export function OpsConsole({ token }) {
   if (me.error) return <div className="alert alert-bad">{me.error.message}</div>;
   const role = me.data.user.role;
   const sections = role === 'planificateur' ? [['queues', 'Files de travail', Icon.list], ['planning', 'Planning', Icon.cal], ['trips', 'Trajets', Icon.compass], ['teams', 'Équipes et ressources', Icon.users], ['search', 'Dossiers', Icon.search]]
-    : role === 'superviseur' ? [['dash', 'Tableau de bord', Icon.grid], ['queues', 'Files et escalades', Icon.list], ['approvals', 'Validations', Icon.shield], ['planning', 'Planning', Icon.cal], ['trips', 'Trajets', Icon.compass], ['search', 'Dossiers', Icon.search]]
+    : role === 'superviseur' ? [['dash', 'Tableau de bord', Icon.grid], ['impact', 'Impact', Icon.chart || Icon.grid], ['queues', 'Files et escalades', Icon.list], ['approvals', 'Validations', Icon.shield], ['planning', 'Planning', Icon.cal], ['trips', 'Trajets', Icon.compass], ['search', 'Dossiers', Icon.search]]
     : [['queues', 'Files de travail', Icon.list], ['search', 'Dossiers', Icon.search]];
   const s = sections.some(x => x[0] === sec) ? sec : sections[0][0];
   const q = qs.data;
@@ -263,6 +264,7 @@ export function OpsConsole({ token }) {
       : s === 'queues' ? <Queues key={'q' + nav.n} token={token} role={role} open={open} initialTab={nav.tab} initialSide={nav.side} />
       : s === 'search' ? <Search key={preset ? preset.zone : 'all'} token={token} open={open} initial={preset} zones={zones} />
       : s === 'planning' ? <Planning token={token} role={role} open={open} />
+      : s === 'impact' ? <Impact token={token} />
       : s === 'trips' ? <Trips token={token} />
       : s === 'teams' ? <Teams token={token} />
       : s === 'dash' ? <Dashboard token={token} open={open} goSearch={goSearch} goApprovals={() => go('approvals')} />

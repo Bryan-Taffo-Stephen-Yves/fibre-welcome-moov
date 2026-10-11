@@ -148,6 +148,7 @@ export const LANDMARKS = ['en face de la pharmacie', 'derrière l’école prima
 
 // Libellés lisibles du journal d'audit : le filtre de l'administrateur cherche dans ces mots-là (ceux qu'il voit à l'écran).
 export const AUDIT_LABELS = {
+  'sms.inbound': 'SMS reçu du client', 'ussd.step': 'Demande par USSD',
   'acces.refuse': 'Accès refusé', 'activation.relancer': 'Activation relancée', 'annulation.instruire': 'Annulation instruite', 'blocage.affecter': 'Blocage confié', 'blocage.ouvrir': 'Blocage ouvert', 'blocage.resoudre': 'Blocage levé',
   'capacite.modifier': 'Capacité modifiée', 'compte.activer': 'Compte réactivé', 'compte.desactiver': 'Compte coupé', 'compte.perimetre': 'Zones modifiées', 'config.modifier': 'Réglage modifié', 'continuite.mode_degrade': 'Mode dégradé',
   'dossier.cloturer': 'Dossier clôturé', 'dossier.consulter': 'Fiche consultée', 'dossier.avis': 'Avis automatique suivi', 'doublon.rapprocher': 'Doublon rapproché', 'doublon.separer': 'Doublon séparé', 'equipe.disponible': 'Équipe disponible', 'equipe.indisponible': 'Équipe indisponible',

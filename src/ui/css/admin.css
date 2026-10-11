@@ -397,3 +397,18 @@
   .tr-tech { flex-wrap: wrap; }
   .tr-tech-end { flex-direction: row; flex-wrap: wrap; align-items: center; max-width: none; width: 100%; text-align: left; }
 }
+
+/* Impact : mesures du test et estimation du gain */
+.im-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; }
+.im-form { align-items: end; display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 14px; }
+.im-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.im-in { display: flex; align-items: center; gap: 8px; }
+.im-in .input { min-width: 0; flex: 1; }
+.im-bars { display: flex; flex-direction: column; gap: 10px; }
+.im-row { display: grid; grid-template-columns: 48px 1fr 70px; align-items: center; gap: 10px; }
+.im-track { background: var(--surface-2); border-radius: 999px; height: 16px; overflow: hidden; }
+.im-bar { display: block; height: 100%; border-radius: 999px; transition: width .25s ease; }
+.im-bar-a { background: var(--ink-3); }
+.im-bar-b { background: var(--accent); }
+.im-row .num2 { text-align: right; font-variant-numeric: tabular-nums; }
+@media (prefers-reduced-motion: reduce) { .im-bar { transition: none; } }
