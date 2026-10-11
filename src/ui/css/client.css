@@ -167,7 +167,7 @@ select.input.cl-pick { border: 0; background-color: var(--surface); box-shadow: 
 .cl-check { position: relative; display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: 14px; background: var(--surface-2); cursor: pointer; min-height: 50px; font-size: 13.5px; line-height: 1.35; }
 .cl-check:hover { background: var(--surface-3); }
 .cl-check input { position: absolute; opacity: 0; width: 1px; height: 1px; margin: 0; }
-.cl-box { width: 24px; height: 24px; border-radius: 50%; border: 2px solid var(--ink-3); display: grid; place-items: center; flex: none; color: transparent; background: var(--surface); }
+.cl-box { width: 28px; height: 28px; border-radius: 8px; border: 2.5px solid var(--ink-3); display: grid; place-items: center; flex: none; color: transparent; background: var(--surface); }
 .cl-box svg { width: 14px; height: 14px; }
 .cl-check.on .cl-box { background: var(--ok); border-color: var(--ok); color: #fff; }
 .cl-check.on .cl-check-l { color: var(--ink-2); }
@@ -178,7 +178,13 @@ select.input.cl-pick { border: 0; background-color: var(--surface); box-shadow: 
 /* ---------- Messages ---------- */
 .pills.cl-tabs { width: 100%; flex: none; }
 .pills.cl-tabs button { flex: 1 1 auto; justify-content: center; padding: 8px 8px; font-size: 13px; min-height: 36px; gap: 5px; }
+@media (max-width: 400px) { .pills.cl-tabs { padding: 4px; gap: 2px; } .pills.cl-tabs button { padding: 8px 5px; font-size: 12.5px; gap: 4px; } .pills.cl-tabs button .count { padding: 1px 6px; } }
 .cl-chat { display: flex; flex-direction: column; gap: 12px; }
+/* Un mot ou un lien très long (sans espace) retourne à la ligne au lieu de sortir de l'écran. */
+.cl-chat { min-width: 0; }
+.cl-chat .bubble, .cl-sys { min-width: 0; overflow-wrap: anywhere; word-break: break-word; }
+.cl-me { min-width: 0; }
+.cl-msg > .cl-msg-in, .cl-msg > .bubble { min-width: 0; }
 .cl-bot-head { display: flex; align-items: center; gap: 12px; background: var(--surface); border-radius: 20px; padding: 12px 14px; box-shadow: var(--shadow); }
 .cl-bot { border-radius: 50%; background: var(--accent); color: #fff; display: grid; place-items: center; flex: none; }
 .cl-bot svg { width: 58%; height: 58%; }
@@ -571,3 +577,6 @@ select.input.cl-pick { border: 0; background-color: var(--surface); box-shadow: 
 .cl-thanks-ic { width: 40px; height: 40px; border-radius: 50%; background: var(--ok); color: #fff; display: grid; place-items: center; flex: none; }
 .cl-thanks-ic svg { width: 22px; height: 22px; }
 @media (prefers-reduced-motion: reduce) { .cl-sign { scroll-behavior: auto; } }
+
+/* Barrière d'erreur de l'espace client */
+.cl-crash { display: flex; flex-direction: column; gap: 12px; margin: 16px 0; }

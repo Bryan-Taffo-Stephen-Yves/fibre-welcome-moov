@@ -79,7 +79,7 @@ Style « tableau de bord de suivi » (police Plus Jakarta Sans, cartes arrondies
 ```bash
 npm install        # installe esbuild (outil de construction)
 npm run build      # reconstruit app.js et styles.css depuis src/
-npm test           # 76 tests : recette du serveur simulé et partage entre appareils
+npm test           # 93 tests : recette du serveur simulé et partage entre appareils
 ```
 
 `node build.mjs page.html` produit en plus une page autonome (React chargé depuis cdnjs) pour un aperçu en ligne.

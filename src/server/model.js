@@ -145,3 +145,31 @@ export const STREETS = {
   bingerville: ['Cité Feh Kessé, lot 42', 'Route de Bingerville, Akouai-Santai', 'Quartier Résidentiel, rue 9'],
 };
 export const LANDMARKS = ['en face de la pharmacie', 'derrière l’école primaire', 'à côté de la station Total', 'portail bleu après le maquis', 'près de la mosquée'];
+
+// Libellés lisibles du journal d'audit : le filtre de l'administrateur cherche dans ces mots-là (ceux qu'il voit à l'écran).
+export const AUDIT_LABELS = {
+  'acces.refuse': 'Accès refusé', 'activation.relancer': 'Activation relancée', 'annulation.instruire': 'Annulation instruite', 'blocage.affecter': 'Blocage confié', 'blocage.ouvrir': 'Blocage ouvert', 'blocage.resoudre': 'Blocage levé',
+  'capacite.modifier': 'Capacité modifiée', 'compte.activer': 'Compte réactivé', 'compte.desactiver': 'Compte coupé', 'compte.perimetre': 'Zones modifiées', 'config.modifier': 'Réglage modifié', 'continuite.mode_degrade': 'Mode dégradé',
+  'dossier.cloturer': 'Dossier clôturé', 'dossier.consulter': 'Fiche consultée', 'dossier.avis': 'Avis automatique suivi', 'doublon.rapprocher': 'Doublon rapproché', 'doublon.separer': 'Doublon séparé', 'equipe.disponible': 'Équipe disponible', 'equipe.indisponible': 'Équipe indisponible',
+  escalade: 'Escalade', 'espace.creer': 'Espace créé', 'espace.reinitialiser': 'Espace réinitialisé', 'export.dossiers': 'Export des dossiers', 'ia.assistant': 'Question à l’assistant', 'ia.modele.activer': 'Modèle activé', 'ia.modele.desactiver': 'Estimations coupées', 'ia.resume.utilise': 'Résumé automatique utilisé',
+  'integration.rejet': 'Événement rejeté', 'integration.rejouer': 'Échange rejoué', 'invitation.creer': 'Invitation créée', 'invitation.revoquer': 'Invitation révoquée', 'invitation.utiliser': 'Invitation utilisée', 'mission.reaffecter': 'Mission réaffectée', 'paiement.rapprochement_manuel.demande': 'Rapprochement demandé',
+  'procedure.reviser': 'Procédure révisée', 'rattachement.demande': 'Rattachement demandé', 'rattachement.valide': 'Rattachement validé', 'rdv.annuler': 'Rendez-vous annulé', 'rdv.confirmer': 'Rendez-vous confirmé', 'rdv.reserver': 'Rendez-vous réservé', 'reseau.ports': 'Ports ajoutés',
+  'user.setActive': 'Compte modifié', 'user.setZones': 'Zones modifiées', 'invite.create': 'Invitation', 'invite.revoke': 'Révocation d’invitation', 'config.set': 'Réglage', 'model.activate': 'Choix du modèle', 'kb.update': 'Révision de procédure',
+  'integration.replay': 'Rejeu demandé', 'backup.create': 'Sauvegarde', 'degraded.set': 'Mode dégradé', 'order.open': 'Fiche ouverte', 'export.orders': 'Export des dossiers',
+  'claim.start': 'Rattachement commencé', 'claim.verify': 'Rattachement vérifié', 'order.updateAddress': 'Adresse modifiée', 'doc.upload': 'Pièce envoyée', 'doc.request': 'Pièce demandée', 'doc.review': 'Pièce vérifiée',
+  'appt.hold': 'Créneau gardé', 'appt.book': 'Rendez-vous pris', 'appt.cancel': 'Rendez-vous annulé', 'appt.confirm': 'Rendez-vous confirmé', 'appt.reassign': 'Rendez-vous réaffecté', 'prep.toggle': 'Préparation cochée',
+  'msg.send': 'Message du client', 'msg.reply': 'Réponse envoyée', 'note.add': 'Note interne', 'assistant.handoff': 'Passage à un conseiller', 'callback.request': 'Rappel demandé', 'callback.update': 'Rappel mis à jour', 'report.create': 'Signalement',
+  'prefs.set': 'Préférences', 'notif.read': 'Notification lue', 'activation.feedback': 'Retour sur l’activation', 'feedback.submit': 'Avis du client', 'cancel.request': 'Annulation demandée', 'cancel.instruct': 'Annulation instruite', 'privacy.request': 'Demande sur les données',
+  'delegation.add': 'Délégation ajoutée', 'delegation.revoke': 'Délégation retirée', 'address.requestPrecision': 'Précision d’adresse demandée', 'order.markReady': 'Dossier prêt', 'blocker.assign': 'Blocage confié', 'blocker.resolve': 'Blocage levé', 'blocker.escalateCheck': 'Contrôle d’escalade',
+  'network.addPorts': 'Ports ajoutés', 'ticket.close': 'Ticket fermé', 'team.setAvailable': 'Disponibilité d’équipe', 'capacity.set': 'Capacité modifiée', 'wo.action': 'Action du technicien', 'payment.manualRequest': 'Rapprochement demandé', 'approval.decide': 'Décision de validation',
+  'order.close': 'Dossier clôturé', 'activation.retry': 'Activation relancée', 'duplicate.link': 'Doublon rapproché', 'duplicate.unlink': 'Doublon séparé',
+  'demo.scenario': 'Scénario lancé', 'demo.clock': 'Horloge avancée', 'demo.webhook': 'Événement simulé', 'demo.integration': 'Panne simulée', 'demo.flag': 'Réglage du simulateur', 'demo.createOrder': 'Commande fictive', 'demo.restore': 'Restauration',
+  'sauvegarde.creer': 'Sauvegarde créée', 'sauvegarde.restaurer': 'Sauvegarde restaurée', 'piece.valide': 'Pièce validée', 'piece.refuse': 'Pièce refusée', 'piece.refusee': 'Pièce refusée',
+  'validation.annulation.validee': 'Annulation validée', 'validation.annulation.refusee': 'Annulation refusée', 'validation.paiement.validee': 'Paiement manuel validé', 'validation.paiement.refusee': 'Paiement manuel refusé', 'boutique.achat': 'Achat en ligne (simulé)', 'call.start': 'Appel au service client', 'appel.decrocher': 'Appel décroché', 'approval.decide': 'Décision du superviseur',
+  'tech.ask': 'Question d’aide du technicien', 'tech.escalate': 'Aide transmise au responsable', 'install.validate': 'Visite validée par le client', 'terrain.aide': 'Question d’aide du technicien', 'terrain.transmettre': 'Aide transmise au responsable',
+};
+// Réglages de l'administrateur, nommés comme à l'écran.
+export const CONFIG_LABELS = {
+  holdMinutes: 'Durée de garde du créneau (minutes)', autoConfirm: 'Confirmation automatique', policyEquipment: 'Si le matériel manque', contractDays: 'Délai de référence (jours)', dossierDeadlineH: 'Délai pour envoyer le dossier (heures)',
+  autoValidateMin: 'Délai avant validation automatique (minutes)', travelMin: 'Durée du trajet simulé (minutes)', holidays: 'Jours fériés',
+};

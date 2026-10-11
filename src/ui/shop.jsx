@@ -14,15 +14,16 @@ const newCode = () => String(1000 + Math.floor(Math.random() * 9000));
 const pad = n => String(n).padStart(2, '0');
 const digitsOf = p => String(p || '').replace(/\D/g, '');
 const zoneName = id => (ZONES.find(z => z.id === id) || {}).name || id;
-const HOW = [
+const howSteps = hours => [
   ['Awa Kouassi', 'Vous payez en ligne', 'Avec Moov Money, en une minute.'],
-  ['Awa Kouassi', 'Vous envoyez votre dossier', 'Photos de la pièce d’identité, repère, créneau : 24 h pour le faire.'],
+  ['Awa Kouassi', 'Vous envoyez votre dossier', 'Photos de la pièce d’identité, repère, créneau : ' + hours + ' h pour le faire.'],
   ['Nadia Konan', 'Moov vérifie et planifie', 'Nadia regarde les photos, Hervé choisit le technicien et l’heure.'],
   ['Brice Yao', 'Le technicien arrive', 'Suivez son trajet en direct, puis notez la visite.'],
 ];
 
 export function Shop({ owner, onDone, onBack, dark, onTheme }) {
   const me = useQ(owner, 'me');
+  const hours = (me.data && me.data.ws && me.data.ws.dossierDeadlineH) || 24;
   const myPhone = (me.data && me.data.user && me.data.user.phone) || '';
   const [offerId, setOfferId] = useState(null);
   const [step, setStep] = useState('adresse'); // adresse · contact · paiement · confirmer · ok
@@ -51,7 +52,7 @@ export function Shop({ owner, onDone, onBack, dark, onTheme }) {
   const scrollTo = id => { const el = document.getElementById(id); if (el) el.scrollIntoView({ block: 'start', behavior: 'smooth' }); };
 
   const checkAddress = () => { const m = {}; if (!f.zone) m.zone = 'Choisissez votre commune.'; if (f.street.trim().length < 3) m.street = 'Indiquez votre quartier et votre rue.'; setMiss(m); return !Object.keys(m).length; };
-  const checkContact = () => { const m = {}; if (f.name.trim().length < 3) m.name = 'Indiquez votre prénom et votre nom.'; const d = digitsOf(f.phone).length; if (d < 8 || d > 15) m.phone = 'Numéro incomplet.'; setMiss(m); return !Object.keys(m).length; };
+  const checkContact = () => { const m = {}; if (f.name.trim().length < 3 || !/[a-zà-ÿ]/i.test(f.name)) m.name = 'Indiquez votre prénom et votre nom, avec des lettres (3 caractères au moins).'; const d = digitsOf(f.phone).length; if (d < 8 || d > 15) m.phone = 'Numéro incomplet.'; setMiss(m); return !Object.keys(m).length; };
   // Une tentative de paiement = une clé : retoucher « Confirmer » ne paie jamais deux fois.
   const startPay = () => { key.current = newKey(); setCode(newCode()); setTyped(''); goStep('confirmer'); };
   const confirm = async () => {
@@ -116,7 +117,7 @@ export function Shop({ owner, onDone, onBack, dark, onTheme }) {
 
       <section id="sh-how" className="sh-sec">
         <div className="sh-sec-head"><h2 className="sh-h2">Comment ça marche</h2><p className="muted">Quatre étapes, toutes visibles dans votre application Moov Fibre.</p></div>
-        <ol className="sh-how">{HOW.map(([n, t, d], i) => <li key={t}>
+        <ol className="sh-how">{howSteps(hours).map(([n, t, d], i) => <li key={t}>
           <span className="sh-how-n">{i + 1}</span><Avatar name={n} size={52} />
           <b>{t}</b><span className="small muted">{d}</span>
         </li>)}</ol>
@@ -197,7 +198,7 @@ export function Shop({ owner, onDone, onBack, dark, onTheme }) {
               <div className="sh-sum-line muted"><span>Ensuite, chaque mois</span><span className="num">{money(offer.monthly)}</span></div>
               <hr className="sep" />
               <div className="sh-sum-line sh-sum-total"><span>À payer aujourd’hui</span><b className="num">{money(offer.pay)}</b></div>
-              <div className="sh-sum-who"><Avatar name="Nadia Konan" size={34} /><span className="small muted">Après le paiement, vous avez <b className="lb-ink">24 h</b> pour envoyer votre dossier depuis l’application.</span></div>
+              <div className="sh-sum-who"><Avatar name="Nadia Konan" size={34} /><span className="small muted">Après le paiement, vous avez <b className="lb-ink">{hours} h</b> pour envoyer votre dossier depuis l’application.</span></div>
             </aside>
           </div>}
         <Foot />

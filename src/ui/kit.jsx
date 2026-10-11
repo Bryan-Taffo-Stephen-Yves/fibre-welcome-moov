@@ -24,7 +24,7 @@ export function trackInfo(track, ws) {
 }
 // Durée de garde d'un créneau (réglage de l'administrateur, 5 minutes par défaut).
 export const minutes = h => { const n = Number(h) > 0 ? Number(h) : 5; return n + (n > 1 ? ' minutes' : ' minute'); };
-export const money = n => n.toLocaleString('fr-FR') + ' F CFA';
+export const money = n => n.toLocaleString('fr-FR').replace(/\u202f/g, '\u00a0') + ' F CFA';
 export const firstName = n => String(n || '').split(' ')[0];
 
 export function Btn({ kind, size, block, children, className = '', ...p }) {
@@ -64,9 +64,26 @@ export function Field({ label, children, hint, id }) {
 
 // portal : la fenêtre est posée directement dans la page (utile depuis la barre du haut, dont le flou la piégerait).
 export function Modal({ title, onClose, children, actions, portal }) {
-  React.useEffect(() => { const f = e => e.key === 'Escape' && onClose(); window.addEventListener('keydown', f); return () => window.removeEventListener('keydown', f); }, []);
+  const box = React.useRef(null);
+  // Clavier : le focus entre dans la fenêtre, y reste (Tab / Maj+Tab) et revient au bouton qui l'a ouverte.
+  React.useEffect(() => {
+    const back = document.activeElement;
+    const items = () => [...(box.current ? box.current.querySelectorAll('button,[href],input,select,textarea,[tabindex]:not([tabindex="-1"])') : [])].filter(x => !x.disabled && x.offsetParent !== null);
+    const first = items().find(x => !x.classList.contains('icon-btn')) || items()[0];
+    if (box.current) (first || box.current).focus({ preventScroll: true });
+    const f = e => {
+      if (e.key === 'Escape') { onClose(); return; }
+      if (e.key !== 'Tab' || !box.current) return;
+      const l = items(); if (!l.length) { e.preventDefault(); return; }
+      const a = document.activeElement, i = l.indexOf(a);
+      if (e.shiftKey && (i <= 0 || !box.current.contains(a))) { e.preventDefault(); l[l.length - 1].focus(); }
+      else if (!e.shiftKey && (i === l.length - 1 || !box.current.contains(a))) { e.preventDefault(); l[0].focus(); }
+    };
+    window.addEventListener('keydown', f);
+    return () => { window.removeEventListener('keydown', f); if (back && back.focus && document.contains(back)) try { back.focus({ preventScroll: true }); } catch (e) {} };
+  }, []);
   const el = <div className="backdrop" onClick={onClose}>
-    <div className="dialog" role="dialog" aria-modal="true" aria-label={title} onClick={e => e.stopPropagation()}>
+    <div className="dialog" ref={box} tabIndex={-1} role="dialog" aria-modal="true" aria-label={title} onClick={e => e.stopPropagation()}>
       <div className="spread"><h2>{title}</h2><button type="button" className="icon-btn" onClick={onClose} aria-label="Fermer">{Icon.x}</button></div>
       {children}
       {actions && <div className="row">{actions}</div>}
@@ -110,17 +127,25 @@ export function Picture({ token, img, thumb, alt = '', label, kind, size }) {
 
 // Cloche de notifications pour l'équipe Moov et les techniciens : ce que le serveur leur envoie
 // (nouvelle pièce, message client, mission retirée…) devient visible, avec un lien vers le dossier.
+const list0 = d => (d || []).length;
 export function NotifBell({ token, onOpen, dark }) {
   const r = useQ(token, 'notifications');
   const [open, setOpen] = React.useState(false);
   const ref = React.useRef(null);
+  const popRef = React.useRef(null);
+  // La fenêtre reste entièrement visible quelle que soit la place de la cloche dans la barre (téléphone, tablette).
+  React.useLayoutEffect(() => {
+    const el = popRef.current; if (!open || !el) return;
+    const fit = () => { el.style.transform = ''; const r = el.getBoundingClientRect(), w = document.documentElement.clientWidth; const dx = r.left < 8 ? 8 - r.left : r.right > w - 8 ? w - 8 - r.right : 0; if (dx) el.style.transform = 'translateX(' + Math.round(dx) + 'px)'; };
+    fit(); window.addEventListener('resize', fit); return () => window.removeEventListener('resize', fit);
+  }, [open, list0(r.data)]);
   React.useEffect(() => { if (!open) return; const f = e => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); }; document.addEventListener('pointerdown', f); return () => document.removeEventListener('pointerdown', f); }, [open]);
   const list = r.data || [];
   const unread = list.filter(n => !n.read).length;
   const pick = n => { if (!n.read) call(token, 'notif.read', { id: n.id }, { silent: true }); if (n.orderId && onOpen) { onOpen(n.orderId, n); setOpen(false); } };
   return <span className="nbell" ref={ref}>
     <button type="button" className={'icon-btn nbell-btn' + (dark ? ' on-dark' : '')} onClick={() => setOpen(!open)} aria-expanded={open} aria-label={'Notifications' + (unread ? ' (' + unread + ' non lues)' : '')} data-tour="staff-bell">{Icon.bell}{unread > 0 && <span className="badge">{unread > 9 ? '9+' : unread}</span>}</button>
-    {open && <div className="nbell-pop" role="dialog" aria-label="Notifications">
+    {open && <div className="nbell-pop" ref={popRef} role="dialog" aria-label="Notifications">
       <div className="spread"><b>Notifications</b>{unread > 0 && <button type="button" className="link-btn small" onClick={() => call(token, 'notif.read', { all: true }, { silent: true })}>Tout marquer lu</button>}</div>
       {list.length === 0 ? <p className="small muted">Rien pour l’instant.</p> : <div className="nbell-list">{list.slice(0, 25).map(n => <button type="button" key={n.id} className={'nbell-item' + (n.read ? '' : ' unread')} onClick={() => pick(n)}>
         <b className="small">{n.title}</b><span className="tiny muted">{n.body}</span><span className="tiny muted">{fmtDateTime(n.at)}{n.orderId && onOpen ? ' · ouvrir' : ''}</span>

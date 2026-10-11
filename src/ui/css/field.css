@@ -270,6 +270,10 @@
 .fd-doc .grow { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
 .fd-ph .pic { border-radius: inherit; }
 .fd-top .nbell { margin-left: auto; margin-right: 6px; }
+/* Le panneau des notifications s'ancre à toute la barre du haut (et non à la cloche, au milieu) : il reste dans le téléphone. */
+.fd-top { position: relative; }
+.fd-top .nbell { position: static; }
+.fd-top .nbell-pop { left: 0; right: 0; width: auto; max-width: 100%; }
 /* Avec la cloche, « Bonjour, » passe au-dessus du prénom : le prénom n’est jamais coupé */
 .fd-top .fd-hello { flex: 1 1 auto; }
 .fd-top .fd-hello-t b { overflow: hidden; text-overflow: ellipsis; }

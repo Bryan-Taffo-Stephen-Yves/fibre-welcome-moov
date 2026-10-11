@@ -83,6 +83,7 @@ export function buildWorkspace({ id, name, seed, realNow, generation = 1, owner 
     if (!isWorkingDay(ws, date)) continue;
     for (const t of ws.teams) for (const s of SLOTS) ws.capacity.push({ id: t.id + ':' + date + ':' + s.id, teamId: t.id, date, slot: s.id, cap: 1 + (r() > 0.5 ? 1 : 0), used: 0 });
   }
+  ws.capUntil = d0 + 16 * DAY;
   for (const z of ZONES) ws.ports[z.id] = { free: 4 + Math.floor(r() * 6), reserved: 0 };
   for (let i = 0; i < 14; i++) ws.equipment.push({ serial: 'ZTE-F670-' + (48210 + i), model: 'ONT ZTE F670L', status: 'stock', orderId: null });
   for (let i = 0; i < 4; i++) ws.equipment.push({ serial: 'HW-HG8245-' + (77030 + i), model: 'ONT Huawei HG8245', status: 'stock', orderId: null });
@@ -108,6 +109,27 @@ export function buildWorkspace({ id, name, seed, realNow, generation = 1, owner 
   for (let i = 4; i <= 11; i++) ws.orders.push(mkOrder(null, zonesSeq[i % zonesSeq.length], i));
   ws.delegations.push({ id: 'DL1', orderId: 'O1', clientId: client.id, delegateId: rep.id, scopes: ['rdv', 'messages'], from: clock, until: clock + 30 * DAY, revoked: false });
   return ws;
+}
+
+// La capacité se renouvelle au fil de l'horloge : on garde toujours les 16 jours à venir ouverts (dimanche fermé).
+// Les jours fériés ne sont pas retirés ici : ils sont écartés au moment de proposer un créneau, pour qu'on puisse les rouvrir.
+export const CAP_DAYS = 16;
+export function extendCapacity(ws) {
+  const today = startOfDay(ws.clock);
+  const target = today + CAP_DAYS * DAY;
+  const last = ws.capUntil || ws.capacity.reduce((m, c) => Math.max(m, c.date), 0);
+  for (let date = Math.max(last + DAY, today + DAY); date <= target; date += DAY) {
+    if (new Date(date).getUTCDay() === 0) continue;
+    const rr = rng((((ws.seed >>> 0) * 31) + Math.floor(date / DAY)) >>> 0);
+    for (const t of ws.teams) for (const s of SLOTS) ws.capacity.push({ id: t.id + ':' + date + ':' + s.id, teamId: t.id, date, slot: s.id, cap: 1 + (rr() > 0.5 ? 1 : 0), used: 0 });
+  }
+  ws.capUntil = Math.max(ws.capUntil || 0, target);
+  // Les journées passées depuis plus de 3 jours disparaissent, sauf si un rendez-vous ou une garde s'y rapporte encore.
+  const keepFrom = today - 3 * DAY;
+  if (ws.capacity.some(c => c.date < keepFrom)) {
+    const used = new Set([...ws.appointments.map(a => a.capId), ...ws.holds.map(h => h.capId)]);
+    ws.capacity = ws.capacity.filter(c => c.date >= keepFrom || used.has(c.id));
+  }
 }
 
 export { H, DAY };

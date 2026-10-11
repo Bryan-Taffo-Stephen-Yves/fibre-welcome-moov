@@ -3,7 +3,7 @@
 import { api, useQ, call, toast, useOnline, setOnline, isOnline, readQueue, updateQueue, replay, watchQueue, prepareImage, putImage, useNow, tabGet, tabSet, liveClock, photoIssues } from './platform.js';
 import { Btn, AsyncBtn, Tag, Sim, Explain, Field, Modal, Empty, Icon, Picture, NotifBell, Avatar, Say, Ring, Bars, AbidjanMap, VanScene, HouseScene, firstName, fmtDate, fmtDateTime, fmtAgo, slotLabel, BLOCKER_TYPES, NotifPopups, TrackMap, hourLabel, trackInfo, deName } from './kit.jsx';
 import { TrackCard } from './trackcard.jsx';
-import { CHECKLIST_TECH, ZONES, DOC_TYPES, BASE_NAMES, PREP_CHECKLIST } from '../server/model.js';
+import { CHECKLIST_TECH, SLOTS, ZONES, DOC_TYPES, BASE_NAMES, PREP_CHECKLIST } from '../server/model.js';
 const React = window.React;
 const { useState, useEffect, useRef } = React;
 
@@ -27,7 +27,7 @@ const hhmm = t => (t ? new Intl.DateTimeFormat('fr-FR', { ...tz, hour: '2-digit'
 const dayShort = t => new Intl.DateTimeFormat('fr-FR', { ...tz, weekday: 'short', day: 'numeric' }).format(t);
 const dayLong = t => new Intl.DateTimeFormat('fr-FR', { ...tz, weekday: 'long', day: 'numeric', month: 'short' }).format(t);
 const zoneOf = commune => (ZONES.find(z => z.name === commune) || {}).id;
-const toNum = v => (v === '' || v == null ? '' : Number(String(v).replace(',', '.').replace('−', '-')));
+const toNum = v => (v == null || String(v).trim() === '' ? '' : Number(String(v).replace(',', '.').replace('−', '-')));
 const isWaiting = s => s === 'en attente de réseau' || s === 'à réessayer';
 const fmtNum = n => String(n).replace('.', ',').replace(/^-/, '−');
 // Étapes qui font avancer la mission : hors ligne, l'écran avance tout de suite, sans attendre le réseau.
@@ -38,7 +38,10 @@ const INCIDENTS = [
   ['ACCES_IMPOSSIBLE', 'Accès bloqué pendant les travaux', 'Le client est prévenu, le conseiller obtient l’accès.'],
   ['AUTRE', 'Autre souci (outil, échelle, retard…)', 'Seul le planificateur est prévenu. Le client ne voit rien.'],
 ];
-const byRank = (a, b) => (RANK[a.status] - RANK[b.status]) || (((a.appt && a.appt.date) || 0) - ((b.appt && b.appt.date) || 0)) || ((a.appt && a.appt.slot) || '').localeCompare((b.appt && b.appt.slot) || '');
+// Même jour : le matin avant l'après-midi, puis l'heure précise fixée par le planificateur si elle existe.
+const slotStart = ap => ((SLOTS.find(s => s.id === (ap && ap.slot)) || {}).start ?? 99);
+const timeMin = ap => { const m = /^(\d{2}):(\d{2})$/.exec((ap && ap.time) || ''); return m ? Number(m[1]) * 60 + Number(m[2]) : slotStart(ap) * 60; };
+const byRank = (a, b) => (RANK[a.status] - RANK[b.status]) || (((a.appt && a.appt.date) || 0) - ((b.appt && b.appt.date) || 0)) || (slotStart(a.appt) - slotStart(b.appt)) || (timeMin(a.appt) - timeMin(b.appt));
 const when = w => (w.appt ? fmtDate(w.appt.date) + ' · ' + (w.appt.time ? hourLabel(w.appt.time) : slotLabel(w.appt.slot)) : 'Date à fixer');
 // Aide sur place : sujets proposés en un tap (les mots sont ceux que reconnaît le guide).
 const ASK_TOPICS = ['La box ne s’allume pas', 'Signal faible', 'Câble abîmé', 'Accès impossible', 'Wi-Fi'];
@@ -221,7 +224,7 @@ function Mission({ token, wo, ws, onBack, online, onQueue, focus }) {
     const t = setTimeout(() => jump(focus.at === 'aide' ? aideRef.current : finRef.current), 90);
     return () => clearTimeout(t);
   }, [focus && focus.k]);
-  const act = (action, args = {}) => call(token, 'wo.action', { woId: wo.id, action, args: { ...args, offline: !isOnline(token) }, expectedVersion: wo.version }, { meta: { ref: wo.ref } });
+  const act = (action, args = {}) => call(token, 'wo.action', { woId: wo.id, action, args: { ...args, offline: !isOnline(token), offlineAt: Date.now() }, expectedVersion: wo.version }, { meta: { ref: wo.ref } });
   // Après une photo, le bloc reste ouvert pour en ajouter d'autres ; sinon on passe au suivant.
   const step = async (action, args, keep = false) => { const r = await act(action, args); if (r && r.ok) setOpen(keep ? action : null); return r; };
   const q = readQueue(token).filter(x => x.args.woId === wo.id && x.status === 'en attente de réseau');
@@ -239,6 +242,7 @@ function Mission({ token, wo, ws, onBack, online, onQueue, focus }) {
   const fillDemo = () => { const v = { puissance: (-17 - Math.random() * 5).toFixed(1), pto: true, cheminement: true, ont_led: true, wifi: true }; setVals(v); setSerial('ZTE-F670-4821' + Math.floor(Math.random() * 10)); };
   const scan = () => setSerial('ZTE-F670-4821' + Math.floor(Math.random() * 10));
   const [shooting, setShooting] = useState(false);
+  const [photoWarn, setPhotoWarn] = useState('');
   const onPhoto = async e => {
     const f = e.target.files[0]; e.target.value = ''; if (!f) return;
     if (!/^image\//.test(f.type || '')) { toast('Choisissez une photo (JPG ou PNG).', true); return; }
@@ -246,6 +250,10 @@ function Mission({ token, wo, ws, onBack, online, onQueue, focus }) {
     try {
       const pic = await prepareImage(f);
       if (!pic) { toast('Cette image ne peut pas être lue ici. Essayez une photo au format JPG ou PNG.', true); return; }
+      // Avertir sans bloquer : la photo part quand même, le technicien peut la reprendre.
+      const bad = photoIssues(pic.quality);
+      setPhotoWarn(bad.length ? 'Photo ' + bad.join(' et ') + ' : reprenez-la si elle doit servir de preuve.' : '');
+      if (bad.length) toast('Photo ' + bad.join(' et ') + ' : reprenez-la si elle doit servir de preuve.', true);
       let img = null; try { img = await putImage(api.session(token).wsId, pic.full); } catch {}
       await step('photo', { name: f.name, thumb: pic.thumb, img, capturedAt: Date.now() }, true);
     } finally { setShooting(false); }
@@ -257,9 +265,12 @@ function Mission({ token, wo, ws, onBack, online, onQueue, focus }) {
   const measures = CHECKLIST_TECH.filter(c => c.type !== 'bool');
   const pw = Number(ck.puissance);
   const ckDone = CHECKLIST_TECH.filter(c => c.required).every(c => c.type === 'bool' ? ck[c.id] === true : ck[c.id] !== undefined && ck[c.id] !== '' && ck[c.id] !== null) && pw >= -27 && pw <= -8;
-  const ticks = bools.filter(c => ck[c.id] === true).length;
+  const reqBools = bools.filter(c => c.required);
+  const ticks = reqBools.filter(c => ck[c.id] === true).length;
+  const pwSet = ck.puissance != null && String(ck.puissance).trim() !== '';
+  const pwBad = pwSet && !(pw >= -27 && pw <= -8);
   const tasks = [
-    { id: 'checklist', title: 'Mesures et checklist', tour: 'field-checklist', done: ckDone, sum: ckDone ? fmtNum(pw) + ' dBm · ' + ticks + ' sur ' + bools.length + ' points' : ticks || ck.puissance != null ? 'Incomplète : ' + ticks + ' sur ' + bools.length + ' points' : 'À remplir' },
+    { id: 'checklist', title: 'Mesures et checklist', tour: 'field-checklist', done: ckDone, sum: ckDone ? fmtNum(pw) + ' dBm · ' + ticks + ' sur ' + reqBools.length + ' points' : ticks || pwSet ? 'Incomplète : ' + ticks + ' sur ' + reqBools.length + ' points' + (pwBad ? ', puissance hors plage' : '') : 'À remplir' },
     { id: 'serial', title: 'Box installée', done: !!wo.serial, sum: wo.serial || 'Scanner ou saisir le numéro' },
     { id: 'photo', title: 'Photos et commentaire', done: wo.photos.length > 0, sum: wo.photos.length ? wo.photos.length + ' photo' + (wo.photos.length > 1 ? 's' : '') + (wo.comment ? ' · commentaire' : '') : 'Au moins une photo' },
     { id: 'reception', title: 'Réception par le client', tour: 'field-reception', done: !!wo.reception, sum: wo.reception ? (wo.reception.status === 'accord' ? 'Accord du client' : 'Accord avec réserve') : 'Code du client' },
@@ -386,6 +397,7 @@ function Mission({ token, wo, ws, onBack, online, onQueue, focus }) {
               <TileBtn className="fd-ph fd-ph-sim" onClick={() => step('photo', { name: 'photo-demo-' + (wo.photos.length + qPhotos.length + 1) + '.jpg' }, true)}>{Icon.camera}<span>Photo de démonstration</span></TileBtn>
             </div>
             <input id={'ph-' + wo.id} type="file" accept="image/*" onChange={onPhoto} className="fd-file" />
+            {photoWarn && <span className="fd-range warn" role="status">{Icon.alert}{photoWarn}</span>}
             <Field label="Commentaire" id="wo-c"><textarea id="wo-c" className="input" rows={2} value={comment} onChange={e => setComment(e.target.value)} placeholder="Ex. câble passé par la gaine du salon" /></Field>
             {wo.comment && <span className="tiny muted">Enregistré : « {wo.comment} »</span>}
             <div className="fd-btns"><AsyncBtn size="s" onClick={async () => { if (!comment.trim()) { toast('Écrivez d’abord le commentaire.', true); return; } const r = await act('comment', { text: comment }); if (r && r.ok) { setComment(''); if (!r.queued) toast('Commentaire enregistré.'); } }}>Enregistrer le commentaire</AsyncBtn></div>
@@ -423,7 +435,9 @@ function Mission({ token, wo, ws, onBack, online, onQueue, focus }) {
     {st === 'terminee' && <section className="card fd-done">
       <HouseScene progress={0.7} height={96} />
       <b>Et maintenant ?</b>
-      <span className="small">La demande d’activation est partie vers Moov. Le dossier n’est pas « actif » tant que le système ne l’a pas confirmé. <Sim what="activation simulée" /></span>
+      {queued.has('finish')
+        ? <span className="small">Fin de mission gardée sur le téléphone. La demande d’activation partira vers Moov au retour du réseau, si le serveur l’accepte. <Sim what="activation simulée" /></span>
+        : <span className="small">La demande d’activation est partie vers Moov. Le dossier n’est pas « actif » tant que le système ne l’a pas confirmé. <Sim what="activation simulée" /></span>}
       <Rating wo={wo} />
       <details className="fd-more">
         <summary>Voir le rapport</summary>
@@ -440,8 +454,7 @@ function Mission({ token, wo, ws, onBack, online, onQueue, focus }) {
     <details className="fd-more fd-times">
       <summary>Horaires de la mission</summary>
       <ul className="fd-kv">
-        {[['Départ', wo.times.depart], ['Arrivée', wo.times.arrive], ['Début', wo.times.start], ['Fin', wo.times.end]].map(([l, t]) => <li key={l}><span>{l}</span><b>{t ? fmtDateTime(t) : 'pas encore'}</b></li>)}
-        <li><span>Version</span><b>{wo.version}</b></li>
+        {[['Départ', wo.times.depart], ['Arrivée', wo.times.arrive], ['Début', wo.times.start], ['Fin', wo.times.end]].map(([l, t]) => <li key={l}><span>{l}</span><b>{t ? fmtDateTime(t) : st === 'terminee' ? 'non renseigné' : 'pas encore'}</b></li>)}
       </ul>
     </details>
 
@@ -480,7 +493,7 @@ function ClientSpot({ wo }) {
       <Btn size="s" onClick={() => setCall(true)}>{Icon.handset}Appeler</Btn>
       <a className="btn btn-s" href={maps} target="_blank" rel="noopener noreferrer">{Icon.right}Itinéraire<span className="sr-only"> (s’ouvre dans une carte)</span></a>
     </div>
-    <span className="fd-spot-h">Vous suivez la position de {first} comme {first} suit la vôtre sur son téléphone.</span>
+    <span className="fd-spot-h">Vous suivez la position {deName(first)} comme {first} suit la vôtre sur son téléphone.</span>
     {call && <CallModal wo={wo} onClose={() => setCall(false)} />}
   </div>;
 }
@@ -512,7 +525,7 @@ function SignoffCard({ wo, ws, innerRef }) {
     validee: ['ok', Icon.check, 'Validée', <><b>Visite validée.</b> Vous êtes de nouveau disponible.</>],
     auto: s.mode === 'auto'
       ? ['ok', Icon.check, 'Validée', <><b>{first} vous a laissé partir.</b> Vous êtes de nouveau disponible.</>]
-      : ['ok', Icon.check, 'Validée', <><b>Visite validée automatiquement, sans réponse de {first}.</b> Vous êtes de nouveau disponible.</>],
+      : ['ok', Icon.check, 'Validée', <><b>Visite validée automatiquement, sans réponse {deName(first)}.</b> Vous êtes de nouveau disponible.</>],
     probleme: ['bad', Icon.alert, 'Souci signalé', <><b>{first} signale un souci</b> : « {s.problem || 'sans détail'} ». Attendez les instructions de votre responsable.</>],
   }[s.state] || ['wait', Icon.clock, 'En attente du client', <>{first} vérifie l’installation.</>];
   return <section className={'card fd-so ' + tone} ref={innerRef} aria-label="Fin de visite">
@@ -742,6 +755,11 @@ function Queue({ token, missions }) {
   const online = useOnline(token);
   const n = syncCounts(q);
   const refOf = id => (missions.find(m => m.id === id) || {}).ref;
+  // « conflit » : la mission a changé ; « etat » : une étape précédente manquait (ex. Démarrer avant la checklist). Les deux peuvent être renvoyées.
+  const retry = x => x.status === 'refusé' && (x.code === 'conflit' || x.code === 'etat');
+  const conflicts = q.filter(retry);
+  // Renvoie toutes les actions refusées pour conflit d'un coup, de la plus ancienne à la plus récente (Démarrer avant la checklist, par exemple).
+  const reapplyAll = async () => { updateQueue(token, l => l.map(x => retry(x) ? { ...x, id: x.id + '-r', status: 'à réessayer', args: { ...x.args, expectedVersion: null } } : x)); await replay(token); };
   return <div className="stack">
     <div className="fd-h"><h2>Synchronisation</h2>{online && <AsyncBtn size="s" kind="primary" onClick={() => replay(token)}>Synchroniser</AsyncBtn>}</div>
     <section className="card-dark fd-sync">
@@ -754,6 +772,7 @@ function Queue({ token, missions }) {
     </section>
     <Explain title="Pourquoi rien n’est envoyé deux fois ?">Chaque action porte une <b>clé unique</b>. Si le réseau coupe au mauvais moment et qu’elle est renvoyée, le serveur ne l’applique qu’une fois.</Explain>
     {q.length === 0 && <Empty>{online ? 'Rien en attente. Coupez le réseau en haut du téléphone pour essayer.' : 'Rien en attente. Faites une action : elle sera gardée ici jusqu’au retour du réseau.'}</Empty>}
+    {conflicts.length > 1 && online && <AsyncBtn kind="primary" block onClick={reapplyAll}>Tout réappliquer dans l’ordre ({conflicts.length})</AsyncBtn>}
     {q.length > 0 && <span className="fd-sec">Historique</span>}
     {[...q].reverse().map(it => {
       const [tone, label, long] = Q_STATUS(it.status);
@@ -766,10 +785,10 @@ function Queue({ token, missions }) {
         </div>
         {it.status === 'refusé' && <div className="fd-refused">
           <p className="small"><b>Le serveur a refusé cette action.</b> {it.error}</p>
-          <p className="tiny muted">Votre saisie n’est pas perdue : elle est gardée comme brouillon.{it.code === 'conflit' ? ' Vous pouvez la renvoyer sur l’état actuel de la mission, ou l’abandonner.' : ' Vous pouvez l’abandonner.'}</p>
+          <p className="tiny muted">Votre saisie n’est pas perdue : elle reste visible dans « Détails ».{retry(it) ? ' Vous pouvez la renvoyer sur l’état actuel de la mission, ou l’abandonner.' : ' Vous pouvez l’abandonner, puis la ressaisir à la main si besoin.'}</p>
           <div className="fd-btns">
             {it.code === 'retiree' && <p className="tiny muted">La mission a été confiée à une autre équipe : elle n’apparaît plus dans votre liste.</p>}
-            {it.code === 'conflit' && <AsyncBtn size="s" kind="primary" onClick={async () => { updateQueue(token, l => l.map(x => x.id === it.id ? { ...x, id: x.id + '-r', status: 'à réessayer', args: { ...x.args, expectedVersion: null } } : x)); await replay(token); }}>Réappliquer sur la version actuelle</AsyncBtn>}
+            {retry(it) && <AsyncBtn size="s" kind="primary" onClick={async () => { updateQueue(token, l => l.map(x => x.id === it.id ? { ...x, id: x.id + '-r', status: 'à réessayer', args: { ...x.args, expectedVersion: null } } : x)); await replay(token); }}>Réappliquer sur la version actuelle</AsyncBtn>}
             <Btn size="s" onClick={() => updateQueue(token, l => l.map(x => x.id === it.id ? { ...x, status: 'abandonné (brouillon gardé)' } : x))}>Abandonner</Btn>
           </div>
         </div>}

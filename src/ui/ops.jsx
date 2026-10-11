@@ -27,7 +27,7 @@ const QUEUES = {
   enRetard: ['En retard', 'Délai de l’étape dépassé'],
   incomplets: ['Incomplets', 'Pièce, adresse ou paiement'],
   aConfirmer: ['RDV à confirmer', 'Créneau choisi par le client'],
-  aPreparer: ['À vérifier', 'Vérification technique'],
+  aPreparer: ['Vérification technique', 'À valider avant la visite'],
 };
 const QUEUE_KEYS = Object.keys(QUEUES);
 QUEUES.dossiers = ['Dossiers en ligne', 'Remplis par le client'];
@@ -168,6 +168,20 @@ function CallDock({ token, c, ws, onOpen }) {
   </div>;
 }
 
+// Autre(s) appel(s) qui sonnent pendant que la conseillère est déjà en ligne.
+function WaitingCalls({ token, list, ws }) {
+  useNow(1000);
+  const now = liveClock(ws);
+  return <div className="op-waiting" role="status">
+    <b className="small">{list.length === 1 ? '1 autre appel en attente' : list.length + ' autres appels en attente'}</b>
+    {list.map(c => { const left = Math.max(0, Math.ceil((c.startedAt + 45e3 - now) / 1000)); return <div key={c.id} className="op-waiting-row">
+      <div className="op-trunc grow"><b className="small">{c.fromName || 'Client'}</b><span className="tiny op-call-sub">{c.ref || ''}{c.reason ? ' · ' + c.reason : ''} · {left > 0 ? 'sera manqué dans ' + left + ' s' : 'va être manqué'}</span></div>
+      <AsyncBtn size="s" kind="ghost" onClick={async () => { if ((await call(token, 'call.end', { id: c.id })).ok) toast('Appel refusé : un rappel est créé pour ' + firstName(c.fromName || 'le client') + '.'); }}>Refuser</AsyncBtn>
+    </div>; })}
+    <span className="tiny op-call-sub">Raccrochez l’appel en cours pour décrocher le suivant avant la fin du délai.</span>
+  </div>;
+}
+
 // La carte d'appel est posée sur la page entière (fixe en bas), hors des conteneurs de la console.
 const dock = el => window.ReactDOM && window.ReactDOM.createPortal ? window.ReactDOM.createPortal(el, document.body) : el;
 
@@ -188,6 +202,19 @@ export function OpsConsole({ token }) {
   const calls = useQ(token, isAdv ? 'ops.calls' : 'me');
   const opened = useRef(new Set());
   const live = isAdv && Array.isArray(calls.data) ? calls.data.find(c => c.status === 'en_cours') || calls.data.find(c => c.status === 'sonne') : null;
+  // Les autres appels qui sonnent pendant ce temps : on les montre, et on dit à l'écran s'ils sont manqués.
+  const waiting = isAdv && Array.isArray(calls.data) ? calls.data.filter(c => c.status === 'sonne' && !(live && c.id === live.id)) : [];
+  const waitSeen = useRef(new Map());
+  useEffect(() => {
+    const now = new Map(waiting.map(c => [c.id, c]));
+    for (const [id, c] of waitSeen.current) {
+      if (now.has(id)) continue;
+      const x = (calls.data || []).find(y => y.id === id);
+      if (x && x.status === 'manque') toast('Appel manqué : ' + firstName(c.fromName || 'le client') + ' n’a pas eu de réponse. Un rappel est créé.', true);
+      else if (x && x.status === 'annule') toast(firstName(c.fromName || 'Le client') + ' a raccroché avant que vous puissiez répondre.');
+    }
+    waitSeen.current = now;
+  });
   // Dès que l'appel est décroché, la fiche du client s'ouvre (une seule fois par appel).
   useEffect(() => { if (live && live.status === 'en_cours' && !opened.current.has(live.id)) { opened.current.add(live.id); open(live.orderId); } }, [live && live.id, live && live.status]);
   if (me.error) return <div className="alert alert-bad">{me.error.message}</div>;
@@ -218,7 +245,7 @@ export function OpsConsole({ token }) {
     const i = Array.prototype.indexOf.call(b.parentNode.children, b);
     picked.current = (Array.isArray(nots.data) ? nots.data : [])[i] || null;
   };
-  const goSearch = zone => { setPreset({ zone }); setSec('search'); setOrderId(null); toTop(); };
+  const goSearch = zone => { setPreset({ zone, openOnly: true }); setSec('search'); setOrderId(null); toTop(); };
   const zones = me.data.user.zones || [];
   return <div className={'op-root' + (live ? ' has-call' : '')} ref={root}>
     <NotifPopups key={token} token={token} variant="desk" onOpen={n => openNotif(n)} />
@@ -240,7 +267,7 @@ export function OpsConsole({ token }) {
       : s === 'teams' ? <Teams token={token} />
       : s === 'dash' ? <Dashboard token={token} open={open} goSearch={goSearch} goApprovals={() => go('approvals')} />
       : <Approvals token={token} open={open} />}
-    {live && dock(<div className="op-calldock"><CallDock key={live.id} token={token} c={live} ws={me.data.ws} onOpen={open} /></div>)}
+    {live && dock(<div className="op-calldock">{waiting.length > 0 && <WaitingCalls token={token} list={waiting} ws={me.data.ws} />}<CallDock key={live.id} token={token} c={live} ws={me.data.ws} onOpen={open} /></div>)}
   </div>;
 }
 
@@ -417,7 +444,10 @@ function FieldTicket({ token, t, open }) {
 function Search({ token, open, initial, zones }) {
   const [q, setQ] = useState(''); const [zone, setZone] = useState((initial && initial.zone) || ''); const [state, setState] = useState('');
   const r = useQ(token, 'ops.orders', { q, zone, state });
-  const n = r.data ? r.data.length : 0;
+  // Arrivée depuis le tableau de bord : seulement les dossiers « en cours » comptés sur la carte (ni annulés, ni au service actif).
+  const [openOnly, setOpenOnly] = useState(!!(initial && initial.openOnly));
+  const rows = r.data ? (openOnly ? r.data.filter(x => !x.cancelled && !['SERVICE_ACTIF', 'CLOTURE'].includes(x.state)) : r.data) : r.data;
+  const n = rows ? rows.length : 0;
   return <div className="op-search" data-tour="ops-search-panel">
     <div className="card op-filters">
       <div className="op-sbox"><span className="op-sbox-ic" aria-hidden="true">{Icon.search}</span><label htmlFor="s-q" className="sr-only">Référence, nom ou téléphone</label><input id="s-q" className="input" value={q} onChange={e => setQ(e.target.value)} placeholder="Référence, nom ou téléphone" autoComplete="off" /></div>
@@ -426,9 +456,10 @@ function Search({ token, open, initial, zones }) {
       <label htmlFor="s-s" className="sr-only">Étape</label>
       <select id="s-s" className="input" value={state} onChange={e => setState(e.target.value)}><option value="">Toutes les étapes</option>{ORDER_STATES.map(x => <option key={x} value={x}>{STATE_INFO[x].label}</option>)}</select>
     </div>
+    <label className="op-openonly"><input type="checkbox" checked={openOnly} onChange={e => setOpenOnly(e.target.checked)} /> En cours seulement (sans les dossiers actifs, clôturés ou annulés)</label>
     <section className="card-dark stack">
-      <div className="card-title"><h2>{n} dossier{n > 1 ? 's' : ''}</h2><span className="tiny muted">Votre périmètre seulement. Chaque ouverture de fiche est notée au journal.</span></div>
-      {r.error ? <div className="alert alert-bad">{r.error.message}</div> : <OrderTable rows={r.data} open={open} empty="Aucun dossier ne correspond à cette recherche." />}
+      <div className="card-title"><h2>{n} dossier{n > 1 ? 's' : ''}{openOnly ? ' en cours' : ''}</h2><span className="tiny muted">Votre périmètre seulement. Chaque ouverture de fiche est notée au journal.</span></div>
+      {r.error ? <div className="alert alert-bad">{r.error.message}</div> : <OrderTable rows={rows} open={open} empty="Aucun dossier ne correspond à cette recherche." />}
     </section>
   </div>;
 }
@@ -475,7 +506,7 @@ function OrderSheet({ token, orderId, role, showPlan, onClose }) {
   // « À faire ensuite » : sans blocage, on dit qui agit selon le dossier en ligne ou l'étape (pas « Aucune action requise »).
   const NEXT_DOS = { a_completer: ['Le client complète son dossier', 'client'], en_retard: ['Relancer le client : délai dépassé', 'conseiller'], incomplet: ['Relancer le client : il manque des pièces', 'conseiller'], a_verifier: ['Vérifier les photos', 'conseiller'], verifie: ['Transmettre au technicien', isC ? 'conseiller' : 'planificateur'] };
   const NEXT_STATE = { PRET_A_PLANIFIER: ['Le client choisit son créneau', 'client'], RDV_CONFIRME: ['Le technicien fait la visite', 'technicien'], INTERVENTION_EN_COURS: ['Le technicien installe la fibre', 'technicien'], INSTALLATION_TERMINEE: ['Activation de la ligne (automatique)', null], ACTIVATION_EN_ATTENTE: ['Activation de la ligne (automatique)', null] };
-  const nx = I.risk.to ? [I.risk.action, I.risk.to] : (v.dossier && NEXT_DOS[v.dossier.status]) || NEXT_STATE[o.state] || [I.risk.action, null];
+  const nx = o.cancelled ? ['Aucune : le dossier est annulé', null] : I.risk.to ? [I.risk.action, I.risk.to] : (v.dossier && NEXT_DOS[v.dossier.status]) || NEXT_STATE[o.state] || [I.risk.action, null];
 
   // Une seule action principale par rôle ; les autres vont dans « Plus d'actions ».
   // Dossier rempli en ligne : le planificateur valide et confirme d'un coup dans le panneau dédié.
@@ -527,8 +558,8 @@ function OrderSheet({ token, orderId, role, showPlan, onClose }) {
           </div>}
         </div>
         <div className="op-head-ring">
-          <Ring value={o.cancelled ? 0 : idx + 1} max={ORDER_STATES.length} size={86} stroke={8} color={o.state === 'SERVICE_ACTIF' || o.state === 'CLOTURE' ? 'var(--ok)' : 'var(--accent)'}><span className="op-ring-n">{idx + 1}</span><span className="op-ring-d">sur {ORDER_STATES.length}</span></Ring>
-          <span className="tiny muted">étape</span>
+          <Ring value={o.cancelled ? 0 : idx + 1} max={ORDER_STATES.length} size={86} stroke={8} color={o.state === 'SERVICE_ACTIF' || o.state === 'CLOTURE' ? 'var(--ok)' : 'var(--accent)'}><span className="op-ring-n">{o.cancelled ? '–' : idx + 1}</span><span className="op-ring-d">{o.cancelled ? 'annulé' : 'sur ' + ORDER_STATES.length}</span></Ring>
+          <span className="tiny muted">{o.cancelled ? 'dossier' : 'étape'}</span>
         </div>
       </div>
       <Progress state={o.state} />
@@ -540,7 +571,7 @@ function OrderSheet({ token, orderId, role, showPlan, onClose }) {
         <div className="op-fact"><span className="eyebrow">Paiement</span><b className="small">{PAYMENT_STATES[o.payment.status]}</b><span className="tiny muted">{money(o.payment.amount)} <Sim what="Moov Money" /></span></div>
         <div className="op-fact"><span className="eyebrow">Rendez-vous</span><b className="small">{appt ? fmtDate(appt.date) : 'Pas encore'}</b><span className="tiny muted">{appt ? slotLabel(appt.slot) + ' · ' + APPT_STATES[appt.status] : 'Aucun créneau choisi'}</span></div>
         <div className="op-fact"><span className="eyebrow">Réseau</span><b className="small">{I.portReserved ? 'Port réservé' : 'Port non réservé'}</b><span className="tiny muted"><Sim what="référentiel fictif" /></span></div>
-        <div className="op-fact" title="Suggestion calculée (IA-02), à vérifier"><span className="eyebrow">À faire ensuite</span><b className="small">{nx[0]}</b><span className="tiny muted">{nx[1] && ROLES[nx[1]] ? 'par : ' + ROLES[nx[1]].label : 'suggestion automatique'}</span></div>
+        <div className="op-fact" title="Suggestion calculée (IA-02), à vérifier"><span className="eyebrow">À faire ensuite</span><b className="small">{nx[0]}</b><span className="tiny muted">{nx[1] && ROLES[nx[1]] ? 'par : ' + ROLES[nx[1]].label : o.cancelled ? 'plus rien à faire sur ce dossier' : 'suggestion automatique'}</span></div>
       </div>
       {payPending && isC && <div className="alert alert-info small">Rapprochement manuel envoyé : il attend la validation du superviseur.</div>}
       {v.stale && <div className="alert alert-warn small">Lien avec Moov Prospect interrompu depuis le {fmtDateTime(v.stale)} : l’étape affichée peut être ancienne.</div>}
@@ -858,6 +889,8 @@ function SignoffLine({ s, ws }) {
   const [tone, label, more] = s.state === 'attente'
     ? ['warn', 'En attente du client', left != null && left > 0 ? 'Validation automatique dans ' + leftTxt(left) + ' (vers ' + hhmm(s.autoAt) + ') s’il ne répond pas.' : 'Il ne répond pas : la validation automatique est imminente.']
     : s.state === 'validee' ? ['ok', 'Visite validée par le client', 'Il a vérifié la box et Internet' + (s.at ? ', le ' + fmtDateTime(s.at) : '') + '.']
+    : s.state === 'auto' && s.mode === 'regle' ? ['ok', 'Souci réglé par l’équipe', (s.problem ? 'Le client avait signalé : « ' + s.problem + ' ». ' : '') + 'La visite est validée' + (s.at ? ', le ' + fmtDateTime(s.at) : '') + '.']
+    : s.state === 'auto' && s.mode === 'annule' ? ['neutral', 'Visite sans suite', 'La commande a été annulée' + (s.at ? ', le ' + fmtDateTime(s.at) : '') + '.']
     : s.state === 'auto' ? ['ok', 'Visite validée automatiquement', (s.mode === 'auto' ? 'Le client a laissé partir le technicien sans vérifier' : 'Le client n’a pas répondu à temps') + (s.at ? ', le ' + fmtDateTime(s.at) : '') + '.']
     : ['bad', 'Le client signale un souci', s.problem ? '« ' + s.problem + ' »' : 'Un ticket est ouvert pour le superviseur.'];
   return <section className="card op-signoff" aria-label="Validation de la visite par le client">
@@ -1093,6 +1126,8 @@ function Dashboard({ token, open, goSearch, goApprovals }) {
   const pending = ap.data ? ap.data.approvals.filter(a => a.status === 'en_attente') : [];
   const stateRows = ORDER_STATES.filter(s => d.byState[s] > 0);
   const maxState = Math.max(1, ...stateRows.map(s => d.byState[s]));
+  // Les dossiers annulés ne sont dans aucune étape : le total de la carte « Par étape » est la somme des barres.
+  const nStages = sum(ORDER_STATES, s => d.byState[s] || 0), nCancelled = Math.max(0, d.total - nStages);
   return <div className="op-dash">
     <p className="op-honest tiny muted"><Sim what="données fictives" /> Indicateurs calculés sur les dossiers inventés de cet espace : ils montrent la méthode, pas un gain réel.</p>
     <div className="op-kpis" data-tour="ops-kpis">
@@ -1142,7 +1177,7 @@ function Dashboard({ token, open, goSearch, goApprovals }) {
 
     <div className="op-dgrid3">
       <section className="card stack">
-        <div className="card-title"><h2>Par étape</h2><span className="small muted">{d.total} dossier{d.total > 1 ? 's' : ''}</span></div>
+        <div className="card-title"><h2>Par étape</h2><span className="small muted">{nStages} dossier{nStages > 1 ? 's' : ''}{nCancelled > 0 ? ' (hors ' + nCancelled + ' annulé' + (nCancelled > 1 ? 's' : '') + ')' : ''}</span></div>
         <Stacked parts={PHASES.map(([l, ss, c]) => ({ label: l, value: sum(ss, s => d.byState[s]), color: c }))} height={12} />
         <div className="op-legend2">{PHASES.map(([l, ss, c]) => <span key={l} className="tiny"><i style={{ background: c }} />{l} <b>{sum(ss, s => d.byState[s])}</b></span>)}</div>
         <div className="stack-s">{stateRows.map(s => <div key={s} className="op-srow"><span className="small grow">{STATE_INFO[s].label}</span><span className="op-sbar"><i style={{ width: d.byState[s] / maxState * 100 + '%' }} /></span><b className="small num">{d.byState[s]}</b></div>)}</div>

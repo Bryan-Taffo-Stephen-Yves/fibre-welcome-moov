@@ -477,6 +477,12 @@ button.op-capbtn:hover { background: var(--surface-3); }
   --op-red: #ff6f7d; --op-amber: #ffc460; --op-green: #6fdca2; --op-blue: #93b1ff; }
 .op-root.has-call { padding-bottom: 120px; }
 .op-calldock > * { pointer-events: auto; }
+.op-calldock > .op-waiting { margin-bottom: 10px; }
+.op-waiting { background: var(--dark); color: var(--on-dark); border-radius: var(--r-lg, 20px); padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; box-shadow: var(--shadow-lg), 0 0 0 2px var(--op-amber); }
+.op-waiting-row { display: flex; align-items: center; gap: 10px; }
+.op-waiting-row .op-trunc { display: flex; flex-direction: column; }
+.op-waiting .btn { color: var(--on-dark); }
+.op-openonly { display: inline-flex; align-items: center; gap: 8px; font-size: 13.5px; padding: 0 12px; }
 .op-call { --call-yes: #17915a; --call-no: #d42a3c; background: var(--dark); color: var(--on-dark); border-radius: var(--r-xl, 28px); padding: 18px; display: flex; flex-direction: column; gap: 14px; box-shadow: var(--shadow-lg), inset 0 0 0 1px color-mix(in srgb, var(--on-dark) 12%, transparent); animation: op-call-in .3s cubic-bezier(.2,.9,.3,1.2); }
 .op-call.is-ring { box-shadow: var(--shadow-lg), 0 0 0 3px var(--call-yes); }
 .op-call-top { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }

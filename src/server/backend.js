@@ -1,16 +1,83 @@
 // Serveur simulé : il tourne dans le navigateur (ou dans Node pour les tests) mais se comporte comme un
 // vrai serveur. Chaque appel passe par : session validée → rôle autorisé → périmètre du dossier → règle métier
 // → journal d'audit → persistance. Masquer un bouton n'est jamais le contrôle d'accès (CDC 2.2).
-import { buildWorkspace, startOfDay, H, DAY } from './seed.js';
+import { buildWorkspace, startOfDay, H, DAY, CAP_DAYS, extendCapacity, isWorkingDay } from './seed.js';
 import * as D from './domain.js';
 import { AppError, SYS, byId, getOrder, audit, emit, notify, addMessage, openBlocker, resolveBlocker, openBlockers, transition } from './domain.js';
-import { STATE_INFO, BLOCKER_TYPES, ROLES, DOC_TYPES, REPORT_TYPES, APPT_STATES, PAYMENT_STATES, ZONES, CHECKLIST_TECH, stateRank, ORDER_STATES, OFFERS, SHOP_ZONES, DOSSIER_DOCS, TECH_DOCS, SLOT_HOURS, PREP_CHECKLIST, hourLabel } from './model.js';
+import { STATE_INFO, BLOCKER_TYPES, ROLES, DOC_TYPES, REPORT_TYPES, APPT_STATES, PAYMENT_STATES, ZONES, CHECKLIST_TECH, stateRank, ORDER_STATES, OFFERS, SHOP_ZONES, DOSSIER_DOCS, TECH_DOCS, SLOT_HOURS, PREP_CHECKLIST, hourLabel, AUDIT_LABELS, CONFIG_LABELS } from './model.js';
 import { estimate, risk, assistantAnswer, summarize, evaluate, fmtDate, fmtDateTime } from './ai.js';
 import { SCENARIOS, runScenarioSetup } from './scenarios.js';
 import { techAnswer } from './techhelp.js';
 
 const READONLY = ['auditeur'];
 const STAFF_ALL = ['conseiller', 'planificateur', 'technicien', 'superviseur', 'admin', 'auditeur'];
+
+// ---------- Contrôle commun des entrées ----------
+// Texte saisi : jamais autre chose qu'une chaîne, coupée à la taille voulue.
+const txt = (v, max = 500) => (typeof v === 'string' ? v.trim().slice(0, max) : '');
+const isObj = v => !!v && typeof v === 'object' && !Array.isArray(v);
+const MAX_TEXT = 2000;
+const MAX_THUMB = 500000;
+// Refuse d'emblée les arguments qui ne peuvent pas être des saisies normales : texte énorme, nombre non fini, clé dangereuse,
+// imbrication démesurée. Chaque commande vérifie ensuite ses propres champs.
+function checkInput(v, depth = 0, key = '') {
+  if (typeof v === 'string') { if (v.length > (key === 'thumb' ? MAX_THUMB : MAX_TEXT)) throw new AppError('args', 'Texte trop long (' + MAX_TEXT.toLocaleString('fr-FR') + ' caractères au maximum).'); return; }
+  if (typeof v === 'number') { if (!Number.isFinite(v)) throw new AppError('args', 'Nombre invalide.'); return; }
+  if (v == null || typeof v === 'boolean') return;
+  if (depth > 6 || typeof v !== 'object') throw new AppError('args', 'Données invalides.');
+  if (Array.isArray(v)) { if (v.length > 200) throw new AppError('args', 'Liste trop longue.'); for (const x of v) checkInput(x, depth + 1, key); return; }
+  for (const k of Object.keys(v)) { if (k === '__proto__' || k === 'constructor' || k === 'prototype') throw new AppError('args', 'Données invalides.'); checkInput(v[k], depth + 1, k); }
+}
+const cleanArgs = (args, what = 'Arguments') => {
+  if (args === undefined) return {};
+  if (!isObj(args)) throw new AppError('args', what + ' invalides : une saisie est attendue.');
+  checkInput(args);
+  return args;
+};
+// Signature stable des arguments d'une commande (sans la version attendue, qui change d'un rejeu à l'autre).
+const stable = v => (Array.isArray(v) ? '[' + v.map(stable).join(',') + ']' : isObj(v) ? '{' + Object.keys(v).sort().map(k => JSON.stringify(k) + ':' + stable(v[k])).join(',') + '}' : JSON.stringify(v === undefined ? null : v));
+const argSig = args => { const { expectedVersion, ...rest } = args; const t = stable(rest); let h = 2166136261; for (let i = 0; i < t.length; i++) { h ^= t.charCodeAt(i); h = Math.imul(h, 16777619); } return (h >>> 0).toString(16) + ':' + t.length; };
+
+// Plafonds : les listes qui grossissent sans fin gardent leurs dernières lignes. Jamais supprimé : ce qui attend encore (tâches, envois à reprendre,
+// blocages ouverts, tickets ouverts, rappels à faire).
+const keepLast = (arr, max, must = () => false) => {
+  if (!Array.isArray(arr) || arr.length <= max) return arr;
+  let extra = arr.length - max; const out = [];
+  for (const x of arr) { if (extra > 0 && !must(x)) { extra--; continue; } out.push(x); }
+  return out;
+};
+const keepNewestKeys = (obj, max, at) => {
+  if (!obj || typeof obj !== 'object') return obj;
+  const keys = Object.keys(obj);
+  if (keys.length <= max) return obj;
+  const keep = keys.sort((a, b) => at(obj[b]) - at(obj[a])).slice(0, max);
+  const out = {}; for (const k of keep) out[k] = obj[k];
+  return out;
+};
+function trimWorkspace(ws, now) {
+  const pendingSend = new Set(ws.jobs.filter(j => !j.done && j.kind === 'send').map(j => j.ref));
+  // Tâches : seules les tâches terminées sont purgées (les 100 dernières, de moins de 2 h). Les tâches en attente restent toutes.
+  const keep = new Set(); let nDone = 0;
+  for (let i = ws.jobs.length - 1; i >= 0; i--) { const j = ws.jobs[i]; if (!j.done) keep.add(j); else if (now - j.due < 2 * H && nDone < 100) { nDone++; keep.add(j); } }
+  ws.jobs = ws.jobs.filter(j => keep.has(j));
+  ws.audit = keepLast(ws.audit, 1000);
+  ws.events = keepLast(ws.events, 2000);
+  ws.notifications = keepLast(ws.notifications, 1000);
+  ws.messages = keepLast(ws.messages, 1000);
+  ws.tickets = keepLast(ws.tickets, 400, t => t.status === 'ouvert');
+  ws.callbacks = keepLast(ws.callbacks, 300, c => c.status === 'demande');
+  ws.blockers = keepLast(ws.blockers, 600, b => b.status === 'ouvert');
+  ws.predictions = keepLast(ws.predictions, 1000);
+  ws.deliveries = keepLast(ws.deliveries, 400, d => d.status === 'en_attente');
+  ws.outbox = keepLast(ws.outbox, 300, o => pendingSend.has(o.id));
+  ws.alerts = keepLast(ws.alerts, 200, a => !a.ack);
+  if (ws.assistantLog) ws.assistantLog = keepLast(ws.assistantLog, 300);
+  if (ws.techRatings) ws.techRatings = keepLast(ws.techRatings, 300);
+  if (ws.privacy) ws.privacy = keepLast(ws.privacy, 200);
+  ws.documents = keepLast(ws.documents, 700, d => d.status !== 'remplace');
+  ws.seenEvents = keepNewestKeys(ws.seenEvents, 500, v => Number(v) || 0);
+  ws.idem = keepNewestKeys(ws.idem, 300, v => (v && v.at) || 0);
+}
 
 export function createBackend({ storage, realNow = () => Date.now(), lock = null, onChange = () => {} }) {
   const cache = {};
@@ -63,7 +130,7 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
   // ---------- Sessions et identité de démonstration (CDC 7.3, 11.1) ----------
   function session(token) {
     const reg = readReg();
-    const s = reg.sessions[token];
+    const s = typeof token === 'string' && Object.hasOwn(reg.sessions, token) ? reg.sessions[token] : null;
     if (!s) throw new AppError('session', 'Session inconnue ou expirée. Rouvrez votre espace depuis le laboratoire.');
     if (s.expiresReal < realNow()) throw new AppError('session', 'Session expirée.');
     const ws = load(s.wsId);
@@ -111,7 +178,8 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
       const appt = byId(ws.appointments, O(4).apptId); D.confirmAppointment(ws, O(4), appt, byId(ws.users, 'U5'), { teamId: 'T1' });
     });
     pay(O(5), 100); at(96, () => { O(5).requiredDocs = ['justif_domicile']; openBlocker(ws, O(5), 'PIECE_MANQUANTE', { actor: byId(ws.users, 'U4'), detail: 'Justificatif de domicile' }); });
-    at(70, () => emit(ws, O(7), 'DOSSIER_RECU', { source: 'Import manuel', publicText: STATE_INFO.DOSSIER_RECU.client }));
+    // Dossiers reçus mais jamais payés : ils attendent dans cet état depuis la date de leur premier événement.
+    at(70, () => { emit(ws, O(7), 'DOSSIER_RECU', { source: 'Import manuel', publicText: STATE_INFO.DOSSIER_RECU.client }); O(7).stateSince = ws.clock; });
     at(69, () => openBlocker(ws, O(7), 'PAIEMENT_NON_RAPPROCHE', { detail: 'Dossier importé sans justificatif vérifiable' }));
     pay(O(8), 260); ready(O(8), 240);
     at(230, () => { const o = O(8); o.state = 'SERVICE_ACTIF'; o.stateSince = ws.clock; o.version++; emit(ws, o, 'SERVICE_ACTIF', { source: 'Historique importé', publicText: STATE_INFO.SERVICE_ACTIF.client }); });
@@ -119,7 +187,7 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
     at(150, () => { const b = openBlockers(ws, 'O9')[0]; if (b) { b.ownerUserId = null; } });
     pay(O(10), 60);
     pay(O(11), 30); ready(O(11), 10);
-    at(40, () => emit(ws, O(6), 'DOSSIER_RECU', { source: 'Moov Prospect (simulé)', publicText: STATE_INFO.DOSSIER_RECU.client }));
+    at(40, () => { emit(ws, O(6), 'DOSSIER_RECU', { source: 'Moov Prospect (simulé)', publicText: STATE_INFO.DOSSIER_RECU.client }); O(6).stateSince = ws.clock; });
     ws.clock = real;
     // Démo en direct : Brice (Équipe Cocody 1), le technicien présenté partout, garde une place sur les premiers créneaux.
     const firstDays = [...new Set(ws.capacity.map(c => c.date))].sort((x, y) => x - y).slice(0, 3);
@@ -128,10 +196,12 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
     ws.outbox = []; ws.jobs = [];
   }
 
-  function createWorkspace({ name, seed } = {}) {
+  function createWorkspace(opts) {
+    const { name, seed } = isObj(opts) ? opts : {};
     const id = 'ws_' + rand(12);
     const sd = Number.isFinite(seed) ? seed : Math.floor(Math.random() * 1e6);
-    const ws = buildWorkspace({ id, name: name || 'Mon espace de test', seed: sd, realNow: realNow() });
+    const label = txt(name, 60);
+    const ws = buildWorkspace({ id, name: label || 'Mon espace de test', seed: sd, realNow: realNow() });
     warmUp(ws);
     audit(ws, { id: 'OWNER', name: 'Testeur', role: 'testeur' }, 'espace.creer', id, 'Graine ' + sd);
     const reg = readReg();
@@ -169,18 +239,22 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
   const activeWo = (ws, orderId, techId) => ws.workOrders.find(w => w.orderId === orderId && w.techUserId === techId && !['terminee', 'annulee', 'echec'].includes(w.status));
 
   // ---------- Commandes ----------
-  const C = {};
+  const C = Object.create(null);
   const cmd = (name, roles, fn, opts = {}) => { C[name] = { roles, fn, ...opts }; };
   const CLIENTISH = ['client', 'representant'];
 
   cmd('claim.start', ['client'], ({ ws, user, args }) => {
-    const ref = String(args.ref || '').trim().toUpperCase();
-    user.claimTries = (user.claimTries || 0) + 1;
-    if (user.claimTries > 8) throw new AppError('limite', 'Trop d’essais. Réessayez plus tard ou contactez le service client.');
+    const ref = txt(args.ref, 40).toUpperCase();
+    // Au plus 8 essais ; ensuite le rattachement est fermé 15 minutes (horloge de l'espace) à partir du dernier essai, puis il rouvre.
+    if ((user.claimTries || 0) >= 8) {
+      if (ws.clock - (user.claimAt || 0) < 15 * 60e3) throw new AppError('limite', 'Trop d’essais. Réessayez dans quelques minutes ou contactez le service client.');
+      user.claimTries = 0;
+    }
+    user.claimTries = (user.claimTries || 0) + 1; user.claimAt = ws.clock;
     const o = ws.orders.find(x => x.ref === ref && !x.claimed && x.contactPhone === user.phone);
     if (o) {
       const code = String(100000 + Math.floor(rnum() * 899999));
-      o.claimCode = { code, userId: user.id, exp: ws.lastReal + 10 * 60e3 };
+      o.claimCode = { code, userId: user.id, exp: ws.lastReal + 10 * 60e3, fails: 0 };
       ws.outbox.push({ id: 'SMS' + (++ws.seq), userId: user.id, to: user.phone, channel: 'sms', text: 'Moov Fibre (démo) : votre code de rattachement est ' + code + '. Il expire dans 10 minutes.', at: ws.clock, attempts: 1, status: 'livré (accusé simulé)', provider: 'identité démo' });
     }
     audit(ws, user, 'rattachement.demande', ref, o ? 'code envoyé' : 'aucune correspondance');
@@ -188,10 +262,16 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
     return { message: 'Si cette référence correspond à votre numéro vérifié, un code vient d’être envoyé par SMS (voir la boîte d’envoi simulée du laboratoire).' };
   });
   cmd('claim.verify', ['client'], ({ ws, user, args }) => {
-    const ref = String(args.ref || '').trim().toUpperCase();
+    const ref = txt(args.ref, 40).toUpperCase();
     const o = ws.orders.find(x => x.ref === ref && !x.claimed);
-    if (!o || !o.claimCode || o.claimCode.userId !== user.id || o.claimCode.exp < ws.lastReal || o.claimCode.code !== String(args.code || '').trim()) throw new AppError('code', 'Code invalide ou expiré.');
-    o.claimed = true; o.customerId = user.id; delete o.claimCode; o.version++; user.claimTries = 0;
+    if (!o || !o.claimCode || o.claimCode.userId !== user.id || o.claimCode.exp < ws.lastReal) throw new AppError('code', 'Code invalide ou expiré.');
+    if (o.claimCode.code !== String(typeof args.code === 'string' || typeof args.code === 'number' ? args.code : '').trim()) {
+      // Le code à 6 chiffres ne peut pas être deviné à l'infini : après 5 erreurs il est annulé (l'erreur est enregistrée malgré le refus).
+      o.claimCode.fails = (o.claimCode.fails || 0) + 1;
+      if (o.claimCode.fails >= 5) { delete o.claimCode; throw new AppError('code', 'Trop d’erreurs : ce code est annulé. Demandez-en un nouveau.', { keep: true }); }
+      throw new AppError('code', 'Code invalide ou expiré.', { keep: true });
+    }
+    o.claimed = true; o.customerId = user.id; delete o.claimCode; o.version++; user.claimTries = 0; user.claimAt = null;
     emit(ws, o, 'DOSSIER_RATTACHE', { actor: user, publicText: 'Dossier rattaché à votre compte.' });
     audit(ws, user, 'rattachement.valide', o.ref);
     return { orderId: o.id };
@@ -200,10 +280,14 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
   cmd('order.updateAddress', ['client'], ({ ws, user, order, args }) => {
     const a = order.address;
     const before = JSON.stringify(a);
-    for (const k of ['landmark', 'accessNotes', 'floor', 'building']) if (args[k] != null) a[k] = String(args[k]).slice(0, 300);
-    if (args.lat != null && args.lng != null) { a.lat = Number(args.lat); a.lng = Number(args.lng); }
+    for (const k of ['landmark', 'accessNotes', 'floor', 'building']) if (args[k] != null) a[k] = txt(args[k], 300);
+    if (args.lat != null && args.lng != null) {
+      const lat = Number(args.lat), lng = Number(args.lng);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) throw new AppError('gps', 'Position GPS invalide : réessayez ou précisez l’adresse avec un repère.');
+      a.lat = lat; a.lng = lng;
+    }
     // La personne présente le jour J est rangée avec l'adresse : le nom du client ne change pas.
-    if (args.onsiteContact != null) a.onsiteContact = String(args.onsiteContact).trim().slice(0, 80);
+    if (args.onsiteContact != null) a.onsiteContact = txt(args.onsiteContact, 80);
     if (args.gps === false) { a.lat = null; a.lng = null; }
     const after = JSON.stringify(a);
     if (after === before) return { unchanged: true };
@@ -217,11 +301,15 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
   }, { order: true });
 
   cmd('doc.upload', ['client'], ({ ws, user, order, args }) => {
-    if (!DOC_TYPES[args.type]) throw new AppError('fichier', 'Type de pièce inconnu.');
+    if (typeof args.type !== 'string' || !Object.hasOwn(DOC_TYPES, args.type)) throw new AppError('fichier', 'Type de pièce inconnu.');
+    if (typeof args.name !== 'string' || !args.name.trim()) throw new AppError('fichier', 'Nom de fichier manquant.');
+    const size = args.size == null ? 0 : Number(args.size);
+    if (typeof args.mime !== 'string' || !Number.isFinite(size) || size < 0) throw new AppError('fichier', 'Fichier incomplet : format ou taille invalides.');
     D.docCheck(args);
-    for (const d of ws.documents.filter(d => d.orderId === order.id && d.type === args.type && ['analyse', 'a_valider', 'refuse'].includes(d.status))) d.status = 'remplace';
+    // Une pièce remplacée ne garde plus sa vignette (elle ne sert plus et alourdirait l'espace).
+    for (const d of ws.documents.filter(d => d.orderId === order.id && d.type === args.type && ['analyse', 'a_valider', 'refuse'].includes(d.status))) { d.status = 'remplace'; d.thumb = null; }
     const suspicious = /(ignore|instruction|admin|valide automatiquement)/i.test(args.name);
-    const doc = { id: 'DOC' + (++ws.seq), orderId: order.id, type: args.type, name: String(args.name).slice(0, 120), size: args.size, mime: args.mime, thumb: D.smallThumb(args.thumb), img: D.imgRef(args.img), status: 'analyse', reason: null, suspicious, at: ws.clock, by: user.name, check: String(args.mime || '').startsWith('image/') ? D.photoCheck(args.quality) : null };
+    const doc = { id: 'DOC' + (++ws.seq), orderId: order.id, type: args.type, name: args.name.slice(0, 120), size, mime: args.mime.slice(0, 80), thumb: D.smallThumb(args.thumb), img: D.imgRef(args.img), status: 'analyse', reason: null, suspicious, at: ws.clock, by: user.name, check: String(args.mime || '').startsWith('image/') ? D.photoCheck(args.quality) : null };
     ws.documents.push(doc);
     order.updatedAt = ws.clock; order.version++;
     { const b = openBlockers(ws, order.id).find(b => b.type === 'PIECE_MANQUANTE'); if (b) { const m = missingDocs(ws, order); b.detail = m.length ? m.map(t => DOC_TYPES[t].label).join(', ') : 'Pièce(s) reçue(s), vérification par le conseiller'; } }
@@ -242,13 +330,13 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
   cmd('appt.cancel', ['client', 'representant', 'conseiller', 'planificateur'], ({ ws, user, order, args }) => {
     const a = byId(ws.appointments, order.apptId);
     if (!a) throw new AppError('introuvable', 'Aucun rendez-vous.');
-    D.cancelAppointment(ws, order, a, user, args.reason || 'Annulé par ' + ROLES[user.role].label.toLowerCase(), { force: ['conseiller', 'planificateur'].includes(user.role) });
+    D.cancelAppointment(ws, order, a, user, txt(args.reason, 200) || 'Annulé par ' + ROLES[user.role].label.toLowerCase(), { force: ['conseiller', 'planificateur'].includes(user.role) });
   }, { order: true, scope: 'rdv' });
   const prepReady = o => PREP_CHECKLIST.filter(i => i.need).every(i => o.prep[i.id]);
   cmd('prep.toggle', ['client', 'representant'], ({ ws, user, order, args }) => {
     if (!PREP_CHECKLIST.some(i => i.id === args.id)) throw new AppError('prep', 'Point de préparation inconnu.');
     const before = prepReady(order);
-    order.prep[args.id] = !!args.value; order.updatedAt = ws.clock;
+    (order.prep ||= {})[args.id] = !!args.value; order.updatedAt = ws.clock;
     // Toute la liste indispensable vient d'être cochée : le technicien de la visite est prévenu.
     const wo = ws.workOrders.find(w => w.orderId === order.id && ['affectee', 'en_route'].includes(w.status));
     if (!before && prepReady(order) && wo) notify(ws, wo.techUserId, { title: 'Le client est prêt pour la visite', body: order.ref + ' : ' + user.name.split(' ')[0] + ' a coché la préparation (présence, accès, prise libre' + (order.prep.animaux ? ', animaux enfermés' : '') + ').', orderId: order.id, kind: 'tache' });
@@ -277,17 +365,17 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
     return ans;
   }, { order: true, scope: 'messages' });
   cmd('assistant.handoff', ['client', 'representant'], ({ ws, user, order, args }) => {
-    const t = { id: 'TK' + (++ws.seq), orderId: order.id, type: 'question_assistant', text: String(args.question || '').slice(0, 500), status: 'ouvert', ownerRole: 'conseiller', at: ws.clock, by: user.name };
+    const t = { id: 'TK' + (++ws.seq), orderId: order.id, type: 'question_assistant', text: txt(args.question, 500), status: 'ouvert', ownerRole: 'conseiller', at: ws.clock, by: user.name };
     ws.tickets.push(t);
     addMessage(ws, order, { from: 'auto', author: SYS, text: 'Votre question a été transmise à un conseiller : « ' + t.text + ' ».', auto: true });
-    const adv = ws.users.find(u => u.role === 'conseiller' && u.zones.includes(order.zone));
+    const adv = advisorFor(ws, order);
     if (adv) notify(ws, adv.id, { title: 'Question transférée par l’assistant', body: order.ref + ' : ' + t.text.slice(0, 80), orderId: order.id, kind: 'tache' });
     return t;
   }, { order: true, scope: 'messages' });
 
   cmd('callback.request', ['client', 'representant'], ({ ws, user, order, args }) => {
-    const adv = ws.users.find(u => u.role === 'conseiller' && u.zones.includes(order.zone));
-    const cb = { id: 'CB' + (++ws.seq), orderId: order.id, reason: String(args.reason || '').slice(0, 300), availability: args.availability || 'Dès que possible', status: 'demande', ownerUserId: adv ? adv.id : null, ownerName: adv ? adv.name : '—', at: ws.clock };
+    const adv = advisorFor(ws, order);
+    const cb = { id: 'CB' + (++ws.seq), orderId: order.id, reason: txt(args.reason, 300), availability: txt(args.availability, 100) || 'Dès que possible', status: 'demande', ownerUserId: adv ? adv.id : null, ownerName: adv ? adv.name : '—', at: ws.clock };
     ws.callbacks.push(cb);
     emit(ws, order, 'RAPPEL_DEMANDE', { actor: user, publicText: 'Demande de rappel enregistrée (' + cb.availability + ').' });
     if (adv) notify(ws, adv.id, { title: 'Demande de rappel', body: order.ref + ' — ' + cb.availability, orderId: order.id, kind: 'tache' });
@@ -295,24 +383,30 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
   }, { order: true, scope: 'messages' });
 
   cmd('report.create', ['client', 'representant'], ({ ws, user, order, args }) => {
-    if (!REPORT_TYPES[args.type]) throw new AppError('type', 'Type de signalement inconnu.');
+    if (typeof args.type !== 'string' || !Object.hasOwn(REPORT_TYPES, args.type)) throw new AppError('type', 'Type de signalement inconnu.');
     if (args.type === 'tech_absent' && !ws.workOrders.some(w => w.orderId === order.id && ['affectee', 'en_route', 'sur_place'].includes(w.status))) throw new AppError('etat', 'Aucune visite de technicien n’est prévue en ce moment sur ce dossier.');
+    if (args.type === 'tech_absent') {
+      // « Pas venu » n'a de sens qu'une fois le créneau commencé (8 h le matin, 13 h l'après-midi, ou l'heure précise fixée).
+      const wo = ws.workOrders.find(w => w.orderId === order.id && w.status === 'affectee'); const appt = wo && byId(ws.appointments, wo.apptId);
+      const startH = appt && (appt.time ? Number(String(appt.time).split(':')[0]) : (appt.slot === 'a' ? 13 : 8));
+      if (appt && !ws.workOrders.some(w => w.orderId === order.id && ['en_route', 'sur_place'].includes(w.status)) && ws.clock < appt.date + startH * H) throw new AppError('etat', 'Le rendez-vous n’a pas encore commencé : le technicien n’est pas en retard.');
+    }
     if (args.type === 'pas_internet' && stateRank(order.state) < stateRank('INSTALLATION_TERMINEE')) throw new AppError('etat', 'L’installation n’est pas encore faite : Internet arrivera après le passage du technicien et l’activation.');
     const map = { tech_absent: 'TECHNICIEN_ABSENT', adresse: 'ADRESSE_AMBIGUE', pas_internet: 'SERVICE_KO' };
-    const t = { id: 'TK' + (++ws.seq), orderId: order.id, type: 'signalement:' + args.type, text: String(args.text || '').slice(0, 500), status: 'ouvert', ownerRole: args.type === 'tech_absent' ? 'planificateur' : 'conseiller', at: ws.clock, by: user.name };
+    const t = { id: 'TK' + (++ws.seq), orderId: order.id, type: 'signalement:' + args.type, text: txt(args.text, 500), status: 'ouvert', ownerRole: args.type === 'tech_absent' ? 'planificateur' : 'conseiller', at: ws.clock, by: user.name };
     ws.tickets.push(t);
     emit(ws, order, 'SIGNALEMENT', { actor: user, payload: { type: args.type }, publicText: 'Signalement : ' + REPORT_TYPES[args.type] + '.' });
     if (map[args.type]) openBlocker(ws, order, map[args.type], { actor: user, detail: 'Signalé par le client' + (t.text ? ' : ' + t.text : '') });
-    else { const sup = ws.users.find(u => u.role === 'superviseur'); notify(ws, sup.id, { title: 'Dossier signalé bloqué par le client', body: order.ref + (t.text ? ' : ' + t.text : ''), orderId: order.id, kind: 'alerte' }); }
+    else { const sup = ws.users.find(u => u.role === 'superviseur' && u.active); if (sup) notify(ws, sup.id, { title: 'Dossier signalé bloqué par le client', body: order.ref + (t.text ? ' : ' + t.text : ''), orderId: order.id, kind: 'alerte' }); }
     return t;
-  }, { order: true });
+  }, { order: true, scope: 'messages' });
 
   cmd('prefs.set', ['client', 'representant'], ({ user, args }) => { for (const k of ['sms', 'whatsapp', 'push']) if (k in args) user.prefs[k] = !!args[k]; });
   cmd('notif.read', null, ({ ws, user, args }) => { for (const n of ws.notifications) if (n.userId === user.id && (args.all || n.id === args.id)) n.read = true; }, { noAudit: true, readOnlyOk: true });
 
   cmd('activation.feedback', ['client'], ({ ws, user, order, args }) => {
     if (order.state !== 'SERVICE_ACTIF') throw new AppError('etat', 'Le service n’est pas encore activé.');
-    order.clientCheck = { works: !!args.works, at: ws.clock, speed: args.speed || null };
+    order.clientCheck = { works: !!args.works, at: ws.clock, speed: txt(args.speed, 40) || null };
     emit(ws, order, 'CONTROLE_CLIENT', { actor: user, payload: order.clientCheck, publicText: args.works ? 'Vous avez confirmé que la connexion fonctionne.' : 'Vous avez signalé que la connexion ne fonctionne pas.' });
     if (!args.works) openBlocker(ws, order, 'SERVICE_KO', { actor: user, detail: 'Contrôle client négatif après activation' });
   }, { order: true });
@@ -320,11 +414,13 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
   cmd('feedback.submit', ['client'], ({ ws, user, order, args }) => {
     if (!['SERVICE_ACTIF', 'CLOTURE'].includes(order.state)) throw new AppError('etat', 'L’avis est demandé après l’activation.');
     if (ws.feedback.some(f => f.orderId === order.id)) throw new AppError('doublon', 'Vous avez déjà donné votre avis. Merci !');
-    const score = Math.max(1, Math.min(5, Number(args.score) || 0));
-    const f = { id: 'FB' + (++ws.seq), orderId: order.id, score, comment: String(args.comment || '').slice(0, 500), at: ws.clock, followUp: score <= 2 ? 'ouvert' : null };
+    const rawScore = args.score == null || args.score === '' ? NaN : Number(args.score);
+    if (!Number.isFinite(rawScore) || rawScore < 1 || rawScore > 5) throw new AppError('note', 'Choisissez une note de 1 à 5 étoiles.');
+    const score = Math.round(rawScore);
+    const f = { id: 'FB' + (++ws.seq), orderId: order.id, score, comment: txt(args.comment, 500), at: ws.clock, followUp: score <= 2 ? 'ouvert' : null };
     ws.feedback.push(f);
     emit(ws, order, 'AVIS_CLIENT', { actor: user, payload: { score }, publicText: 'Merci pour votre avis (' + score + '/5).' });
-    if (score <= 2) { const sup = ws.users.find(u => u.role === 'superviseur'); ws.tickets.push({ id: 'TK' + (++ws.seq), orderId: order.id, type: 'insatisfaction', text: f.comment, status: 'ouvert', ownerRole: 'superviseur', at: ws.clock, by: user.name }); notify(ws, sup.id, { title: 'Client insatisfait', body: order.ref + ' : ' + score + '/5', orderId: order.id, kind: 'alerte' }); }
+    if (score <= 2) { const sup = ws.users.find(u => u.role === 'superviseur' && u.active); ws.tickets.push({ id: 'TK' + (++ws.seq), orderId: order.id, type: 'insatisfaction', text: f.comment, status: 'ouvert', ownerRole: 'superviseur', at: ws.clock, by: user.name }); if (sup) notify(ws, sup.id, { title: 'Client insatisfait', body: order.ref + ' : ' + score + '/5', orderId: order.id, kind: 'alerte' }); }
     return f;
   }, { order: true });
 
@@ -332,7 +428,7 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
     if (order.cancelled || ws.refunds.some(r => r.orderId === order.id && r.status !== 'rejete')) throw new AppError('doublon', 'Une demande d’annulation existe déjà.');
     if (stateRank(order.state) >= stateRank('INSTALLATION_TERMINEE')) throw new AppError('etat', 'L’installation est faite : l’annulation passe par le service client (résiliation).');
     if (D.missionUnderway(ws, order)) throw new AppError('etat', 'Le technicien est déjà en route ou chez vous : parlez-lui ou écrivez à votre conseiller.');
-    const r = { id: 'RB' + (++ws.seq), orderId: order.id, reason: String(args.reason || '').slice(0, 300), status: 'demande', steps: [{ at: ws.clock, by: user.name, what: 'Demande client' }], amount: null };
+    const r = { id: 'RB' + (++ws.seq), orderId: order.id, reason: txt(args.reason, 300), status: 'demande', steps: [{ at: ws.clock, by: user.name, what: 'Demande client' }], amount: null };
     ws.refunds.push(r);
     order.payment.status = order.payment.status === 'confirme' ? 'rembourse_demande' : order.payment.status;
     openBlocker(ws, order, 'ANNULATION', { actor: user, detail: r.reason });
@@ -340,16 +436,23 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
   }, { order: true });
 
   cmd('privacy.request', ['client'], ({ ws, user, args }) => {
-    if (ws.privacy.some(x => x.userId === user.id && x.kind === args.kind && x.status === 'reçue')) throw new AppError('doublon', 'Vous avez déjà une demande de ce type en cours : l’équipe Moov y répond sous 30 jours.');
-    const p = { id: 'RGPD' + (++ws.seq), userId: user.id, kind: args.kind, text: String(args.text || '').slice(0, 500), status: 'reçue', at: ws.clock, due: ws.clock + 30 * DAY };
+    const kind = txt(args.kind, 80);
+    if (!kind) throw new AppError('type', 'Choisissez le type de demande (accès, correction ou suppression).');
+    if (ws.privacy.some(x => x.userId === user.id && x.kind === kind && x.status === 'reçue')) throw new AppError('doublon', 'Vous avez déjà une demande de ce type en cours : l’équipe Moov y répond sous 30 jours.');
+    const p = { id: 'RGPD' + (++ws.seq), userId: user.id, kind, text: txt(args.text, 500), status: 'reçue', at: ws.clock, due: ws.clock + 30 * DAY };
     ws.privacy.push(p);
-    const adm = ws.users.find(u => u.role === 'admin'); notify(ws, adm.id, { title: 'Demande sur les données personnelles', body: user.name + ' : ' + args.kind, kind: 'tache' });
+    const adm = ws.users.find(u => u.role === 'admin' && u.active); if (adm) notify(ws, adm.id, { title: 'Demande sur les données personnelles', body: user.name + ' : ' + kind, kind: 'tache' });
     return p;
   });
   cmd('delegation.add', ['client'], ({ ws, user, order, args }) => {
     const del = byId(ws.users, args.delegateId);
     if (!del || del.role !== 'representant') throw new AppError('introuvable', 'Représentant inconnu.');
-    const d = { id: 'DL' + (++ws.seq), orderId: order.id, clientId: user.id, delegateId: del.id, scopes: (args.scopes || ['rdv']).filter(s => ['rdv', 'messages'].includes(s)), from: ws.clock, until: ws.clock + (Number(args.days) || 30) * DAY, revoked: false };
+    if (args.scopes != null && !Array.isArray(args.scopes)) throw new AppError('portee', 'Choisissez ce que le représentant peut faire (rendez-vous, messages).');
+    const scopes = [...new Set((args.scopes == null ? ['rdv'] : args.scopes).filter(s => ['rdv', 'messages'].includes(s)))];
+    if (!scopes.length) throw new AppError('portee', 'Choisissez au moins une chose que le représentant peut faire (rendez-vous, messages).');
+    const days = args.days == null || args.days === '' ? 30 : Number(args.days);
+    if (!Number.isFinite(days) || days < 1 || days > 365) throw new AppError('valeur', 'Durée de la délégation : saisissez un nombre de jours entre 1 et 365.');
+    const d = { id: 'DL' + (++ws.seq), orderId: order.id, clientId: user.id, delegateId: del.id, scopes, from: ws.clock, until: ws.clock + days * DAY, revoked: false };
     ws.delegations.push(d);
     emit(ws, order, 'DELEGATION', { actor: user, publicText: 'Délégation accordée à ' + del.name + '.' });
     return d;
@@ -368,13 +471,13 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
     if (!s.owner) throw new AppError('interdit', 'Le site des offres de démonstration est réservé au propriétaire de l’espace.');
     const offer = OFFERS.find(x => x.id === args.offerId);
     if (!offer) throw new AppError('offre', 'Choisissez une offre.');
-    const zone = String(args.zone || '');
+    const zone = txt(args.zone, 40);
     if (!SHOP_ZONES.includes(zone)) throw new AppError('zone', ZONES.some(z => z.id === zone) ? 'La fibre n’est pas encore ouverte à la vente en ligne dans cette commune.' : 'Choisissez votre commune.');
-    const name = String(args.name || '').trim().replace(/\s+/g, ' ').slice(0, 60);
+    const name = txt(args.name, 200).replace(/\s+/g, ' ').slice(0, 60);
     if (name.length < 3 || !/[a-zà-ÿ]/i.test(name)) throw new AppError('nom', 'Indiquez votre prénom et votre nom.');
-    const digits = String(args.phone || '').replace(/\D/g, '');
+    const digits = txt(args.phone, 60).replace(/\D/g, '');
     if (digits.length < 8 || digits.length > 15) throw new AppError('tel', 'Numéro de téléphone incomplet.');
-    const street = String(args.street || '').trim().slice(0, 120);
+    const street = txt(args.street, 120);
     if (street.length < 3) throw new AppError('adresse', 'Indiquez votre quartier et votre rue.');
     // Même nom qu'un client de l'espace : c'est lui qui achète. Sinon, un nouveau client est créé (personnage jouable).
     let cust = ws.users.find(u => u.role === 'client' && u.name.toLowerCase() === name.toLowerCase());
@@ -389,7 +492,7 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
     const o = {
       id, ref: nextRef(ws), customerId: cust.id, claimed: true, contactPhone: cust.phone, contactName: cust.name,
       offer: offer.name + ' ' + offer.speed, offerId: offer.id, equipmentModel: 'ONT ZTE F670L', zone,
-      address: { commune: ZONES.find(z => z.id === zone).name, street, landmark: String(args.landmark || '').trim().slice(0, 200), building: args.building === 'immeuble' ? 'immeuble' : 'maison', floor: '', lat: null, lng: null, accessNotes: '', verified: false },
+      address: { commune: ZONES.find(z => z.id === zone).name, street, landmark: txt(args.landmark, 200), building: args.building === 'immeuble' ? 'immeuble' : 'maison', floor: '', lat: null, lng: null, accessNotes: '', verified: false },
       state: 'DOSSIER_RECU', stateSince: ws.clock, version: 1, createdAt: ws.clock, updatedAt: ws.clock, source: 'Site des offres (démo)',
       payment: { ref: 'MM-' + (600000000 + ws.seq), amount: offer.pay, currency: 'XOF', status: 'en_attente', payer: '•••• ' + digits.slice(-2) },
       apptId: null, woId: null, cancelled: false, prep: {}, scenario: null, linkedTo: null, portReserved: false, clientCheck: null, paidAt: null,
@@ -412,10 +515,10 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
     if (!order.dossier) throw new AppError('etat', 'Ce dossier ne se remplit pas en ligne.');
     if (order.dossier.submittedAt) throw new AppError('doublon', 'Dossier déjà envoyé. Pour compléter, utilisez l’onglet Dossier.');
     if (order.cancelled || order.state !== 'PREPARATION') throw new AppError('etat', 'Ce dossier ne peut plus être envoyé.');
-    const info = args.info || {};
+    const info = isObj(args.info) ? args.info : {};
     const a = order.address;
-    for (const k of ['landmark', 'accessNotes', 'floor']) if (info[k] != null) a[k] = String(info[k]).trim().slice(0, 300);
-    if (info.onsiteContact != null) a.onsiteContact = String(info.onsiteContact).trim().slice(0, 80);
+    for (const k of ['landmark', 'accessNotes', 'floor']) if (info[k] != null) a[k] = txt(info[k], 300);
+    if (info.onsiteContact != null) a.onsiteContact = txt(info.onsiteContact, 80);
     if (info.building != null) a.building = info.building === 'immeuble' ? 'immeuble' : 'maison';
     if (!a.landmark || a.landmark.length < 8) throw new AppError('info', 'Indiquez un repère d’au moins 8 caractères (ex. portail bleu après la pharmacie).');
     const cur = order.apptId && byId(ws.appointments, order.apptId);
@@ -446,7 +549,7 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
   cmd('dossier.ask', ['conseiller', 'superviseur'], ({ ws, user, order, args }) => {
     if (!order.dossier) throw new AppError('etat', 'Ce dossier n’a pas été rempli en ligne.');
     const miss = D.dossierMissing(ws, order).filter(m => m.kind !== 'slot');
-    const note = String(args.text || '').trim().slice(0, 400);
+    const note = txt(args.text, 400);
     if (!miss.length && note.length < 5) throw new AppError('motif', 'Rien ne manque : écrivez au client ce que vous attendez de lui.');
     // « Bonjour Awa, il manque encore : … » : la salutation en tête, puis la liste, puis le mot de la conseillère.
     const hi = /^((?:bonjour|bonsoir)[^,.!?]{0,40}[,!]\s*)/i.exec(note);
@@ -472,7 +575,7 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
     const notOk = unvalidatedDocs(ws, order);
     if (notOk.length) throw new AppError('pieces', 'Pièces pas encore validées par la conseillère : ' + notOk.map(t => DOC_TYPES[t].label.toLowerCase()).join(', ') + '.');
     if (order.state === 'PREPARATION') D.markReady(ws, order, user, { quiet: true });
-    return D.confirmAppointment(ws, order, appt, user, { teamId: args.teamId, time: String(args.time) });
+    return D.confirmAppointment(ws, order, appt, user, { teamId: typeof args.teamId === 'string' ? args.teamId : undefined, time: String(args.time) });
   }, { order: true });
 
   // Appel simulé au service client : il sonne chez la conseillère du dossier (aucun son, aucun vrai appel).
@@ -482,7 +585,7 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
     if (calls.some(c => c.orderId === order.id && LIVE_CALL.includes(c.status))) throw new AppError('doublon', 'Un appel est déjà en cours.');
     const adv = advisorFor(ws, order);
     if (!adv) throw new AppError('indispo', 'Aucun conseiller disponible : demandez plutôt à être rappelé.');
-    const c = { id: 'APL' + (++ws.seq), orderId: order.id, fromId: user.id, fromName: user.name, toId: adv.id, toName: adv.name, reason: String(args.reason || '').trim().slice(0, 200), status: 'sonne', startedAt: ws.clock, answeredAt: null, endedAt: null, note: '' };
+    const c = { id: 'APL' + (++ws.seq), orderId: order.id, fromId: user.id, fromName: user.name, toId: adv.id, toName: adv.name, reason: txt(args.reason, 200), status: 'sonne', startedAt: ws.clock, answeredAt: null, endedAt: null, note: '' };
     calls.push(c);
     if (calls.length > 60) calls.splice(0, calls.length - 60);
     ws.jobs.push({ id: 'J' + (++ws.seq), kind: 'call', ref: c.id, due: ws.clock + 45e3, generation: ws.generation, attempts: 0 });
@@ -511,7 +614,7 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
       return c;
     }
     c.status = 'termine'; c.endedAt = ws.clock; c.endedBy = user.role === 'conseiller' ? 'conseiller' : 'client';
-    if (user.role === 'conseiller' && args.note) c.note = String(args.note).trim().slice(0, 500);
+    if (user.role === 'conseiller' && args.note) c.note = txt(args.note, 500);
     const sec = Math.max(1, Math.round((c.endedAt - c.answeredAt) / 1000));
     if (o) emit(ws, o, 'APPEL_TERMINE', { actor: user, payload: { sec }, publicText: 'Appel avec ' + c.toName.split(' ')[0] + ' (' + (sec >= 60 ? Math.floor(sec / 60) + ' min ' : '') + (sec % 60) + ' s).' });
     if (o && c.note) addMessage(ws, o, { from: 'staff', author: byId(ws.users, c.toId) || user, text: 'Note d’appel : ' + c.note, visibility: 'interne' });
@@ -526,7 +629,7 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
     if (list.some(r => r.woId === wo.id)) throw new AppError('doublon', 'Vous avez déjà noté cette visite. Merci !');
     const score = Math.round(Number(args.score));
     if (!(score >= 1 && score <= 5)) throw new AppError('note', 'Choisissez une note de 1 à 5 étoiles.');
-    const r = { id: 'NT' + (++ws.seq), orderId: order.id, woId: wo.id, techUserId: wo.techUserId, teamId: wo.teamId, score, clear: args.clear == null ? null : !!args.clear, problem: !!args.problem, comment: String(args.comment || '').trim().slice(0, 500), at: ws.clock };
+    const r = { id: 'NT' + (++ws.seq), orderId: order.id, woId: wo.id, techUserId: wo.techUserId, teamId: wo.teamId, score, clear: args.clear == null ? null : !!args.clear, problem: !!args.problem, comment: txt(args.comment, 500), at: ws.clock };
     list.push(r);
     const team = byId(ws.teams, wo.teamId);
     if (team) team.quality = Math.round(((Number(team.quality) || 4) * 9 + score) / 10 * 10) / 10;
@@ -542,18 +645,18 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
 
   // ----- Équipes Moov -----
   cmd('msg.reply', ['conseiller', 'superviseur'], ({ ws, user, order, args }) => {
-    const text = String(args.text || '').trim(); if (!text) throw new AppError('vide', 'Message vide.');
+    const text = txt(args.text, 1000); if (!text) throw new AppError('vide', 'Message vide.');
     const m = addMessage(ws, order, { from: 'staff', author: user, text, visibility: 'public' });
-    if (args.fromAi) audit(ws, user, 'ia.resume.utilise', order.ref, 'Brouillon IA relu et envoyé', { ai: true });
+    if (args.fromAi) audit(ws, user, 'ia.resume.utilise', order.ref, 'Brouillon automatique relu et envoyé', { ai: true });
     for (const t of ws.tickets.filter(t => t.orderId === order.id && t.status === 'ouvert' && t.type === 'question_assistant')) t.status = 'repondu';
     notify(ws, order.customerId, { title: 'Réponse de ' + user.name, body: text.slice(0, 140), orderId: order.id, kind: 'message' });
     return m;
   }, { order: true });
-  cmd('note.add', ['conseiller', 'planificateur', 'technicien', 'superviseur'], ({ ws, user, order, args }) => { const text = String(args.text || '').trim().slice(0, 1000); if (!text) throw new AppError('vide', 'Note vide.'); return addMessage(ws, order, { from: 'staff', author: user, text, visibility: 'interne' }); }, { order: true });
+  cmd('note.add', ['conseiller', 'planificateur', 'technicien', 'superviseur'], ({ ws, user, order, args }) => { const text = txt(args.text, 1000); if (!text) throw new AppError('vide', 'Note vide.'); return addMessage(ws, order, { from: 'staff', author: user, text, visibility: 'interne' }); }, { order: true });
   cmd('doc.request', ['conseiller'], ({ ws, user, order, args }) => {
-    if (!DOC_TYPES[args.type]) throw new AppError('type', 'Type de pièce inconnu.');
+    if (typeof args.type !== 'string' || !Object.hasOwn(DOC_TYPES, args.type)) throw new AppError('type', 'Type de pièce inconnu.');
     const label = DOC_TYPES[args.type].label;
-    const reason = String(args.reason || '').trim().slice(0, 200);
+    const reason = txt(args.reason, 200);
     if ((order.requiredDocs || []).includes(args.type) && missingDocs(ws, order).includes(args.type)) throw new AppError('doublon', label + ' est déjà demandée à ce client.');
     order.requiredDocs = [...new Set([...(order.requiredDocs || []), args.type])];
     order.docNotes = { ...(order.docNotes || {}), [args.type]: reason };
@@ -570,6 +673,7 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
     const doc = byId(ws.documents, args.docId); if (!doc) throw new AppError('introuvable', 'Pièce introuvable.');
     const order = scopedOrder(ws, user, doc.orderId);
     if (doc.status !== 'a_valider') throw new AppError('etat', 'Cette pièce n’est pas en attente de validation.');
+    if (!['valide', 'refuse'].includes(args.decision)) throw new AppError('decision', 'Choisissez de valider ou de refuser la pièce.');
     if (args.decision === 'valide') {
       doc.status = 'valide';
       emit(ws, order, 'PIECE_VALIDEE', { actor: user, publicText: 'Pièce validée : ' + DOC_TYPES[doc.type].label + '.' });
@@ -585,11 +689,11 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
       const wo = ws.workOrders.find(w => w.orderId === order.id && !['terminee', 'annulee', 'echec'].includes(w.status));
       if (wo && TECH_DOCS.includes(doc.type)) notify(ws, wo.techUserId, { title: 'Pièce validée pour votre mission', body: order.ref + ' : ' + DOC_TYPES[doc.type].label + ' consultable dans la mission.', orderId: order.id, kind: 'tache' });
     } else {
-      if (!args.reason) throw new AppError('motif', 'Indiquez le motif du refus : le client doit comprendre quoi corriger.');
-      doc.status = 'refuse'; doc.reason = String(args.reason).slice(0, 200);
+      if (!txt(args.reason, 200)) throw new AppError('motif', 'Indiquez le motif du refus : le client doit comprendre quoi corriger.');
+      doc.status = 'refuse'; doc.reason = txt(args.reason, 200);
       if ((order.requiredDocs || []).includes(doc.type)) { const b = openBlockers(ws, order.id).find(b => b.type === 'PIECE_MANQUANTE'); if (b) b.detail = missingDocs(ws, order).map(t => DOC_TYPES[t].label).join(', '); else openBlocker(ws, order, 'PIECE_MANQUANTE', { actor: user, detail: DOC_TYPES[doc.type].label, silent: true }); }
-      emit(ws, order, 'PIECE_REFUSEE', { actor: user, publicText: 'Pièce refusée : ' + args.reason });
-      notify(ws, order.customerId, { title: 'Pièce à remplacer', body: DOC_TYPES[doc.type].label + ' refusée : ' + args.reason, orderId: order.id, kind: 'action' });
+      emit(ws, order, 'PIECE_REFUSEE', { actor: user, publicText: 'Pièce refusée : ' + doc.reason });
+      notify(ws, order.customerId, { title: 'Pièce à remplacer', body: DOC_TYPES[doc.type].label + ' refusée : ' + doc.reason, orderId: order.id, kind: 'action' });
     }
     audit(ws, user, 'piece.' + args.decision, order.ref, doc.name);
   };
@@ -607,7 +711,7 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
     audit(ws, user, 'dossier.avis', order.ref, done.valide + ' validée(s), ' + done.refuse + ' refusée(s)');
     return done;
   }, { order: true });
-  cmd('address.requestPrecision', ['conseiller', 'planificateur'], ({ ws, user, order, args }) => openBlocker(ws, order, 'ADRESSE_AMBIGUE', { actor: user, detail: args.detail || '' }), { order: true });
+  cmd('address.requestPrecision', ['conseiller', 'planificateur'], ({ ws, user, order, args }) => openBlocker(ws, order, 'ADRESSE_AMBIGUE', { actor: user, detail: txt(args.detail, 300) }), { order: true });
   cmd('order.markReady', ['planificateur'], ({ ws, user, order }) => {
     // Dossier rempli en ligne : il passe par « Valider le dossier » (pièces vérifiées par la conseillère).
     if (order.dossier) throw new AppError('etat', 'Dossier en ligne : utilisez « Choisir le technicien et l’heure » une fois les pièces validées par la conseillère.');
@@ -627,38 +731,43 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
   cmd('blocker.resolve', ['conseiller', 'planificateur', 'superviseur'], ({ ws, user, args }) => {
     const b = byId(ws.blockers, args.blockerId); if (!b) throw new AppError('introuvable', 'Blocage introuvable.');
     scopedOrder(ws, user, b.orderId);
-    if (!args.resolution || args.resolution.length < 5) throw new AppError('motif', 'Décrivez la résolution (elle reste dans l’historique).');
+    const resolution = txt(args.resolution, 500);
+    if (resolution.length < 5) throw new AppError('motif', 'Décrivez la résolution (elle reste dans l’historique).');
     if (['ACTIVATION_ECHOUEE', 'ANOMALIE_ACTIVATION', 'ANNULATION', 'PAIEMENT_NON_RAPPROCHE'].includes(b.type)) throw new AppError('interdit', 'Ce blocage se lève par sa procédure dédiée (activation, paiement ou annulation), pas manuellement.');
     if (b.type === 'CAPACITE_RESEAU') { const o = getOrder(ws, b.orderId); const port = ws.ports[o.zone]; if (port.free <= 0 && !o.portReserved) throw new AppError('capacite', 'Toujours aucun port libre : réservez une ressource d’abord.'); }
-    resolveBlocker(ws, b, { actor: user, resolution: args.resolution });
+    resolveBlocker(ws, b, { actor: user, resolution });
   });
   cmd('network.addPorts', ['planificateur', 'superviseur'], ({ ws, user, args }) => {
-    const p = ws.ports[args.zone]; if (!p) throw new AppError('introuvable', 'Zone inconnue.');
+    const p = typeof args.zone === 'string' && ZONES.some(z => z.id === args.zone) && Object.hasOwn(ws.ports, args.zone) ? ws.ports[args.zone] : null;
+    if (!p) throw new AppError('introuvable', 'Zone inconnue.');
     if (user.role === 'planificateur' && !(user.zones || []).includes(args.zone)) throw new AppError('interdit', 'Zone hors de votre périmètre.');
     const n = Math.round(Number(args.n) || 1); if (n < 1 || n > 10) throw new AppError('nombre', 'Entre 1 et 10 ports à la fois.');
     p.free += n; audit(ws, user, 'reseau.ports', args.zone, '+' + n + ' port(s) réservé(s) (simulé)');
   });
   cmd('escalate', ['conseiller', 'planificateur'], ({ ws, user, order, args }) => {
-    if (!args.reason || String(args.reason).trim().length < 5) throw new AppError('motif', 'Expliquez en une phrase pourquoi vous escaladez (le superviseur le lira).');
-    const sup = ws.users.find(u => u.role === 'superviseur');
-    ws.tickets.push({ id: 'TK' + (++ws.seq), orderId: order.id, type: 'escalade', text: String(args.reason || ''), status: 'ouvert', ownerRole: 'superviseur', at: ws.clock, by: user.name });
-    emit(ws, order, 'ESCALADE', { actor: user, payload: { reason: args.reason } });
-    notify(ws, sup.id, { title: 'Escalade', body: order.ref + ' : ' + (args.reason || ''), orderId: order.id, kind: 'alerte' });
-    audit(ws, user, 'escalade', order.ref, args.reason || '');
+    const reason = txt(args.reason, 500);
+    if (reason.length < 5) throw new AppError('motif', 'Expliquez en une phrase pourquoi vous escaladez (le superviseur le lira).');
+    const sup = ws.users.find(u => u.role === 'superviseur' && u.active);
+    ws.tickets.push({ id: 'TK' + (++ws.seq), orderId: order.id, type: 'escalade', text: reason, status: 'ouvert', ownerRole: 'superviseur', at: ws.clock, by: user.name });
+    emit(ws, order, 'ESCALADE', { actor: user, payload: { reason } });
+    if (sup) notify(ws, sup.id, { title: 'Escalade', body: order.ref + ' : ' + reason, orderId: order.id, kind: 'alerte' });
+    audit(ws, user, 'escalade', order.ref, reason);
   }, { order: true });
   cmd('callback.update', ['conseiller'], ({ ws, user, args }) => {
     const cb = byId(ws.callbacks, args.id); if (!cb) throw new AppError('introuvable', 'Rappel introuvable.');
     const order = scopedOrder(ws, user, cb.orderId);
-    cb.status = args.status; cb.note = args.note || ''; cb.doneAt = ws.clock; cb.ownerName = user.name;
+    if (!['fait', 'injoignable', 'annule'].includes(args.status)) throw new AppError('etat', 'Indiquez si le client a été rappelé, injoignable ou si le rappel est annulé.');
+    cb.status = args.status; cb.note = txt(args.note, 500); cb.doneAt = ws.clock; cb.ownerName = user.name;
     emit(ws, order, 'RAPPEL_' + args.status.toUpperCase(), { actor: user, publicText: args.status === 'fait' ? 'Un conseiller vous a rappelé.' : null });
   });
-  cmd('ticket.close', ['conseiller', 'planificateur', 'superviseur'], ({ ws, user, args }) => { const t = byId(ws.tickets, args.id); if (!t) throw new AppError('introuvable', 'Ticket introuvable.'); scopedOrder(ws, user, t.orderId); if (t.ownerRole && t.ownerRole !== user.role && user.role !== 'superviseur') throw new AppError('interdit', 'Ce ticket est suivi par le ' + (ROLES[t.ownerRole] || {}).label.toLowerCase() + '.'); if (t.status !== 'ouvert') throw new AppError('doublon', 'Ce ticket est déjà traité.');
-    if (t.type === 'escalade_terrain' && !String(args.note || '').trim()) throw new AppError('motif', 'Écrivez une réponse pour le technicien.');
-    t.status = 'traite'; t.closedBy = user.name; t.note = args.note || '';
+  cmd('ticket.close', ['conseiller', 'planificateur', 'superviseur'], ({ ws, user, args }) => { const t = byId(ws.tickets, args.id); if (!t) throw new AppError('introuvable', 'Ticket introuvable.'); scopedOrder(ws, user, t.orderId); if (t.ownerRole && t.ownerRole !== user.role && user.role !== 'superviseur') throw new AppError('interdit', 'Ce ticket est suivi par le ' + String((ROLES[t.ownerRole] || {}).label || t.ownerRole).toLowerCase() + '.'); if (t.status !== 'ouvert') throw new AppError('doublon', 'Ce ticket est déjà traité.');
+    const note = txt(args.note, 500);
+    if (t.type === 'escalade_terrain' && !note) throw new AppError('motif', 'Écrivez une réponse pour le technicien.');
+    t.status = 'traite'; t.closedBy = user.name; t.note = note;
     if (t.type === 'escalade_terrain') {
       const wo = byId(ws.workOrders, t.woId); const h = wo && (wo.help || []).find(x => x.ticketId === t.id);
-      if (h) { h.status = 'repondu'; h.reply = { by: user.name, text: String(args.note).trim().slice(0, 500), at: ws.clock }; }
-      if (wo) notify(ws, wo.techUserId, { title: 'Réponse de ' + user.name.split(' ')[0], body: String(args.note).trim().slice(0, 160), orderId: t.orderId, kind: 'info' });
+      if (h) { h.status = 'repondu'; h.reply = { by: user.name, text: note, at: ws.clock }; }
+      if (wo) notify(ws, wo.techUserId, { title: 'Réponse de ' + user.name.split(' ')[0], body: note.slice(0, 160), orderId: t.orderId, kind: 'info' });
     }
     // Un souci signalé après la visite est réglé : la visite est validée et le technicien est libéré.
     if (t.type === 'visite' && t.woId) {
@@ -669,14 +778,17 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
 
   cmd('appt.confirm', ['planificateur'], ({ ws, user, order, args }) => {
     if (order.dossier) { const notOk = unvalidatedDocs(ws, order); if (notOk.length) throw new AppError('pieces', 'Pièces pas encore validées par la conseillère : ' + notOk.map(t => DOC_TYPES[t].label.toLowerCase()).join(', ') + '.'); }
-    return D.confirmAppointment(ws, order, byId(ws.appointments, order.apptId) || {}, user, { teamId: args.teamId });
+    const appt = byId(ws.appointments, order.apptId);
+    if (!appt) throw new AppError('etat', 'Aucun rendez-vous à confirmer sur ce dossier.');
+    return D.confirmAppointment(ws, order, appt, user, { teamId: typeof args.teamId === 'string' ? args.teamId : undefined });
   }, { order: true });
   cmd('appt.reassign', ['planificateur'], ({ ws, user, order, args }) => {
-    if (!args.reason || args.reason.length < 5) throw new AppError('motif', 'Une réaffectation doit être justifiée.');
+    const why = txt(args.reason, 300);
+    if (why.length < 5) throw new AppError('motif', 'Une réaffectation doit être justifiée.');
     const appt = byId(ws.appointments, order.apptId);
     if (!appt || appt.status !== 'confirme') throw new AppError('etat', 'Aucun rendez-vous confirmé à réaffecter.');
     const team = byId(ws.teams, args.teamId);
-    if (!team || !team.available || !team.zones.includes(order.zone)) throw new AppError('equipe', 'Équipe indisponible ou hors zone.');
+    if (!team || !D.teamOk(ws, team) || !team.zones.includes(order.zone)) throw new AppError('equipe', 'Équipe indisponible ou hors zone.');
     if (team.id === appt.teamId) throw new AppError('equipe', 'C’est déjà l’équipe prévue : choisissez une autre équipe.');
     if (!(user.zones || []).includes(order.zone)) throw new AppError('interdit', 'Hors de votre périmètre.');
     const cap = ws.capacity.find(c => c.teamId === team.id && c.date === appt.date && c.slot === appt.slot);
@@ -684,16 +796,17 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
     // Heure déjà fixée : le nouveau technicien ne doit pas être attendu ailleurs au même moment.
     if (appt.time) { const clash = D.teamBusyAt(ws, team.id, appt.date, appt.time, appt.id); if (clash) throw new AppError('heure', ((byId(ws.users, team.techUserId) || {}).name || team.name) + ' a déjà une visite à ' + hourLabel(appt.time) + ' (' + clash + '). Choisissez une autre équipe.'); }
     const oldTeam = byId(ws.teams, appt.teamId);
-    D.releaseCap(ws, appt); cap.used++; appt.capId = cap.id; appt.teamId = team.id;
     const wo = byId(ws.workOrders, appt.woId);
+    if (!wo) throw new AppError('etat', 'Aucune mission à réaffecter sur ce rendez-vous.');
     const prevTech = wo.techUserId;
     if (!['affectee'].includes(wo.status)) throw new AppError('etat', 'Le technicien a déjà commencé cette mission : prévenez-le avant de la confier à une autre équipe.');
+    D.releaseCap(ws, appt); cap.used++; appt.capId = cap.id; appt.teamId = team.id;
     wo.formerTechs = [...new Set([...(wo.formerTechs || []), prevTech])];
     wo.teamId = team.id; wo.techUserId = team.techUserId; wo.version++; wo.status = 'affectee';
-    emit(ws, order, 'MISSION_REAFFECTEE', { actor: user, payload: { from: oldTeam.name, to: team.name, reason: args.reason }, publicText: 'Une autre équipe a été désignée pour votre installation. Le créneau ne change pas.' });
-    audit(ws, user, 'mission.reaffecter', order.ref, oldTeam.name + ' → ' + team.name + ' : ' + args.reason);
+    emit(ws, order, 'MISSION_REAFFECTEE', { actor: user, payload: { from: oldTeam.name, to: team.name, reason: why }, publicText: 'Une autre équipe a été désignée pour votre installation. Le créneau ne change pas.' });
+    audit(ws, user, 'mission.reaffecter', order.ref, oldTeam.name + ' → ' + team.name + ' : ' + why);
     for (const b of openBlockers(ws, order.id).filter(b => ['TECHNICIEN_ABSENT', 'SOUS_TRAITANT'].includes(b.type))) resolveBlocker(ws, b, { actor: user, resolution: 'Réaffecté à ' + team.name });
-    notify(ws, prevTech, { title: 'Mission retirée', body: order.ref + ' réaffectée : ' + args.reason, orderId: order.id, kind: 'tache' });
+    notify(ws, prevTech, { title: 'Mission retirée', body: order.ref + ' réaffectée : ' + why, orderId: order.id, kind: 'tache' });
     notify(ws, team.techUserId, { title: 'Nouvelle mission', body: order.ref + ' — ' + fmtDate(appt.date) + ' ' + (appt.time ? 'à ' + hourLabel(appt.time) : D.slotLabel(appt.slot)), orderId: order.id, kind: 'tache' });
     const newFirst = String((byId(ws.users, team.techUserId) || {}).name || team.name).split(' ')[0];
     notify(ws, order.customerId, appt.time
@@ -704,10 +817,11 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
     const t = byId(ws.teams, args.teamId); if (!t) throw new AppError('introuvable', 'Équipe inconnue.');
     if (!t.zones.some(z => (user.zones || []).includes(z))) throw new AppError('interdit', 'Équipe hors de votre périmètre.');
     t.available = !!args.available;
-    audit(ws, user, 'equipe.' + (t.available ? 'disponible' : 'indisponible'), t.name, args.reason || '');
+    const teamWhy = txt(args.reason, 200);
+    audit(ws, user, 'equipe.' + (t.available ? 'disponible' : 'indisponible'), t.name, teamWhy);
     for (const a of ws.appointments.filter(a => a.teamId === t.id && a.status === 'confirme' && a.date >= startOfDay(ws.clock))) {
       const o = getOrder(ws, a.orderId);
-      if (!t.available) openBlocker(ws, o, t.contractor ? 'SOUS_TRAITANT' : 'TECHNICIEN_ABSENT', { actor: user, detail: t.name + ' : ' + (args.reason || 'indisponible') });
+      if (!t.available) openBlocker(ws, o, t.contractor ? 'SOUS_TRAITANT' : 'TECHNICIEN_ABSENT', { actor: user, detail: t.name + ' : ' + (teamWhy || 'indisponible') });
       else for (const b of openBlockers(ws, o.id).filter(b => ['TECHNICIEN_ABSENT', 'SOUS_TRAITANT'].includes(b.type))) resolveBlocker(ws, b, { actor: user, resolution: t.name + ' de nouveau disponible' });
     }
   });
@@ -721,7 +835,7 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
     c.cap = n; audit(ws, user, 'capacite.modifier', c.id, String(n));
   });
 
-  cmd('wo.action', ['technicien'], ({ ws, user, args }) => {
+  cmd('wo.action', ['technicien'], ({ ws, user, args, realNow }) => {
     const wo = byId(ws.workOrders, args.woId);
     if (wo && wo.techUserId !== user.id && (wo.formerTechs || []).includes(user.id)) throw new AppError('retiree', 'Cette mission a été confiée à une autre équipe entre-temps. Votre action n’a pas été appliquée ; votre brouillon est conservé.');
     if (!wo || wo.techUserId !== user.id) throw new AppError('introuvable', 'Mission introuvable ou non affectée.');
@@ -729,7 +843,16 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
     if (args.expectedVersion != null && args.expectedVersion !== wo.version && !['photo', 'comment'].includes(args.action)) {
       throw new AppError('conflit', 'La mission a été modifiée pendant que vous étiez hors ligne (version ' + args.expectedVersion + ' → ' + wo.version + '). Action refusée, brouillon conservé.', { current: wo.version });
     }
-    return D.woAction(ws, wo, args.action, args.args || {}, user);
+    const inner = isObj(args.args) ? args.args : {};
+    // Action faite hors ligne puis rejouée : l'appareil donne l'heure réelle (ms) à laquelle le technicien a agi. On en déduit l'heure de
+    // l'espace (horloge actuelle moins le temps réel écoulé depuis), sans jamais remonter avant l'étape précédente ni dépasser l'horloge.
+    const off = Number(args.offlineAt != null ? args.offlineAt : inner.offlineAt);
+    let at;
+    if (Number.isFinite(off) && off > 0 && off <= realNow) {
+      const prev = Math.max(0, ...Object.values(wo.times || {}).filter(Number.isFinite));
+      at = Math.min(ws.clock, Math.max(prev, ws.clock - (realNow - off)));
+    }
+    return D.woAction(ws, wo, typeof args.action === 'string' ? args.action : '', inner, user, at);
   }, { idem: true });
 
   // ----- Boîte à outils du technicien sur place : poser une question, montrer un problème en photo, transmettre au responsable -----
@@ -811,49 +934,66 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
   cmd('payment.manualRequest', ['conseiller'], ({ ws, user, order, args }) => {
     if (order.payment.status !== 'en_attente') throw new AppError('etat', 'Paiement déjà rapproché.');
     if ((ws.approvals || []).some(a => a.kind === 'paiement' && a.orderId === order.id && a.status === 'en_attente')) throw new AppError('doublon', 'Une demande de rapprochement attend déjà la validation du superviseur.');
-    if (!args.justification || args.justification.length < 10) throw new AppError('motif', 'Justification obligatoire (référence du relevé, etc.).');
-    (ws.approvals ||= []).push({ id: 'AP' + (++ws.seq), kind: 'paiement', orderId: order.id, by: user.id, byName: user.name, justification: args.justification, status: 'en_attente', at: ws.clock });
-    audit(ws, user, 'paiement.rapprochement_manuel.demande', order.ref, args.justification);
+    const justification = txt(args.justification, 500);
+    if (justification.length < 10) throw new AppError('motif', 'Justification obligatoire (référence du relevé, etc.).');
+    (ws.approvals ||= []).push({ id: 'AP' + (++ws.seq), kind: 'paiement', orderId: order.id, by: user.id, byName: user.name, justification, status: 'en_attente', at: ws.clock });
+    audit(ws, user, 'paiement.rapprochement_manuel.demande', order.ref, justification);
   }, { order: true });
   cmd('approval.decide', ['superviseur'], ({ ws, user, args }) => {
     const ap = (ws.approvals || []).find(a => a.id === args.id); if (!ap || ap.status !== 'en_attente') throw new AppError('introuvable', 'Demande introuvable.');
     if (ap.by === user.id) throw new AppError('interdit', 'Double validation : la personne qui demande ne peut pas valider.');
     const order = getOrder(ws, ap.orderId);
+    // Une demande hors de la zone du superviseur n'existe pas pour lui (même message qu'un dossier inconnu).
+    if (!canSee(ws, user, order)) throw new AppError('introuvable', 'Demande introuvable.');
+    const note = txt(args.note, 300);
+    const requester = byId(ws.users, ap.by);
+    // La personne qui a fait la demande est toujours prévenue de la décision.
+    const tell = (title, body) => { if (requester) notify(ws, requester.id, { title, body: order.ref + ' : ' + body, orderId: order.id, kind: 'tache' }); };
     ap.status = args.ok ? 'validee' : 'refusee'; ap.decidedBy = user.name; ap.decidedAt = ws.clock;
     audit(ws, user, 'validation.' + ap.kind + '.' + ap.status, order.ref, ap.justification);
     if (!args.ok) {
       if (ap.kind === 'annulation') {
         const r = ws.refunds.find(x => x.id === ap.refundId);
-        if (r) { r.status = 'rejete'; r.steps.push({ at: ws.clock, by: user.name, what: 'Refus du superviseur' + (args.note ? ' : ' + args.note : '') }); }
+        if (r) { r.status = 'rejete'; r.steps.push({ at: ws.clock, by: user.name, what: 'Refus du superviseur' + (note ? ' : ' + note : '') }); }
         if (order.payment.status === 'rembourse_demande') order.payment.status = 'confirme';
-        for (const b of openBlockers(ws, order.id).filter(b => b.type === 'ANNULATION')) resolveBlocker(ws, b, { actor: user, resolution: 'Annulation refusée' + (args.note ? ' : ' + args.note : '') });
+        for (const b of openBlockers(ws, order.id).filter(b => b.type === 'ANNULATION')) resolveBlocker(ws, b, { actor: user, resolution: 'Annulation refusée' + (note ? ' : ' + note : '') });
         emit(ws, order, 'ANNULATION_REFUSEE', { actor: user, publicText: 'Votre demande d’annulation n’a pas été acceptée. Votre installation continue. Un conseiller peut vous expliquer pourquoi.' });
-        notify(ws, order.customerId, { title: 'Annulation non acceptée', body: 'Votre commande ' + order.ref + ' continue.' + (args.note ? ' Motif : ' + args.note : '') + ' Vous pouvez écrire au service client.', orderId: order.id, kind: 'info' });
+        notify(ws, order.customerId, { title: 'Annulation non acceptée', body: 'Votre commande ' + order.ref + ' continue.' + (note ? ' Motif : ' + note : '') + ' Vous pouvez écrire au service client.', orderId: order.id, kind: 'info' });
+        tell('Annulation refusée', 'le superviseur n’a pas validé l’annulation.' + (note ? ' Motif : ' + note : ''));
       }
-      if (ap.kind === 'paiement') { const adv = byId(ws.users, ap.by); if (adv) notify(ws, adv.id, { title: 'Rapprochement refusé', body: order.ref + ' : le superviseur n’a pas validé le paiement manuel.', orderId: order.id, kind: 'tache' }); }
+      if (ap.kind === 'paiement') tell('Rapprochement refusé', 'le superviseur n’a pas validé le paiement manuel.');
       return;
     }
-    if (ap.kind === 'paiement') D.confirmPayment(ws, order, { source: 'Rapprochement manuel audité (' + ap.byName + ' + ' + user.name + ')', actor: user });
+    if (ap.kind === 'paiement') {
+      // Le paiement est peut-être arrivé entre-temps (ou la commande annulée) : la demande est close avec un message clair, sans erreur.
+      if (order.cancelled || order.payment.status !== 'en_attente') { ap.note = order.cancelled ? 'Commande annulée : aucun rapprochement nécessaire.' : 'Paiement déjà rapproché : aucun changement.'; tell('Rapprochement validé, sans effet', ap.note); return; }
+      D.confirmPayment(ws, order, { source: 'Rapprochement manuel audité (' + ap.byName + ' + ' + user.name + ')', actor: user });
+      tell('Rapprochement validé', 'le paiement manuel est validé.');
+    }
     if (ap.kind === 'annulation') {
       const r = ws.refunds.find(x => x.id === ap.refundId);
-      r.status = 'valide'; r.steps.push({ at: ws.clock, by: user.name, what: 'Validation superviseur' });
-      order.cancelled = true; order.version++;
-      if (order.payment.status === 'rembourse_demande') order.payment.status = 'rembourse_valide';
-      const appt = byId(ws.appointments, order.apptId);
-      if (appt && ['reserve', 'confirme'].includes(appt.status)) { appt.status = 'annule'; appt.reason = 'Commande annulée'; D.releaseCap(ws, appt); const wo = byId(ws.workOrders, appt.woId); if (wo) wo.status = 'annulee'; }
+      if (!r) throw new AppError('introuvable', 'Demande d’annulation introuvable.');
+      // Pas de remboursement d'un paiement jamais reçu.
+      const paid = ['rembourse_demande', 'confirme'].includes(order.payment.status);
+      r.status = 'valide'; r.steps.push({ at: ws.clock, by: user.name, what: 'Validation superviseur' + (paid ? '' : ' (aucun paiement reçu : rien à rembourser)') });
+      order.cancelled = true; order.version++; order.updatedAt = ws.clock;
+      if (paid) order.payment.status = 'rembourse_valide';
+      D.closeForCancellation(ws, order, user);
       if (order.portReserved) { ws.ports[order.zone].free++; ws.ports[order.zone].reserved--; order.portReserved = false; }
       for (const b of openBlockers(ws, order.id)) resolveBlocker(ws, b, { actor: user, resolution: 'Commande annulée' });
-      emit(ws, order, 'COMMANDE_ANNULEE', { actor: user, publicText: 'Votre commande est annulée. Le remboursement suit la procédure Moov (simulé dans cette démo).' });
-      ws.jobs.push({ id: 'J' + (++ws.seq), kind: 'refund', ref: r.id, due: ws.clock + 60e3, generation: ws.generation, attempts: 0 });
-      notify(ws, order.customerId, { title: 'Annulation validée', body: 'Votre commande ' + order.ref + ' est annulée. Le remboursement est en cours de traitement (simulé).', orderId: order.id, kind: 'info' });
+      emit(ws, order, 'COMMANDE_ANNULEE', { actor: user, publicText: paid ? 'Votre commande est annulée. Le remboursement suit la procédure Moov (simulé dans cette démo).' : 'Votre commande est annulée. Aucun paiement n’avait été reçu : il n’y a rien à rembourser.' });
+      if (paid) ws.jobs.push({ id: 'J' + (++ws.seq), kind: 'refund', ref: r.id, due: ws.clock + 60e3, generation: ws.generation, attempts: 0 });
+      notify(ws, order.customerId, { title: 'Annulation validée', body: paid ? 'Votre commande ' + order.ref + ' est annulée. Le remboursement est en cours de traitement (simulé).' : 'Votre commande ' + order.ref + ' est annulée. Aucun paiement n’avait été reçu, il n’y a rien à rembourser.', orderId: order.id, kind: 'info' });
+      tell('Annulation validée', 'la commande est annulée.');
     }
   });
   cmd('cancel.instruct', ['conseiller'], ({ ws, user, order, args }) => {
     const r = ws.refunds.find(x => x.orderId === order.id && x.status === 'demande'); if (!r) throw new AppError('introuvable', 'Aucune demande d’annulation.');
-    r.status = 'instruite'; r.steps.push({ at: ws.clock, by: user.name, what: 'Instruction conseiller : ' + (args.note || '') });
-    (ws.approvals ||= []).push({ id: 'AP' + (++ws.seq), kind: 'annulation', orderId: order.id, refundId: r.id, by: user.id, byName: user.name, justification: args.note || 'Annulation demandée par le client', status: 'en_attente', at: ws.clock });
-    audit(ws, user, 'annulation.instruire', order.ref, args.note || '');
-    const sup = ws.users.find(u => u.role === 'superviseur' && u.active); if (sup) notify(ws, sup.id, { title: 'Annulation à valider', body: order.ref + ' : ' + (args.note || 'demande du client'), orderId: order.id, kind: 'tache' });
+    const instr = txt(args.note, 500);
+    r.status = 'instruite'; r.steps.push({ at: ws.clock, by: user.name, what: 'Instruction conseiller : ' + instr });
+    (ws.approvals ||= []).push({ id: 'AP' + (++ws.seq), kind: 'annulation', orderId: order.id, refundId: r.id, by: user.id, byName: user.name, justification: instr || 'Annulation demandée par le client', status: 'en_attente', at: ws.clock });
+    audit(ws, user, 'annulation.instruire', order.ref, instr);
+    const sup = ws.users.find(u => u.role === 'superviseur' && u.active); if (sup) notify(ws, sup.id, { title: 'Annulation à valider', body: order.ref + ' : ' + (instr || 'demande du client'), orderId: order.id, kind: 'tache' });
   }, { order: true });
   cmd('order.close', ['superviseur'], ({ ws, user, order }) => {
     if (order.state !== 'SERVICE_ACTIF') throw new AppError('etat', 'Seul un dossier au service actif peut être clôturé.');
@@ -865,6 +1005,7 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
   }, { order: true });
   cmd('activation.retry', ['superviseur'], ({ ws, user, order }) => {
     const b = openBlockers(ws, order.id).find(b => ['ACTIVATION_ECHOUEE', 'ANOMALIE_ACTIVATION'].includes(b.type));
+    if (order.cancelled) throw new AppError('annule', 'Ce dossier est annulé : l’activation ne sera pas relancée.');
     if (!b || order.state !== 'ACTIVATION_EN_ATTENTE') throw new AppError('etat', 'Aucune activation en échec à relancer.');
     const prev = ws.activations.filter(a => a.orderId === order.id).at(-1);
     const act = { id: 'ACT' + (++ws.seq), orderId: order.id, ref: 'PRV-' + (100000 + ws.seq), serial: prev.serial, status: 'demandee', requestedAt: ws.clock, result: null, retryOf: prev.ref };
@@ -888,42 +1029,66 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
     const u = byId(ws.users, args.userId); if (!u) throw new AppError('introuvable', 'Utilisateur inconnu.');
     if (u.id === user.id) throw new AppError('interdit', 'Vous ne pouvez pas vous désactiver vous-même.');
     if (u.id === 'U1' && !args.active) throw new AppError('interdit', 'Awa porte votre espace de démonstration : son compte ne peut pas être désactivé ici. Essayez avec un autre compte, par exemple un technicien.');
-    u.active = !!args.active; audit(ws, user, 'compte.' + (u.active ? 'activer' : 'desactiver'), u.name, args.reason || '');
+    u.active = !!args.active; audit(ws, user, 'compte.' + (u.active ? 'activer' : 'desactiver'), u.name, txt(args.reason, 200));
   });
-  cmd('user.setZones', ['admin'], ({ ws, user, args }) => { const u = byId(ws.users, args.userId); u.zones = args.zones.filter(z => ZONES.some(x => x.id === z)); audit(ws, user, 'compte.perimetre', u.name, u.zones.join(', ')); });
+  cmd('user.setZones', ['admin'], ({ ws, user, args }) => {
+    const u = byId(ws.users, args.userId); if (!u) throw new AppError('introuvable', 'Utilisateur inconnu.');
+    if (!Array.isArray(args.zones)) throw new AppError('zone', 'Choisissez une ou plusieurs zones dans la liste.');
+    u.zones = [...new Set(args.zones.filter(z => typeof z === 'string' && ZONES.some(x => x.id === z)))];
+    audit(ws, user, 'compte.perimetre', u.name, u.zones.map(z => ZONES.find(x => x.id === z).name).join(', ') || 'aucune zone');
+  });
   cmd('invite.create', ['admin'], ({ ws, user, args, s }) => createInvite(ws, user, args), { ownerOk: true });
   cmd('invite.revoke', ['admin'], ({ ws, user, args }) => {
     const inv = ws.invites.find(i => i.token === args.token); if (!inv) throw new AppError('introuvable', 'Invitation inconnue.');
     inv.revoked = true; inv.revokedAt = ws.clock; audit(ws, user, 'invitation.revoquer', ROLES[byId(ws.users, inv.userId).role].label);
   }, { ownerOk: true });
   cmd('config.set', ['admin'], ({ ws, user, args }) => {
-    const allowed = ['holdMinutes', 'autoConfirm', 'policyEquipment', 'contractDays'];
-    const num = (min, max, what) => { const n = Number(String(args.value).replace(',', '.')); if (!Number.isFinite(n) || n < min || n > max) throw new AppError('valeur', what + ' : saisissez un nombre entre ' + min + ' et ' + max + '.'); return n; };
-    if (args.key.startsWith('slaH.')) { const st = args.key.slice(5); if (!ORDER_STATES.includes(st)) throw new AppError('cle', 'État inconnu.'); ws.config.slaH[st] = num(1, 2000, 'Délai en heures'); }
-    else if (args.key.startsWith('templates.')) ws.config.templates[args.key.slice(10)] = String(args.value).slice(0, 300);
-    else if (args.key === 'holidays') {
-      const parts = String(args.value).split(/[ ,;]+/).filter(Boolean);
-      const bad = parts.filter(x => !/^\d{4}-\d{2}-\d{2}$/.test(x) || Number.isNaN(Date.parse(x + 'T00:00:00Z')));
-      if (bad.length) throw new AppError('valeur', 'Date non reconnue : ' + bad.join(', ') + '. Écrivez-la ainsi : 2026-12-25.');
-      ws.config.holidays = parts;
+    if (typeof args.key !== 'string' || !args.key) throw new AppError('cle', 'Choisissez le réglage à modifier.');
+    const key = args.key;
+    const num = (min, max, what) => { const n = args.value == null || args.value === '' || typeof args.value === 'object' ? NaN : Number(String(args.value).replace(',', '.')); if (!Number.isFinite(n) || !Number.isInteger(n) || n < min || n > max) throw new AppError('valeur', what + ' : saisissez un nombre entre ' + min + ' et ' + max + '.'); return n; };
+    let shown = String(args.value), label = CONFIG_LABELS[key] || key;
+    if (key.startsWith('slaH.')) { const st = key.slice(5); if (!ORDER_STATES.includes(st)) throw new AppError('cle', 'État inconnu.'); ws.config.slaH[st] = num(1, 2000, 'Délai en heures'); label = 'Délai pour « ' + STATE_INFO[st].label + ' » (heures)'; }
+    else if (key.startsWith('templates.')) {
+      const tk = key.slice(10);
+      if (!Object.hasOwn(ws.config.templates, tk)) throw new AppError('cle', 'Modèle de message inconnu.');
+      if (typeof args.value !== 'string' || !args.value.trim()) throw new AppError('valeur', 'Le texte du message ne peut pas être vide.');
+      if (args.value.trim().length > 300) throw new AppError('valeur', 'Le texte est trop long (300 caractères au plus).');
+      ws.config.templates[tk] = args.value.trim(); shown = ws.config.templates[tk]; label = 'Modèle de message « ' + tk.replace(/_/g, ' ') + ' »';
     }
-    else if (args.key === 'holdMinutes') ws.config.holdMinutes = num(1, 60, 'Durée de garde du créneau (minutes)');
-    else if (args.key === 'contractDays') ws.config.contractDays = num(1, 120, 'Délai de référence (jours)');
-    else if (args.key === 'dossierDeadlineH') ws.config.dossierDeadlineH = num(1, 72, 'Délai pour envoyer le dossier (heures)');
-    else if (args.key === 'autoValidateMin') ws.config.autoValidateMin = num(1, 240, 'Délai avant validation automatique (minutes)');
-    else if (args.key === 'travelMin') ws.config.travelMin = num(1, 30, 'Durée du trajet simulé (minutes)');
-    else if (args.key === 'policyEquipment') { if (!['bloquer', 'avertir', 'ignorer'].includes(String(args.value))) throw new AppError('valeur', 'Politique inconnue.'); ws.config.policyEquipment = String(args.value); }
-    else if (allowed.includes(args.key)) ws.config[args.key] = args.key === 'autoConfirm' ? !!args.value : Number(args.value);
+    else if (key === 'holidays') {
+      const parts = (typeof args.value === 'string' ? args.value : args.value == null ? '' : String(args.value)).split(/[ ,;]+/).filter(Boolean);
+      const bad = parts.filter(x => !/^\d{4}-\d{2}-\d{2}$/.test(x) || Number.isNaN(Date.parse(x + 'T00:00:00Z')) || new Date(x + 'T00:00:00Z').toISOString().slice(0, 10) !== x);
+      if (bad.length) throw new AppError('valeur', 'Date non reconnue : ' + bad.join(', ') + '. Écrivez-la ainsi : 2026-12-25.');
+      ws.config.holidays = [...new Set(parts)]; shown = ws.config.holidays.join(', ') || 'aucun';
+    }
+    else if (key === 'holdMinutes') ws.config.holdMinutes = num(1, 60, 'Durée de garde du créneau (minutes)');
+    else if (key === 'contractDays') ws.config.contractDays = num(1, 120, 'Délai de référence (jours)');
+    else if (key === 'dossierDeadlineH') ws.config.dossierDeadlineH = num(1, 72, 'Délai pour envoyer le dossier (heures)');
+    else if (key === 'autoValidateMin') ws.config.autoValidateMin = num(1, 240, 'Délai avant validation automatique (minutes)');
+    else if (key === 'travelMin') ws.config.travelMin = num(1, 30, 'Durée du trajet simulé (minutes)');
+    else if (key === 'policyEquipment') {
+      // Trois choix à l'écran comme dans les règles : réservation possible mais confirmation bloquée (conditionnel), aucune réservation (bloquer), aucun contrôle (ignorer).
+      // « avertir » (ancien nom) reste accepté et vaut « conditionnel ».
+      const v = String(args.value) === 'avertir' ? 'conditionnel' : String(args.value);
+      if (typeof args.value !== 'string' || !['conditionnel', 'bloquer', 'ignorer'].includes(v)) throw new AppError('valeur', 'Politique inconnue.');
+      ws.config.policyEquipment = v; shown = { conditionnel: 'Réservation possible, confirmation bloquée', bloquer: 'Aucune réservation', ignorer: 'Pas de contrôle du stock' }[v];
+    }
+    else if (key === 'autoConfirm') {
+      const v = args.value === true || args.value === 'true' || args.value === 1 ? true : args.value === false || args.value === 'false' || args.value === 0 ? false : null;
+      if (v === null) throw new AppError('valeur', 'Confirmation automatique : choisissez oui ou non.');
+      ws.config.autoConfirm = v; shown = v ? 'oui' : 'non';
+    }
     else throw new AppError('cle', 'Paramètre non modifiable.');
-    audit(ws, user, 'config.modifier', args.key, String(args.value));
+    audit(ws, user, 'config.modifier', key, label + ' : ' + shown);
   });
   cmd('model.activate', ['admin'], ({ ws, user, args }) => {
+    if (args.version != null && !ws.models.some(m => m.version === args.version)) throw new AppError('introuvable', 'Modèle inconnu.');
     for (const m of ws.models) m.active = args.version != null && m.version === args.version;
-    audit(ws, user, 'ia.modele.' + (args.version ? 'activer' : 'desactiver'), args.version || 'tous', args.reason || '', { ai: true });
+    audit(ws, user, 'ia.modele.' + (args.version ? 'activer' : 'desactiver'), args.version || 'Tous les modèles', txt(args.reason, 200), { ai: true });
   });
   cmd('kb.update', ['admin'], ({ ws, user, args }) => {
     const d = byId(ws.docs, args.id); if (!d) throw new AppError('introuvable', 'Procédure inconnue.');
-    const [maj, min] = d.version.split('.').map(Number); d.version = maj + '.' + (min + 1); d.expires = ws.clock + 90 * DAY; d.updatedBy = user.name;
+    const [maj, min] = String(d.version).split('.').map(Number); d.version = (maj || 1) + '.' + ((min || 0) + 1); d.expires = ws.clock + 90 * DAY; d.updatedBy = user.name;
     audit(ws, user, 'procedure.reviser', d.id, 'v' + d.version);
   });
   cmd('integration.replay', ['admin'], ({ ws, user, args }) => {
@@ -938,7 +1103,7 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
     const snap = JSON.stringify({ ...ws, backups: [] }, (k, v) => (k[0] === '_' ? undefined : v));
     storage.set(K.bk(ws.id, n), snap);
     ws.backups.push({ n, at: ws.clock, realAt: realNow(), size: snap.length, by: user.name, events: ws.events.length });
-    audit(ws, user, 'sauvegarde.creer', '#' + n, Math.round(snap.length / 1024) + ' Ko');
+    audit(ws, user, 'sauvegarde.creer', '#' + n, 'Sauvegarde n° ' + n + ' (' + Math.round(snap.length / 1024) + ' Ko)');
   });
   cmd('order.open', STAFF_ALL, ({ ws, user, order }) => { audit(ws, user, 'dossier.consulter', order.ref, 'Accès à la fiche complète'); }, { order: true, noAudit: true, readOnlyOk: true });
   cmd('export.orders', ['admin', 'superviseur', 'auditeur'], ({ ws, user }) => {
@@ -949,16 +1114,18 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
     audit(ws, user, 'export.dossiers', ws.orders.length + ' lignes', 'Champs minimisés, formules neutralisées');
     return rows.join('\n');
   }, { noAudit: true, readOnlyOk: true });
-  cmd('degraded.set', ['admin'], ({ ws, user, args }) => { ws.sim.degraded = !!args.on; audit(ws, user, 'continuite.mode_degrade', args.on ? 'activé' : 'désactivé'); });
+  cmd('degraded.set', ['admin'], ({ ws, user, args }) => { ws.sim.degraded = !!args.on; audit(ws, user, 'continuite.mode_degrade', 'Mode dégradé', args.on ? 'Activé : l’assistant est suspendu' : 'Désactivé : tout fonctionne normalement'); });
 
   // ----- Simulateur (espace de démonstration uniquement, CDC 7.5) -----
   // Référence unique dans l'espace (les connecteurs retrouvent le dossier par sa référence).
   const nextRef = ws => 'FW-2026-' + String(Math.max(100, ...ws.orders.map(o => Number(String(o.ref).split('-').pop()) || 0)) + 1).padStart(3, '0');
   cmd('demo.createOrder', null, ({ ws, args }) => {
     const n = ws.orders.length + 1;
-    const zone = args.zone || 'cocody';
+    const zone = args.zone == null ? 'cocody' : args.zone;
+    if (typeof zone !== 'string' || !ZONES.some(z => z.id === zone)) throw new AppError('zone', 'Zone inconnue.');
     const cust = args.customerId ? byId(ws.users, args.customerId) : null;
-    const o = { ...JSON.parse(JSON.stringify(ws.orders[0])), id: 'O' + (ws.seq + 1000), ref: nextRef(ws), customerId: cust ? cust.id : null, claimed: !!cust, contactName: cust ? cust.name : 'Client fictif ' + n, contactPhone: cust ? cust.phone : '+225 07 00 00 ' + String(n).padStart(2, '0'), zone, state: 'DOSSIER_RECU', stateSince: ws.clock, version: 1, createdAt: ws.clock, updatedAt: ws.clock, apptId: null, woId: null, portReserved: false, cancelled: false, prep: {}, scenario: args.scenario || null, clientCheck: null, linkedTo: null, requiredDocs: [] };
+    if (args.customerId && (!cust || cust.role !== 'client')) throw new AppError('introuvable', 'Client inconnu.');
+    const o = { ...JSON.parse(JSON.stringify(ws.orders[0])), id: 'O' + (ws.seq + 1000), ref: nextRef(ws), customerId: cust ? cust.id : null, claimed: !!cust, contactName: cust ? cust.name : 'Client fictif ' + n, contactPhone: cust ? cust.phone : '+225 07 00 00 ' + String(n).padStart(2, '0'), zone, state: 'DOSSIER_RECU', stateSince: ws.clock, version: 1, createdAt: ws.clock, updatedAt: ws.clock, apptId: null, woId: null, portReserved: false, cancelled: false, prep: {}, scenario: txt(args.scenario, 20) || null, clientCheck: null, linkedTo: null, requiredDocs: [] };
     o.address = { ...o.address, commune: ZONES.find(z => z.id === zone).name, verified: false };
     o.payment = { ref: 'MM-' + (500000000 + ws.seq), amount: 25000, currency: 'XOF', status: 'en_attente' };
     o.paidAt = null; o.docNotes = {};
@@ -969,38 +1136,65 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
   }, { demo: true });
   cmd('demo.webhook', null, ({ ws, args }) => {
     const order = getOrder(ws, args.orderId);
-    const kind = args.kind || 'payment';
+    const kind = args.kind == null ? 'payment' : args.kind;
     let env;
     if (kind === 'payment') env = D.makeEnvelope(ws, 'payment.confirmed', order, { reference: order.payment.ref, amount: args.amount != null ? args.amount : order.payment.amount, currency: 'XOF' }, { source: 'Moov Money (simulé)', badSig: args.badSig });
-    else if (kind === 'old') env = D.makeEnvelope(ws, 'order.status', order, { state: args.state || 'PAIEMENT_CONFIRME' }, { source: 'Moov Prospect (simulé)', occurredAt: ws.clock - 72 * H });
+    else if (kind === 'old') {
+      const st = args.state == null ? 'PAIEMENT_CONFIRME' : args.state;
+      if (typeof st !== 'string' || !ORDER_STATES.includes(st)) throw new AppError('valeur', 'État inconnu : choisissez une étape de la liste.');
+      env = D.makeEnvelope(ws, 'order.status', order, { state: st }, { source: 'Moov Prospect (simulé)', occurredAt: ws.clock - 72 * H });
+    }
     else if (kind === 'wrongEquipment') { const act = ws.activations.filter(a => a.orderId === order.id).at(-1); if (!act) throw new AppError('etat', 'Pas de demande d’activation sur ce dossier.'); env = D.makeEnvelope(ws, 'activation.result', order, { request_ref: act.ref, serial: 'ZTE-F670-99999', ok: true }, { source: 'Système d’activation (émulateur)' }); }
+    else throw new AppError('cle', 'Type d’événement simulé inconnu.');
     const results = [D.ingest(ws, env)];
     if (args.duplicate) results.push(D.ingest(ws, { ...env }));
     ws.lastWebhooks = results.map(r => ({ status: r.status, note: r.note, eventId: env.event_id }));
     return ws.lastWebhooks;
   }, { demo: true });
-  cmd('demo.integration', null, ({ ws, args }) => { const i = ws.integrations[args.provider]; i.up = !!args.up; if (i.up) i.lastSync = ws.clock; ws.alerts.push({ id: 'AL' + (++ws.seq), at: ws.clock, level: i.up ? 'info' : 'critique', text: i.name + (i.up ? ' rétabli' : ' indisponible (simulé)'), ack: false }); }, { demo: true });
-  cmd('demo.flag', null, ({ ws, args }) => { if (!(args.key in ws.sim)) throw new AppError('cle', 'Paramètre inconnu.'); ws.sim[args.key] = !!args.value; }, { demo: true });
-  cmd('demo.clock', null, ({ ws, args }) => { ws.clock += Number(args.hours) * H; }, { demo: true });
+  cmd('demo.integration', null, ({ ws, args }) => {
+    if (typeof args.provider !== 'string' || !Object.hasOwn(ws.integrations, args.provider)) throw new AppError('cle', 'Système inconnu.');
+    const i = ws.integrations[args.provider]; i.up = !!args.up; if (i.up) i.lastSync = ws.clock; ws.alerts.push({ id: 'AL' + (++ws.seq), at: ws.clock, level: i.up ? 'info' : 'critique', text: i.name + (i.up ? ' rétabli' : ' indisponible (simulé)'), ack: false });
+  }, { demo: true });
+  cmd('demo.flag', null, ({ ws, args }) => { if (typeof args.key !== 'string' || !Object.hasOwn(ws.sim, args.key)) throw new AppError('cle', 'Paramètre inconnu.'); ws.sim[args.key] = !!args.value; }, { demo: true });
+  // L'horloge de l'espace ne fait qu'avancer : un nombre d'heures positif, au plus 60 jours à la fois.
+  cmd('demo.clock', null, ({ ws, args }) => {
+    const h = args.hours == null || args.hours === '' || typeof args.hours === 'object' ? NaN : Number(args.hours);
+    if (!Number.isFinite(h) || h <= 0 || h > 24 * 60) throw new AppError('valeur', 'Horloge : saisissez un nombre d’heures positif, jusqu’à 1 440 (l’horloge ne recule jamais).');
+    ws.clock += h * H;
+  }, { demo: true });
   cmd('demo.scenario', null, ({ ws, args, realNow: rn }) => runScenarioSetup(ws, args.code, { D, realNow: rn, cmds: C }), { demo: true });
   cmd('demo.restore', null, ({ ws, args }) => {
     const raw = storage.get(K.bk(ws.id, args.n)); if (!raw) throw new AppError('introuvable', 'Sauvegarde introuvable.');
     const snap = JSON.parse(raw);
-    const keep = { backups: ws.backups, generation: ws.generation, version: ws.version, invites: ws.invites };
+    // Le journal d'audit n'est jamais effacé par une restauration : il garde tout ce qui s'est passé depuis la sauvegarde, et la restauration s'y ajoute.
+    const keep = { backups: ws.backups, generation: ws.generation, version: ws.version, invites: ws.invites, audit: ws.audit };
     Object.keys(ws).forEach(k => delete ws[k]); Object.assign(ws, snap, keep);
-    audit(ws, { id: 'OWNER', name: 'Testeur', role: 'admin' }, 'sauvegarde.restaurer', '#' + args.n);
+    audit(ws, { id: 'OWNER', name: 'Testeur', role: 'admin' }, 'sauvegarde.restaurer', '#' + args.n, 'Sauvegarde n° ' + args.n + ' restaurée : l’état revient à ce moment-là, le journal est conservé');
     return { restored: args.n };
   }, { demo: true });
 
-  function createInvite(ws, actor, { userId, hours = 2 }) {
+  function createInvite(ws, actor, { userId, hours } = {}) {
     const u = byId(ws.users, userId); if (!u) throw new AppError('introuvable', 'Rôle inconnu.');
+    const hrs = hours == null || hours === '' ? 2 : typeof hours === 'object' ? NaN : Number(hours);
+    if (!Number.isFinite(hrs) || hrs <= 0 || hrs > 720) throw new AppError('valeur', 'Durée de l’invitation : saisissez un nombre d’heures entre 1 et 720.');
+    hours = hrs;
     const inv = { token: 'inv_' + rand(16), userId: u.id, role: u.role, createdAt: realNow(), expiresReal: realNow() + hours * H, revoked: false, uses: 0, gen: ws.generation, by: actor.name };
     ws.invites.push(inv);
     audit(ws, actor, 'invitation.creer', ROLES[u.role].label + ' — ' + u.name, 'valable ' + hours + ' h');
     return inv;
   }
 
-  async function exec(token, name, args = {}, opts = {}) {
+  // Détail lisible des commandes du simulateur dans le journal (jamais du JSON brut).
+  const demoDetail = (name, args) => {
+    if (name === 'demo.clock') return '+' + args.hours + ' h';
+    if (name === 'demo.flag') return String(args.key) + ' : ' + (args.value ? 'activé' : 'désactivé');
+    if (name === 'demo.integration') return String(args.provider) + ' : ' + (args.up ? 'rétabli' : 'en panne');
+    if (name === 'demo.scenario') return String(args.code || '');
+    if (name === 'demo.webhook') return String(args.kind || 'payment') + (args.duplicate ? ' (en double)' : '');
+    return '';
+  };
+
+  async function exec(token, name, args, opts) {
     let wsId, wsRef = null;
     try { wsId = session(token).ws.id; } catch (e) { return { ok: false, error: { code: e.code || 'erreur', message: e.message } }; }
     return withLock(wsId, () => {
@@ -1009,22 +1203,41 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
         const { s, ws, user } = session(token);
         wsRef = ws;
         advance(ws, rn);
+        if (typeof name !== 'string' || !Object.hasOwn(C, name)) throw new AppError('commande', 'Commande inconnue.');
         const c = C[name];
-        if (!c) throw new AppError('commande', 'Commande inconnue.');
+        args = cleanArgs(args === undefined ? {} : args);
+        opts = isObj(opts) ? opts : {};
         if (c.demo) { if (ws.env !== 'demo' || !s.owner) throw new AppError('interdit', 'Commande de simulation réservée au propriétaire d’un espace de démonstration.'); }
         else if (c.roles && !c.roles.includes(user.role) && !(c.ownerOk && s.owner)) {
-          audit(ws, user, 'acces.refuse', name, 'Rôle ' + user.role);
+          // Un refus de droit est inscrit au journal, mais une série de refus identiques rapprochés ne fait qu'une ligne (avec un compteur).
+          const recent = ws.audit.slice(-10).find(e => e.action === 'acces.refuse' && e.actorId === user.id && e.resource === name && ws.clock - e.at < 60e3);
+          if (recent) recent.count = (recent.count || 1) + 1; else audit(ws, user, 'acces.refuse', name, 'Rôle ' + user.role);
           save(ws);
           throw new AppError('interdit', 'Action non autorisée pour le rôle ' + (ROLES[user.role] || {}).label + '.');
         }
         if (READONLY.includes(user.role) && !c.readOnlyOk) throw new AppError('interdit', 'Rôle en lecture seule.');
-        if (c.idem && opts.idemKey && ws.idem[opts.idemKey]) return { ok: true, data: ws.idem[opts.idemKey].data, replayed: true };
+        // Clé de rejeu : liée à la personne, à la commande et aux arguments. Rejouée telle quelle, elle redonne le même résultat ; réutilisée pour autre chose, elle est refusée.
+        let idemId = null, idemSig = null;
+        if (c.idem && opts.idemKey != null) {
+          if (typeof opts.idemKey !== 'string' || !/^[\w.:|-]{1,120}$/.test(opts.idemKey) || opts.idemKey === '__proto__') throw new AppError('idem', 'Clé de répétition invalide.');
+          idemId = opts.idemKey; idemSig = argSig(args);
+          const prev = Object.hasOwn(ws.idem, idemId) ? ws.idem[idemId] : null;
+          if (prev) {
+            if (prev.userId && (prev.userId !== user.id || prev.cmd !== name || prev.sig !== idemSig)) throw new AppError('idem', 'Cette clé de répétition a déjà servi pour une autre action : elle ne peut pas être réutilisée.');
+            return { ok: true, data: clone(prev.data), replayed: true };
+          }
+        }
         const order = c.order ? scopedOrder(ws, user, args.orderId, c.scope) : null;
         if (order && opts.expectedVersion != null && opts.expectedVersion !== order.version) throw new AppError('conflit', 'Le dossier a changé entre-temps (version ' + opts.expectedVersion + ' → ' + order.version + '). Rechargez puis réessayez.');
+        const mark = ws.audit.length ? ws.audit[ws.audit.length - 1].seq : 0;
         const data = c.fn({ ws, user, s, order, args, realNow: rn });
-        if (c.idem && opts.idemKey) ws.idem[opts.idemKey] = { at: ws.clock, data: c.idemFull ? clone(data) : data && data.id ? { id: data.id, status: data.status } : null };
-        if (!c.noAudit && !name.startsWith('demo.') && !['assistant.ask'].includes(name)) audit(ws, user, name, order ? order.ref : (args.id || args.blockerId || args.userId || ''), '');
-        if (name.startsWith('demo.')) audit(ws, { id: 'OWNER', name: 'Simulateur', role: 'testeur' }, name, args.orderId ? (byId(ws.orders, args.orderId) || {}).ref : '', JSON.stringify(args).slice(0, 120));
+        if (idemId) ws.idem[idemId] = { at: ws.clock, userId: user.id, cmd: name, sig: idemSig, data: c.idemFull ? clone(data) : data && data.id ? { id: data.id, status: data.status } : null };
+        // Une seule ligne au journal par action : si la commande a déjà écrit la sienne (avec un détail lisible), on n'en ajoute pas une seconde.
+        const wrote = (ws.audit.length ? ws.audit[ws.audit.length - 1].seq : 0) !== mark;
+        if (!wrote) {
+          if (name.startsWith('demo.')) audit(ws, { id: 'OWNER', name: 'Simulateur', role: 'testeur' }, name, args.orderId ? (byId(ws.orders, args.orderId) || {}).ref : '', demoDetail(name, args));
+          else if (!c.noAudit && name !== 'assistant.ask') audit(ws, user, name, order ? order.ref : (typeof (args.id || args.blockerId || args.userId) === 'string' ? (args.id || args.blockerId || args.userId) : ''), '');
+        }
         runJobs(ws);
         markScenarios(ws);
         save(ws);
@@ -1044,17 +1257,58 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
 
   // ---------- Écoulement du temps et tâches différées ----------
   function advance(ws, rn) {
+    // Si l'heure de l'appareil recule puis revient, l'horloge de l'espace n'avance pas pour autant : on ne retient que le plus tard vu.
     const dt = Math.max(0, rn - ws.lastReal);
-    ws.clock += dt; ws.lastReal = rn;
+    ws.clock += dt; ws.lastReal = Math.max(ws.lastReal, rn);
     for (const h of ws.holds) if (h.status === 'actif' && h.expiresReal <= rn) h.status = 'expire';
+    // De nouvelles demi-journées s'ouvrent au fil du temps (16 jours à venir).
+    extendCapacity(ws);
   }
   function runJobs(ws) {
     const now = ws.clock;
     for (const j of ws.jobs) {
       if (j.done || j.due > now) continue;
       if (j.generation !== ws.generation) { j.done = true; j.dropped = 'ancienne génération'; continue; }
+      try { runJob(ws, j, now); }
+      catch (e) {
+        // Une tâche qui échoue est marquée en erreur : elle ne doit jamais faire échouer toutes les commandes de l'espace.
+        if (!(e instanceof AppError)) console.error(e);
+        j.done = true; j.error = e && e.message ? String(e.message).slice(0, 200) : 'Erreur';
+      }
+    }
+    // Livraisons sortantes vers les systèmes Moov : reprises bornées avec délai croissant et aléatoire.
+    // Les reprises tombées pendant un saut d'horloge sont toutes jouées (au plus 6 passages).
+    for (let pass = 0; pass < 6 && ws.deliveries.some(d => d.status === 'en_attente' && d.nextAt <= now); pass++) for (const d of ws.deliveries) {
+      if (d.status !== 'en_attente' || d.nextAt > now) continue;
+      try { runDelivery(ws, d, now); }
+      catch (e) {
+        if (!(e instanceof AppError)) console.error(e);
+        d.status = 'abandon'; d.error = e && e.message ? String(e.message).slice(0, 200) : 'Erreur';
+      }
+    }
+    // Rapprochement périodique avec Moov Prospect.
+    const p = ws.integrations.prospect;
+    if (p.up) p.lastSync = now;
+    for (const k of ['money', 'activation', 'stock', 'sms']) if (ws.integrations[k].up) ws.integrations[k].lastSync = now;
+    // Escalade des blocages dont l'échéance est dépassée (MO-01).
+    for (const b of ws.blockers) if (b.status === 'ouvert' && !b.escalated && b.dueAt < now) {
+      b.escalated = true;
+      const sup = ws.users.find(u => u.role === 'superviseur' && u.active);
+      const o = byId(ws.orders, b.orderId);
+      if (sup && o) notify(ws, sup.id, { title: 'Échéance dépassée', body: o.ref + ' : ' + BLOCKER_TYPES[b.type].label + ' ouvert depuis ' + Math.round((now - b.openedAt) / H) + ' h', orderId: o.id, kind: 'alerte' });
+    }
+    // Rappel la veille du rendez-vous.
+    for (const a of ws.appointments) if (a.status === 'confirme' && !a.reminded && a.date - now < 24 * H && a.date > now) {
+      a.reminded = true; const o = byId(ws.orders, a.orderId);
+      if (o) notify(ws, o.customerId, { title: 'Rappel : visite demain', body: ws.config.templates.rappel.replace('{slot}', a.time ? hourLabel(a.time) : D.slotLabel(a.slot)), orderId: o.id, kind: 'rdv' });
+    }
+    trimWorkspace(ws, now);
+  }
+
+  // Une tâche différée (SMS, analyse d'une pièce, trajet, validation automatique, appel manqué, remboursement).
+  function runJob(ws, j, now) {
       if (j.kind === 'send') {
-        const o = byId(ws.outbox, j.ref); if (!o) { j.done = true; continue; }
+        const o = byId(ws.outbox, j.ref); if (!o) { j.done = true; return; }
         o.attempts++;
         if (!ws.integrations.sms.up) {
           if (o.attempts >= 3) { o.status = 'échec (non livré)'; j.done = true; ws.alerts.push({ id: 'AL' + (++ws.seq), at: now, level: 'alerte', text: 'Notification non livrée à ' + o.to + ' après 3 essais', ack: false }); }
@@ -1093,49 +1347,33 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
         if (c && c.status === 'sonne') missedCall(ws, c, 'Appel manqué', now);
         j.done = true;
       } else if (j.kind === 'refund') {
-        const r = byId(ws.refunds, j.ref); if (r && r.status === 'valide') { r.status = 'rembourse'; r.steps.push({ at: now, by: 'Moov Money (simulé)', what: 'Remboursement exécuté (simulé, aucun transfert réel)' }); const o = byId(ws.orders, r.orderId); o.payment.status = 'rembourse'; emit(ws, o, 'REMBOURSEMENT_SIMULE', { source: 'Moov Money (simulé)', publicText: 'Remboursement effectué (simulation : aucun argent n’a circulé).' }); }
+        const r = byId(ws.refunds, j.ref); const ro = r && byId(ws.orders, r.orderId); if (r && r.status === 'valide' && ro && ro.payment.status === 'rembourse_valide') { r.status = 'rembourse'; r.steps.push({ at: now, by: 'Moov Money (simulé)', what: 'Remboursement exécuté (simulé, aucun transfert réel)' }); const o = ro; o.payment.status = 'rembourse'; emit(ws, o, 'REMBOURSEMENT_SIMULE', { source: 'Moov Money (simulé)', publicText: 'Remboursement effectué (simulation : aucun argent n’a circulé).' }); }
         j.done = true;
       }
+  }
+
+  // Une livraison vers un système Moov (ou sa reprise).
+  function runDelivery(ws, d, now) {
+    if (d.generation !== ws.generation) { d.status = 'abandon'; d.error = 'Ancienne génération'; return; }
+    const prov = ws.integrations[d.provider];
+    if (!prov) { d.status = 'abandon'; d.error = 'Système inconnu'; return; }
+    d.attempts++;
+    if (!prov.up) {
+      d.error = 'Service indisponible (délai dépassé)';
+      if (d.attempts >= 5) { d.status = 'abandon'; ws.alerts.push({ id: 'AL' + (++ws.seq), at: now, level: 'critique', text: 'Livraison ' + d.eventId + ' abandonnée après 5 essais : rejeu manuel possible', ack: false }); }
+      else d.nextAt = d.nextAt + Math.pow(2, d.attempts) * 60e3 * (0.8 + Math.random() * 0.4);
+      return;
     }
-    ws.jobs = ws.jobs.filter(j => !j.done || now - j.due < 2 * H).slice(-200);
-    // Livraisons sortantes vers les systèmes Moov : reprises bornées avec délai croissant et aléatoire.
-    // Les reprises tombées pendant un saut d'horloge sont toutes jouées (au plus 6 passages).
-    for (let pass = 0; pass < 6 && ws.deliveries.some(d => d.status === 'en_attente' && d.nextAt <= now); pass++) for (const d of ws.deliveries) {
-      if (d.status !== 'en_attente' || d.nextAt > now) continue;
-      if (d.generation !== ws.generation) { d.status = 'abandon'; d.error = 'Ancienne génération'; continue; }
-      const prov = ws.integrations[d.provider];
-      d.attempts++;
-      if (!prov.up) {
-        d.error = 'Service indisponible (délai dépassé)';
-        if (d.attempts >= 5) { d.status = 'abandon'; ws.alerts.push({ id: 'AL' + (++ws.seq), at: now, level: 'critique', text: 'Livraison ' + d.eventId + ' abandonnée après 5 essais : rejeu manuel possible', ack: false }); }
-        else d.nextAt = d.nextAt + Math.pow(2, d.attempts) * 60e3 * (0.8 + Math.random() * 0.4);
-        continue;
-      }
-      if (d.kind === 'activation.request') {
-        const act = ws.activations.find(a => a.ref === d.eventId);
-        d.status = 'ok'; d.error = null;
-        if (!act || act.status !== 'demandee') continue;
-        const order = byId(ws.orders, act.orderId);
-        const ok = !ws.sim.failNextActivation;
-        if (!ok) ws.sim.failNextActivation = false;
-        D.ingest(ws, D.makeEnvelope(ws, 'activation.result', order, { request_ref: act.ref, serial: act.serial, ok, error: ok ? null : 'OLT : profil de service refusé (simulé)' }, { source: 'Système d’activation (émulateur)' }));
-      }
-    }
-    // Rapprochement périodique avec Moov Prospect.
-    const p = ws.integrations.prospect;
-    if (p.up) p.lastSync = now;
-    for (const k of ['money', 'activation', 'stock', 'sms']) if (ws.integrations[k].up) ws.integrations[k].lastSync = now;
-    // Escalade des blocages dont l'échéance est dépassée (MO-01).
-    for (const b of ws.blockers) if (b.status === 'ouvert' && !b.escalated && b.dueAt < now) {
-      b.escalated = true;
-      const sup = ws.users.find(u => u.role === 'superviseur');
-      const o = byId(ws.orders, b.orderId);
-      if (sup && o) notify(ws, sup.id, { title: 'Échéance dépassée', body: o.ref + ' : ' + BLOCKER_TYPES[b.type].label + ' ouvert depuis ' + Math.round((now - b.openedAt) / H) + ' h', orderId: o.id, kind: 'alerte' });
-    }
-    // Rappel la veille du rendez-vous.
-    for (const a of ws.appointments) if (a.status === 'confirme' && !a.reminded && a.date - now < 24 * H && a.date > now) {
-      a.reminded = true; const o = byId(ws.orders, a.orderId);
-      notify(ws, o.customerId, { title: 'Rappel : visite demain', body: ws.config.templates.rappel.replace('{slot}', a.time ? hourLabel(a.time) : D.slotLabel(a.slot)), orderId: o.id, kind: 'rdv' });
+    if (d.kind === 'activation.request') {
+      const act = ws.activations.find(a => a.ref === d.eventId);
+      d.status = 'ok'; d.error = null;
+      if (!act || act.status !== 'demandee') return;
+      const order = byId(ws.orders, act.orderId);
+      // Commande annulée entre-temps : l'activation n'a plus lieu d'être, sans erreur.
+      if (!order || order.cancelled) { act.status = 'annulee'; act.result = 'Commande annulée'; d.status = 'ignore'; d.error = 'Commande annulée : envoi abandonné.'; return; }
+      const ok = !ws.sim.failNextActivation;
+      if (!ok) ws.sim.failNextActivation = false;
+      D.ingest(ws, D.makeEnvelope(ws, 'activation.result', order, { request_ref: act.ref, serial: act.serial, ok, error: ok ? null : 'OLT : profil de service refusé (simulé)' }, { source: 'Système d’activation (émulateur)' }));
     }
   }
 
@@ -1157,7 +1395,8 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
       || ws.deliveries.some(d => d.status === 'en_attente' && d.nextAt <= ahead)
       || ws.holds.some(h => h.status === 'actif' && h.expiresReal <= rn)
       || ws.blockers.some(b => b.status === 'ouvert' && !b.escalated && b.dueAt < ahead)
-      || ws.appointments.some(a => a.status === 'confirme' && !a.reminded && a.date - ahead < 24 * H && a.date > ahead);
+      || ws.appointments.some(a => a.status === 'confirme' && !a.reminded && a.date - ahead < 24 * H && a.date > ahead)
+      || (ws.capUntil || 0) < startOfDay(ahead) + CAP_DAYS * DAY;
   }
   async function pump(wsId) {
     const pre = load(wsId); if (!pre || !needsPump(pre)) return;
@@ -1165,10 +1404,16 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
       const ws = load(wsId); if (!ws) return;
       if (ws.expiresAt < realNow()) { purge(wsId); return; }
       if (!needsPump(ws)) return;
-      advance(ws, realNow());
-      runJobs(ws);
-      markScenarios(ws);
-      save(ws);
+      try {
+        advance(ws, realNow());
+        runJobs(ws);
+        markScenarios(ws);
+        save(ws);
+      } catch (e) {
+        // Rien de moitié appliqué ne reste en mémoire : on relit l'état enregistré.
+        delete cache[wsId];
+        throw e;
+      }
     });
   }
   // Une étape de scénario réussie reste acquise, même si l'état change ensuite (ex. service rétabli).
@@ -1180,22 +1425,43 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
   }
 
   // ---------- Lectures filtrées selon les droits ----------
-  function q(token, name, args = {}) {
+  function q(token, name, args) {
     const { s, ws, user } = session(token);
-    const Q = queries[name];
+    const Q = typeof name === 'string' && Object.hasOwn(queries, name) ? queries[name] : null;
     if (!Q) throw new AppError('requete', 'Requête inconnue.');
     if (Q.roles && !Q.roles.includes(user.role) && !(Q.ownerOk && s.owner)) throw new AppError('interdit', 'Lecture non autorisée pour ce rôle.');
-    return Q.fn({ ws, user, s, args });
+    args = cleanArgs(args === undefined ? {} : args, 'Paramètres');
+    try { return Q.fn({ ws, user, s, args }); }
+    catch (e) {
+      // Une lecture ne renvoie jamais une erreur technique brute : au pire, un message clair.
+      if (e instanceof AppError) throw e;
+      console.error(e);
+      throw new AppError('erreur', 'Lecture impossible pour le moment. Réessayez ; si cela revient, réinitialisez l’espace dans le Labo.');
+    }
   }
 
   // Un représentant n'agit que sur ce que le client lui a confié : pas de pièces d'identité, de téléphone ni de référence de paiement.
   const mask = x => (x ? String(x).slice(0, 4) + ' •••• ' + String(x).slice(-2) : x);
-  const forDelegate = v => ({
+  // Ce que le client a confié au représentant : sans la portée « messages », il ne voit ni les échanges avec les conseillers, ni les rappels,
+  // ni les signalements, ni les appels, ni la liste des délégations.
+  const delegateScopes = (ws, user, orderId) => new Set(ws.delegations.filter(d => d.orderId === orderId && d.delegateId === user.id && !d.revoked && d.until > ws.clock).flatMap(d => d.scopes));
+  const forDelegate = (v, scopes = new Set()) => ({
     ...v,
     order: { ...v.order, contactPhone: mask(v.order.contactPhone), payment: { ...v.order.payment, ref: mask(v.order.payment && v.order.payment.ref) } },
     documents: v.documents.map(d => ({ id: d.id, type: d.type, status: d.status, at: d.at, name: 'Pièce confidentielle', hidden: true })),
     mission: v.mission && { ...v.mission, report: v.mission.report && { ...v.mission.report, photos: [] } },
+    ...(scopes.has('messages') ? {} : { messages: [], callbacks: [], tickets: [], delegations: [], calls: [] }),
   });
+  // L'administrateur et l'auditeur n'ont aucun besoin d'en connaître sur les images : ni vignette, ni référence d'image dans leurs lectures.
+  const stripImg = x => (x && typeof x === 'object' ? { ...x, thumb: null, img: null } : x);
+  const noImages = v => {
+    const out = { ...v };
+    if (out.documents) out.documents = out.documents.map(stripImg);
+    if (out.mission && out.mission.report) out.mission = { ...out.mission, report: { ...out.mission.report, photos: (out.mission.report.photos || []).map(stripImg) } };
+    if (out.internal && out.internal.workOrder) out.internal = { ...out.internal, workOrder: { ...out.internal.workOrder, photos: (out.internal.workOrder.photos || []).map(stripImg), help: (out.internal.workOrder.help || []).map(h => (h && h.photo ? { ...h, photo: stripImg(h.photo) } : h)) } };
+    return out;
+  };
+  const normTxt = x => String(x == null ? '' : x).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
   const publicEvent = e => ({ seq: e.seq, type: e.type, at: e.effectiveAt, receivedAt: e.receivedAt, text: e.publicText, source: e.source, actorRole: e.role });
   function clientView(ws, user, o) {
     const appts = ws.appointments.filter(a => a.orderId === o.id);
@@ -1240,19 +1506,19 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
       users: s.owner ? ws.users.map(u => ({ id: u.id, name: u.name, role: u.role, active: u.active })) : null,
     }) },
     'client.orders': { roles: CLIENTISH, fn: ({ ws, user }) => ws.orders.filter(o => canSee(ws, user, o)).map(o => ({ id: o.id, ref: o.ref, state: o.state, address: o.address, cancelled: o.cancelled, updatedAt: o.updatedAt, dossier: o.dossier ? (D.dossierState(ws, o) || {}).status || null : null, scopes: user.role === 'representant' ? ws.delegations.filter(d => d.orderId === o.id && d.delegateId === user.id && !d.revoked).flatMap(d => d.scopes) : null })) },
-    'client.order': { roles: CLIENTISH, fn: ({ ws, user, args }) => { const v = clientView(ws, user, scopedOrder(ws, user, args.orderId)); return user.role === 'representant' ? forDelegate(v) : v; } },
+    'client.order': { roles: CLIENTISH, fn: ({ ws, user, args }) => { const o = scopedOrder(ws, user, args.orderId); const v = clientView(ws, user, o); return user.role === 'representant' ? forDelegate(v, delegateScopes(ws, user, o.id)) : v; } },
     'client.availability': { roles: CLIENTISH, fn: ({ ws, user, args }) => D.availability(ws, scopedOrder(ws, user, args.orderId, 'rdv')) },
     'client.document': { roles: ['client'], fn: ({ ws, user, args }) => { const d = byId(ws.documents, args.docId); if (!d) throw new AppError('introuvable', 'Pièce introuvable ou non autorisée.'); scopedOrder(ws, user, d.orderId); return d; } },
     notifications: { fn: ({ ws, user }) => ws.notifications.filter(n => n.userId === user.id).slice(-60).reverse() },
     // Chaque personne ne voit que ses propres SMS, même dans l'espace de démo de son propriétaire.
     outbox: { fn: ({ ws, user }) => ws.outbox.filter(o => o.userId === user.id).slice(-60).reverse() },
     delegates: { roles: ['client'], fn: ({ ws }) => ws.users.filter(u => u.role === 'representant').map(u => ({ id: u.id, name: u.name })) },
-    'kb.public': { fn: ({ ws, user }) => ws.docs.filter(d => d.scope === 'public' || user.role !== 'client') },
+    'kb.public': { fn: ({ ws, user }) => ws.docs.filter(d => d.scope === 'public' || !['client', 'representant'].includes(user.role)) },
 
     'ops.orders': { roles: ['conseiller', 'planificateur', 'superviseur', 'admin', 'auditeur'], fn: ({ ws, user, args }) => {
-      const qx = String(args.q || '').trim().toLowerCase();
+      const qx = txt(args.q, 100).toLowerCase();
       let list = ws.orders.filter(o => canSee(ws, user, o));
-      if (qx) { list = list.filter(o => o.ref.toLowerCase().includes(qx) || o.contactPhone.replace(/\s/g, '').includes(qx.replace(/\s/g, '')) || o.contactName.toLowerCase().includes(qx)); }
+      if (qx) { list = list.filter(o => o.ref.toLowerCase().includes(qx) || String(o.contactPhone || '').replace(/\s/g, '').includes(qx.replace(/\s/g, '')) || String(o.contactName || '').toLowerCase().includes(qx)); }
       if (args.zone) list = list.filter(o => o.zone === args.zone);
       if (args.state) list = list.filter(o => o.state === args.state);
       return list.map(o => opsRow(ws, o));
@@ -1271,14 +1537,15 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
         tickets: ws.tickets.filter(t => t.status === 'ouvert' && (t.ownerRole === user.role || user.role === 'superviseur') && canSee(ws, user, byId(ws.orders, t.orderId))).map(t => ({ ...t, ref: byId(ws.orders, t.orderId).ref })),
         callbacks: ws.callbacks.filter(c => c.status === 'demande' && canSee(ws, user, byId(ws.orders, c.orderId))).map(c => ({ ...c, ref: byId(ws.orders, c.orderId).ref })),
         docs: ws.documents.filter(d => ['analyse', 'a_valider'].includes(d.status) && canSee(ws, user, byId(ws.orders, d.orderId))).map(d => ({ ...d, ref: byId(ws.orders, d.orderId).ref })),
-        approvals: (ws.approvals || []).filter(a => a.status === 'en_attente').map(a => ({ ...a, ref: byId(ws.orders, a.orderId).ref })),
+        approvals: (ws.approvals || []).filter(a => a.status === 'en_attente' && canSee(ws, user, byId(ws.orders, a.orderId))).map(a => ({ ...a, ref: byId(ws.orders, a.orderId).ref })),
       };
     } },
     'ops.order': { roles: ['conseiller', 'planificateur', 'superviseur', 'admin', 'auditeur'], fn: ({ ws, user, args }) => {
       const o = scopedOrder(ws, user, args.orderId);
       const cv = clientView(ws, user, o);
+      const noImg = ['admin', 'auditeur'].includes(user.role);
       const dups = ws.orders.filter(x => x.id !== o.id && (x.contactPhone === o.contactPhone || (x.address.street === o.address.street && x.zone === o.zone)) && canSee(ws, user, x)).map(x => ({ id: x.id, ref: x.ref, why: x.contactPhone === o.contactPhone ? 'même téléphone' : 'même adresse', state: x.state }));
-      return { ...cv, internal: {
+      const full = { ...cv, internal: {
         events: ws.events.filter(e => e.orderId === o.id),
         notes: ws.messages.filter(m => m.orderId === o.id && m.visibility === 'interne'),
         blockers: ws.blockers.filter(b => b.orderId === o.id).map(b => ({ ...b, ownerName: (byId(ws.users, b.ownerUserId) || {}).name || null, label: BLOCKER_TYPES[b.type].label })),
@@ -1289,6 +1556,7 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
         techRatings: (ws.techRatings || []).filter(r => r.orderId === o.id),
         advice: D.dossierAdvice(ws, o),
       } };
+      return noImg ? noImages(full) : full;
     } },
     // Droit de voir une image (pièce ou photo) : même règle que le dossier, technicien seulement sur sa mission ouverte.
     // Un identifiant d'image connu ne suffit pas (R-11).
@@ -1316,9 +1584,9 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
         const cap = ws.capacity.find(c => c.teamId === t.id && c.date === appt.date && c.slot === appt.slot);
         const own = appt.teamId === t.id && ['reserve', 'confirme'].includes(appt.status);
         const left = cap ? D.remaining(ws, cap) : 0;
-        const busy = ws.appointments.filter(a => a.id !== appt.id && a.teamId === t.id && a.date === appt.date && a.slot === appt.slot && ['confirme', 'en_cours', 'realise'].includes(a.status)).map(a => ({ time: a.time || null, ref: (byId(ws.orders, a.orderId) || {}).ref }));
+        const busy = ws.appointments.filter(a => a.id !== appt.id && a.teamId === t.id && a.date === appt.date && a.slot === appt.slot && ['confirme', 'en_cours', 'realise'].includes(a.status)).map(a => { const bo = byId(ws.orders, a.orderId); return { time: a.time || null, ref: bo && canSee(ws, user, bo) ? bo.ref : null }; });
         const tech = byId(ws.users, t.techUserId);
-        const canTake = covers && t.available && (own || left > 0);
+        const canTake = covers && D.teamOk(ws, t) && (own || left > 0);
         const now = D.techNow(ws, t.techUserId);
         const nowOrder = now.orderId ? byId(ws.orders, now.orderId) : null;
         const live = { status: now.status, problem: !!now.problem, freeSince: now.freeSince || null, ref: nowOrder && canSee(ws, user, nowOrder) ? nowOrder.ref : null };
@@ -1333,8 +1601,9 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
     'ops.staff': { roles: STAFF_ALL, fn: ({ ws }) => ws.users.filter(u => !['client', 'representant'].includes(u.role)).map(u => ({ id: u.id, name: u.name, role: u.role })) },
     planning: { roles: ['planificateur', 'superviseur'], fn: ({ ws, user }) => {
       const teams = ws.teams.filter(t => user.role === 'superviseur' || t.zones.some(z => user.zones.includes(z)));
-      const days = [...new Set(ws.capacity.map(c => c.date))].sort((a, b) => a - b).slice(0, 10);
-      const cells = ws.capacity.filter(c => teams.some(t => t.id === c.teamId) && days.includes(c.date)).map(c => ({ ...c, left: D.remaining(ws, c), appts: ws.appointments.filter(a => a.capId === c.id && ['reserve', 'confirme', 'en_cours', 'realise'].includes(a.status)).map(a => ({ id: a.id, status: a.status, ref: byId(ws.orders, a.orderId).ref, orderId: a.orderId, zone: byId(ws.orders, a.orderId).zone })) }));
+      const today = startOfDay(ws.clock);
+      const days = [...new Set(ws.capacity.filter(c => c.date >= today).map(c => c.date))].sort((a, b) => a - b).slice(0, 10);
+      const cells = ws.capacity.filter(c => teams.some(t => t.id === c.teamId) && days.includes(c.date)).map(c => ({ ...c, left: D.remaining(ws, c), appts: ws.appointments.filter(a => a.capId === c.id && ['reserve', 'confirme', 'en_cours', 'realise'].includes(a.status) && canSee(ws, user, byId(ws.orders, a.orderId))).map(a => ({ id: a.id, status: a.status, ref: byId(ws.orders, a.orderId).ref, orderId: a.orderId, zone: byId(ws.orders, a.orderId).zone })) }));
       const unassigned = ws.appointments.filter(a => a.status === 'reserve' && canSee(ws, user, byId(ws.orders, a.orderId))).map(a => ({ ...a, ref: byId(ws.orders, a.orderId).ref, zone: byId(ws.orders, a.orderId).zone, orderId: a.orderId }));
       const stock = Object.create(null); for (const e of ws.equipment) { stock[e.model] ||= { stock: 0, attribue: 0 }; stock[e.model][e.status]++; }
       const demand = ws.orders.filter(o => ['PRET_A_PLANIFIER', 'RDV_CONFIRME'].includes(o.state)).length;
@@ -1342,7 +1611,7 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
     } },
     'tech.missions': { roles: ['technicien'], fn: ({ ws, user }) => ws.workOrders.filter(w => w.techUserId === user.id).map(w => {
       const o = byId(ws.orders, w.orderId); const a = byId(ws.appointments, w.apptId);
-      return { ...w, ref: o.ref, orderId: o.id, orderVersion: o.version, address: o.address, contactName: o.contactName, offer: o.offer, equipmentModel: o.equipmentModel, appt: a && { date: a.date, slot: a.slot, status: a.status, time: a.time || null }, prep: o.prep, rating: (ws.techRatings || []).find(r => r.woId === w.id) || null, teamName: (byId(ws.teams, w.teamId) || {}).name || null, notes: ws.messages.filter(m => m.orderId === o.id && m.visibility === 'interne').slice(-3),
+      return { ...w, ref: o.ref, orderId: o.id, orderVersion: o.version, address: o.address, contactName: o.contactName, offer: o.offer, equipmentModel: o.equipmentModel, appt: a && { date: a.date, slot: a.slot, status: a.status, time: a.time || null }, prep: o.prep, rating: (ws.techRatings || []).find(r => r.woId === w.id) || null, teamName: (byId(ws.teams, w.teamId) || {}).name || null, notes: [], // jamais la note interne de l'équipe (la liste reste vide pour l'écran)
         // Pièces utiles à la visite, visibles seulement tant que la mission est ouverte (besoin d'en connaître).
         documents: ['terminee', 'annulee', 'echec'].includes(w.status) ? [] : ws.documents.filter(d => d.orderId === o.id && TECH_DOCS.includes(d.type) && d.status !== 'remplace').map(d => ({ id: d.id, type: d.type, name: d.name, status: d.status, at: d.at, thumb: d.thumb, img: d.img })) };
     }).sort((x, y) => ((x.appt && x.appt.date) || 0) - ((y.appt && y.appt.date) || 0)) },
@@ -1360,7 +1629,7 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
         const stage = w.status === 'echec' ? (t.start ? 4 : t.arrive ? 3 : t.depart ? 2 : 1) : sign ? 6 : w.status === 'terminee' ? 5 : w.status === 'en_cours' ? 4 : w.status === 'sur_place' ? 3 : w.status === 'en_route' ? 2 : 1;
         return { inScope: mine(o), woId: w.id, orderId: o.id, ref: o.ref, client: o.contactName, commune: o.address.commune, zone: o.zone, techId: w.techUserId, techName: tech ? tech.name : 'Technicien inconnu', teamName: team ? team.name : null, contractor: team ? team.contractor : null,
           status: w.status, stage, track: w.track || null, times: { depart: t.depart || null, arrive: t.arrive || null, start: t.start || null, end: t.end || null },
-          travelMin: w.status === 'terminee' ? mins(t.depart && (t.arrive || t.start) ? (t.arrive || t.start) - t.depart : null) : null, onSiteMin: w.status === 'terminee' ? mins((t.arrive || t.start) && t.end ? t.end - (t.arrive || t.start) : null) : null,
+          travelMin: mins(t.depart && (t.arrive || t.start) ? (t.arrive || t.start) - t.depart : null), onSiteMin: w.status === 'terminee' ? mins((t.arrive || t.start) && t.end ? t.end - (t.arrive || t.start) : null) : null,
           signoff: w.signoff ? { state: w.signoff.state, mode: w.signoff.mode || null, autoAt: w.signoff.autoAt, at: w.signoff.at || null } : null, freeAt: w.freeAt || null,
           helpCount: (w.help || []).length, helpOpen: ['en_cours', 'sur_place'].includes(w.status) ? open : 0, failure: w.failure || null };
       }).filter(Boolean);
@@ -1378,10 +1647,19 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
     'admin.users': { roles: ['admin', 'auditeur'], ownerOk: true, fn: ({ ws }) => ({ users: ws.users, invites: ws.invites.map(i => ({ ...i, user: (byId(ws.users, i.userId) || {}).name })), privacy: ws.privacy }) },
     'admin.config': { roles: ['admin', 'superviseur', 'auditeur'], fn: ({ ws }) => ({ config: { ...ws.config, webhookSecret: '•••• (stocké dans un coffre en production)' }, zones: ZONES, blockerTypes: BLOCKER_TYPES, docs: ws.docs, ports: ws.ports }) },
     'admin.integrations': { roles: ['admin', 'superviseur', 'auditeur'], fn: ({ ws }) => ({ integrations: ws.integrations, deliveries: ws.deliveries.slice(-80).reverse(), alerts: ws.alerts.slice(-30).reverse(), outbox: ws.outbox.slice(-30).reverse() }) },
-    'admin.audit': { roles: ['admin', 'auditeur', 'superviseur'], fn: ({ ws, args }) => { let a = ws.audit; if (args.q) { const x = args.q.toLowerCase(); a = a.filter(e => (e.action + e.resource + e.actor + e.detail).toLowerCase().includes(x)); } if (args.ai) a = a.filter(e => e.ai); return a.slice().sort((x, y) => (y.at - x.at) || (y.seq - x.seq)).slice(0, 300); } },
+    // Chaque ligne porte son libellé lisible (« Compte coupé ») et le nom de la personne visée : le filtre cherche dans ce que l'écran affiche
+    // (libellé, nom, acteur, détail), sans tenir compte des majuscules ni des accents, et aussi dans le code interne.
+    'admin.audit': { roles: ['admin', 'auditeur', 'superviseur'], fn: ({ ws, args }) => {
+      const target = e => { const u = /^U\d+$/.test(e.resource || '') && byId(ws.users, e.resource); return u ? u.name : e.resource; };
+      let a = ws.audit.map(e => ({ ...e, label: AUDIT_LABELS[e.action] || e.action, target: target(e) }));
+      const x = normTxt(txt(args.q, 100).trim());
+      if (x) a = a.filter(e => normTxt([e.label, e.target, e.resource, e.actor, e.detail, e.action].join(' ')).includes(x));
+      if (args.ai) a = a.filter(e => e.ai);
+      return a.sort((p, q2) => (q2.at - p.at) || (q2.seq - p.seq)).slice(0, 300);
+    } },
     'admin.models': { roles: ['admin', 'auditeur', 'superviseur'], fn: ({ ws }) => { ws._eval ||= evaluate(ws.seed); const done = ws.predictions.filter(p => p.actualH != null); return { models: ws.models, evaluation: ws._eval, live: { predictions: ws.predictions.length, withOutcome: done.length, mae: done.length ? done.reduce((s, p) => s + Math.abs(p.medianH - p.actualH), 0) / done.length : null, coverage: done.length ? done.filter(p => p.actualH >= p.loH && p.actualH <= p.hiH).length / done.length : null }, assistant: (ws.assistantLog || []).slice(-50).reverse(), seed: ws.seed }; } },
     'admin.health': { roles: ['admin', 'superviseur', 'auditeur'], fn: ({ ws }) => ({ integrations: ws.integrations, degraded: ws.sim.degraded, backups: ws.backups, jobs: { pending: ws.jobs.filter(j => !j.done).length, dropped: ws.jobs.filter(j => j.dropped).length }, deliveries: { pending: ws.deliveries.filter(d => d.status === 'en_attente').length, dead: ws.deliveries.filter(d => d.status === 'abandon').length }, storageKb: Math.round((storage.get(K.ws(ws.id)) || '').length / 1024) }) },
-    'admin.refunds': { roles: ['admin', 'superviseur', 'conseiller', 'auditeur'], fn: ({ ws, user }) => ({ refunds: ws.refunds.filter(r => canSee(ws, user, byId(ws.orders, r.orderId))).map(r => ({ ...r, ref: byId(ws.orders, r.orderId).ref })), payments: ws.orders.filter(o => canSee(ws, user, o)).map(o => ({ id: o.id, ...o.payment, orderRef: o.ref, state: o.state })), approvals: (ws.approvals || []).map(a => ({ ...a, ref: byId(ws.orders, a.orderId).ref })) }) },
+    'admin.refunds': { roles: ['admin', 'superviseur', 'conseiller', 'auditeur'], fn: ({ ws, user }) => ({ refunds: ws.refunds.filter(r => canSee(ws, user, byId(ws.orders, r.orderId))).map(r => ({ ...r, ref: byId(ws.orders, r.orderId).ref })), payments: ws.orders.filter(o => canSee(ws, user, o)).map(o => ({ id: o.id, ...o.payment, orderRef: o.ref, state: o.state })), approvals: (ws.approvals || []).filter(a => canSee(ws, user, byId(ws.orders, a.orderId))).map(a => ({ ...a, ref: byId(ws.orders, a.orderId).ref })) }) },
     'labo.state': { ownerOk: true, fn: ({ ws, s }) => {
       if (!s.owner) throw new AppError('interdit', 'Réservé au propriétaire de l’espace.');
       return { ws: { id: ws.id, name: ws.name, seed: ws.seed, generation: ws.generation, clock: ws.clock, expiresAt: ws.expiresAt, createdAt: ws.createdAt, sim: ws.sim, integrations: ws.integrations, backups: ws.backups },
@@ -1423,7 +1701,7 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
     const aging = [[0, 3], [3, 7], [7, 14], [14, 999]].map(([a, b]) => ({ label: b === 999 ? a + ' j et +' : a + '–' + b + ' j', n: ages.filter(x => x >= a && x < b).length }));
     const resolved = ws.blockers.filter(b => b.status === 'resolu');
     return {
-      total: ws.orders.length, open: open.length, active: byState.SERVICE_ACTIF + byState.CLOTURE,
+      total: ws.orders.length, cancelled: ws.orders.filter(o => o.cancelled).length, open: open.length, active: byState.SERVICE_ACTIF + byState.CLOTURE,
       medianDays: q(paidToActive, 0.5), p90Days: q(paidToActive, 0.9), nActive: paidToActive.length,
       byState, aging, byZone,
       blocked: openB.length, blockedNoOwner: openB.filter(b => !b.ownerUserId).length, overdue: openB.filter(b => b.dueAt < ws.clock).length,

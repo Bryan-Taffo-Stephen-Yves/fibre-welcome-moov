@@ -210,6 +210,27 @@ function Config({ token, ro }) {
   if (r.error) return <Err e={r.error} />;
   const c = r.data.config;
   const save = (key, value) => call(token, 'config.set', { key, value });
+  // Champ quitté : rien n'est enregistré si la valeur n'a pas changé ; si elle est refusée, le champ reprend la valeur gardée.
+  const saveNum = async (e, key, stored) => {
+    const el = e.target, v = el.value.trim(), back = () => { el.value = String(stored); };
+    if (/^\d+$/.test(v) && Number(v) === Number(stored)) return back();
+    if (!/^\d+$/.test(v)) { toast('Écrivez un nombre entier, sans virgule ni signe.', true); return back(); }
+    const r = await save(key, v); if (!r.ok) back();
+  };
+  const saveHolidays = async e => {
+    const el = e.target, parts = el.value.split(/[ ,;]+/).filter(Boolean), back = () => { el.value = c.holidays.join(', '); };
+    if (parts.join(',') === c.holidays.join(',')) return back();
+    const real = x => /^\d{4}-\d{2}-\d{2}$/.test(x) && !Number.isNaN(Date.parse(x + 'T00:00:00Z')) && new Date(x + 'T00:00:00Z').toISOString().slice(0, 10) === x;
+    const bad = parts.filter(x => !real(x));
+    if (bad.length) { toast('Date non reconnue : ' + bad.join(', ') + '. Écrivez-la ainsi : 2026-12-25.', true); return back(); }
+    const r = await save('holidays', parts.join(', ')); if (!r.ok) back();
+  };
+  const saveTemplate = async (e, key, stored) => {
+    const el = e.target;
+    if (el.value === stored) return;
+    if (!el.value.trim()) { toast('Le message ne peut pas être vide.', true); el.value = stored; return; }
+    const r = await save('templates.' + key, el.value); if (!r.ok) el.value = stored;
+  };
   const steps = ORDER_STATES.filter(s => c.slaH[s]);
   const maxH = Math.max(1, ...steps.map(s => c.slaH[s]));
   const blockers = Object.entries(r.data.blockerTypes);
@@ -221,7 +242,7 @@ function Config({ token, ro }) {
           <div className="ad-sla">{steps.map(s => <div key={s} className="ad-sla-row">
             <span className="ad-sla-l small">{STATE_INFO[s].label}</span>
             <span className="ad-sla-bar" aria-hidden="true"><i style={{ width: Math.max(4, c.slaH[s] / maxH * 100) + '%' }} /></span>
-            <span className="ad-unit"><input key={s + c.slaH[s]} className="input num" inputMode="numeric" aria-label={'Seuil ' + STATE_INFO[s].label} disabled={ro} defaultValue={c.slaH[s]} onBlur={e => Number(e.target.value) !== c.slaH[s] && save('slaH.' + s, e.target.value)} /><em>h</em></span>
+            <span className="ad-unit"><input key={s + c.slaH[s]} className="input num" inputMode="numeric" aria-label={'Seuil ' + STATE_INFO[s].label} disabled={ro} defaultValue={c.slaH[s]} onBlur={e => saveNum(e, 'slaH.' + s, c.slaH[s])} /><em>h</em></span>
           </div>)}</div>
         </Panel>
         <Panel dark title="Motifs de blocage" right={<span className="small muted">{blockers.length} motifs</span>}>
@@ -235,22 +256,22 @@ function Config({ token, ro }) {
       <div className="ad-side">
         <Panel title="Rendez-vous">
           <div className="ad-form2">
-            <Field label="Réservation temporaire" id="cf-h"><span className="ad-unit ad-unit-w"><input id="cf-h" key={'h' + c.holdMinutes} className="input num" inputMode="numeric" disabled={ro} defaultValue={c.holdMinutes} onBlur={e => save('holdMinutes', e.target.value)} /><em>min</em></span></Field>
-            <Field label="Délai promis après paiement" id="cf-d"><span className="ad-unit ad-unit-w"><input id="cf-d" key={'d' + c.contractDays} className="input num" inputMode="numeric" disabled={ro} defaultValue={c.contractDays} onBlur={e => save('contractDays', e.target.value)} /><em>jours</em></span></Field>
+            <Field label="Réservation temporaire" id="cf-h"><span className="ad-unit ad-unit-w"><input id="cf-h" key={'h' + c.holdMinutes} className="input num" inputMode="numeric" disabled={ro} defaultValue={c.holdMinutes} onBlur={e => saveNum(e, 'holdMinutes', c.holdMinutes)} /><em>min</em></span></Field>
+            <Field label="Délai promis après paiement" id="cf-d"><span className="ad-unit ad-unit-w"><input id="cf-d" key={'d' + c.contractDays} className="input num" inputMode="numeric" disabled={ro} defaultValue={c.contractDays} onBlur={e => saveNum(e, 'contractDays', c.contractDays)} /><em>jours</em></span></Field>
           </div>
           {/* Parcours « démo en direct » : délai laissé au client pour son dossier, et durée du trajet du technicien. */}
           <div className="ad-form2 ad-form2-end">
-            <Field label="Délai pour envoyer le dossier après l’achat (heures)" id="cf-dd"><span className="ad-unit ad-unit-w"><input id="cf-dd" key={'dd' + c.dossierDeadlineH} className="input num" inputMode="numeric" disabled={ro} defaultValue={c.dossierDeadlineH ?? 24} onBlur={e => save('dossierDeadlineH', e.target.value)} /><em>h</em></span></Field>
-            <Field label="Durée du trajet simulé du technicien (minutes)" id="cf-tr"><span className="ad-unit ad-unit-w"><input id="cf-tr" key={'tr' + c.travelMin} className="input num" inputMode="numeric" disabled={ro} defaultValue={c.travelMin ?? 4} onBlur={e => save('travelMin', e.target.value)} /><em>min</em></span></Field>
-            <Field label="Validation automatique de la visite (minutes sans réponse du client)" id="cf-av" hint="Entre 1 et 240 minutes. Passé ce délai, la visite est validée toute seule."><span className="ad-unit ad-unit-w"><input id="cf-av" key={'av' + c.autoValidateMin} className="input num" inputMode="numeric" disabled={ro} defaultValue={c.autoValidateMin ?? 60} onBlur={e => Number(e.target.value) !== (c.autoValidateMin ?? 60) && save('autoValidateMin', e.target.value)} /><em>min</em></span></Field>
+            <Field label="Délai pour envoyer le dossier après l’achat (heures)" id="cf-dd"><span className="ad-unit ad-unit-w"><input id="cf-dd" key={'dd' + c.dossierDeadlineH} className="input num" inputMode="numeric" disabled={ro} defaultValue={c.dossierDeadlineH ?? 24} onBlur={e => saveNum(e, 'dossierDeadlineH', c.dossierDeadlineH ?? 24)} /><em>h</em></span></Field>
+            <Field label="Durée du trajet simulé du technicien (minutes)" id="cf-tr"><span className="ad-unit ad-unit-w"><input id="cf-tr" key={'tr' + c.travelMin} className="input num" inputMode="numeric" disabled={ro} defaultValue={c.travelMin ?? 4} onBlur={e => saveNum(e, 'travelMin', c.travelMin ?? 4)} /><em>min</em></span></Field>
+            <Field label="Validation automatique de la visite (minutes sans réponse du client)" id="cf-av" hint="Entre 1 et 240 minutes. Passé ce délai, la visite est validée toute seule."><span className="ad-unit ad-unit-w"><input id="cf-av" key={'av' + c.autoValidateMin} className="input num" inputMode="numeric" disabled={ro} defaultValue={c.autoValidateMin ?? 60} onBlur={e => saveNum(e, 'autoValidateMin', c.autoValidateMin ?? 60)} /><em>min</em></span></Field>
           </div>
-          <Field label="Si le matériel manque" id="cf-p"><select id="cf-p" className="input" disabled={ro} value={c.policyEquipment} onChange={e => save('policyEquipment', e.target.value)}><option value="conditionnel">Réservation possible, confirmation bloquée</option><option value="bloquer">Aucune réservation</option></select></Field>
+          <Field label="Si le matériel manque" id="cf-p"><select id="cf-p" className="input" disabled={ro} value={c.policyEquipment} onChange={e => save('policyEquipment', e.target.value)}><option value="conditionnel">Réservation possible, confirmation bloquée</option><option value="bloquer">Aucune réservation</option><option value="ignorer">Pas de contrôle du stock</option></select></Field>
           <label className="switch"><input type="checkbox" disabled={ro} checked={c.autoConfirm} onChange={e => save('autoConfirm', e.target.checked)} /><span className="small">Confirmer les réservations tout seul, sans planificateur</span></label>
-          <Field label="Jours fériés" id="cf-hol" hint="Format AAAA-MM-JJ, séparés par des virgules."><input id="cf-hol" key={'hol' + c.holidays.join()} className="input" disabled={ro} placeholder="2026-12-25, 2027-01-01" defaultValue={c.holidays.join(', ')} onBlur={e => save('holidays', e.target.value)} /></Field>
+          <Field label="Jours fériés" id="cf-hol" hint="Format AAAA-MM-JJ, séparés par des virgules."><input id="cf-hol" key={'hol' + c.holidays.join()} className="input" disabled={ro} placeholder="2026-12-25, 2027-01-01" defaultValue={c.holidays.join(', ')} onBlur={saveHolidays} /></Field>
           <span className="tiny muted">Heures stockées en UTC et affichées à l’heure d’Abidjan. Dimanche fermé dans cette démo.</span>
         </Panel>
         <Panel title="Messages envoyés aux clients">
-          {Object.entries(c.templates).map(([k, t]) => <Field key={k} label={TEMPLATE_LABEL[k] || k} id={'tp-' + k}><textarea id={'tp-' + k} className="input" rows={2} disabled={ro} defaultValue={t} onBlur={e => e.target.value !== t && save('templates.' + k, e.target.value)} /></Field>)}
+          {Object.entries(c.templates).map(([k, t]) => <Field key={k} label={TEMPLATE_LABEL[k] || k} id={'tp-' + k}><textarea id={'tp-' + k} className="input" rows={2} maxLength={300} disabled={ro} defaultValue={t} onBlur={e => saveTemplate(e, k, t)} /></Field>)}
           <span className="tiny muted">Mots remplacés automatiquement : {'{date}'} et {'{slot}'}.</span>
         </Panel>
       </div>
@@ -373,7 +394,8 @@ function Audit({ token }) {
   const refusals = all.filter(isRefus).slice(0, 4);
   const users = (u.data && u.data.users) || [];
   const target = x => { const p = /^U\d+$/.test(x || '') && users.find(y => y.id === x); return p ? p.name : x; };
-  const objet = a => (a.action === 'acces.refuse' ? actLabel(a.resource) : target(a.resource));
+  const objet = a => (a.target || (a.action === 'acces.refuse' ? actLabel(a.resource) : target(a.resource)));
+  const actOf = a => a.label || actLabel(a.action);
   return <>
     <SecHead title="Journal d’audit" lead="Chaque action, chaque accès refusé et chaque décision de l’IA, dans l’ordre.">
       <AsyncBtn kind="primary" onClick={async () => { const x = await call(token, 'export.orders', {}); if (x.ok) setCsv(x.data); }}>{Icon.doc}Exporter les dossiers</AsyncBtn>
@@ -388,7 +410,7 @@ function Audit({ token }) {
         {r.error ? <Err e={r.error} /> : rows.length === 0 ? <p className="small muted ad-pad">Rien ne correspond à ce filtre.</p> : <div className="tbl-wrap"><table className="tbl ad-rt ad-rt-au"><thead><tr><th>Qui</th><th>Action</th><th>Objet</th><th>Détail</th><th className="ad-r">Quand</th></tr></thead><tbody>
           {rows.slice(0, n).map(a => { const bad = isRefus(a); return <tr key={a.seq} className={bad ? 'ad-refus' : ''}>
             <td className="ad-c-main"><Who name={a.actor} role={a.role} size={32} /></td>
-            <td className="ad-c-act2"><span title={a.action}>{actLabel(a.action)}</span>{a.ai && <span className="ad-chip-ai">IA</span>}{bad && <span className="ad-st ad-st-bad"><i />Refus</span>}</td>
+            <td className="ad-c-act2"><span title={a.action}>{actOf(a)}</span>{a.ai && <span className="ad-chip-ai">IA</span>}{bad && <span className="ad-st ad-st-bad"><i />Refus</span>}</td>
             <td className="small ad-c-obj" title={a.resource}>{objet(a)}</td>
             <td className="small muted ad-c-full ad-c-detail">{a.detail}</td>
             <td className="tiny muted ad-c-end ad-c-when ad-r"><span className="num">{fmtDateTime(a.at)}</span><div>n° {a.seq}</div></td>
@@ -407,7 +429,7 @@ function Audit({ token }) {
         </Panel>
         <Panel title="Refus récents" right={refusals.length ? <span className="tag tag-bad">{refusals.length}</span> : null}>
           {refusals.length ? <ul className="ad-list">{refusals.map(a => <li key={a.seq} className="ad-line">
-            <Who name={a.actor} role={a.role} size={34} sub={actLabel(a.action) + ' · ' + objet(a)} />
+            <Who name={a.actor} role={a.role} size={34} sub={actOf(a) + ' · ' + objet(a)} />
             <span className="tiny muted ad-line-end">{fmtDateTime(a.at)}</span>
           </li>)}</ul> : <Empty who="Fatou Touré">Aucun accès refusé dans cette liste.</Empty>}
         </Panel>

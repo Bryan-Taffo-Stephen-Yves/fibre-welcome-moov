@@ -24,6 +24,9 @@ const spaceOfRole = r => Object.keys(SPACE_ROLES).find(k => SPACE_ROLES[k].inclu
 const lsGet = (k, d) => { try { const v = window.localStorage.getItem(k); return v == null ? d : v; } catch { return d; } };
 const lsSet = (k, v) => { try { window.localStorage.setItem(k, v); } catch {} };
 
+// Message du serveur quand l'espace ou l'invitation est introuvable : seul cas où l'aide « autre navigateur » a un sens.
+const JOIN_NOT_FOUND = 'Invitation invalide.';
+
 function readHash() { try { return decodeURIComponent((location.hash || '').slice(1)); } catch { return ''; } }
 
 export function App() {
@@ -146,11 +149,12 @@ export function App() {
   const steps = TOUR;
   // Site des offres : plein écran, sans la coquille de l'application.
   if (route === 'offres') return <>
-    {ownerOk ? <Shop owner={ownerOk} onDone={shopDone} onBack={kiosk ? null : () => go('accueil')} dark={dark} onTheme={() => setTheme(dark ? 'light' : 'dark')} /> : <div className="page"><Say>Je prépare le site des offres…</Say></div>}
+    {ownerOk ? <ErrorGate page resetKey={'offres:' + ownerOk}><Shop owner={ownerOk} onDone={shopDone} onBack={kiosk ? null : () => go('accueil')} dark={dark} onTheme={() => setTheme(dark ? 'light' : 'dark')} /></ErrorGate> : <div className="page"><Say>Je prépare le site des offres…</Say></div>}
     <Toasts list={toasts} />
   </>;
   return <Shell {...shellProps} ws={ws}>
-    {joinErr && <div className="page" style={{ paddingBottom: 0 }}><div className="alert alert-warn spread"><span><b>Ce lien d’invitation ne marche pas ici.</b> {joinErr} {cloudOn ? 'Vos appareils partagent déjà le même espace : choisissez simplement votre personnage.' : 'Une invitation ne fonctionne que dans le navigateur où l’espace de test a été créé (les données restent sur cet ordinateur). Ouvrez le lien dans un autre onglet de ce même navigateur.'}</span><Btn size="s" onClick={() => { setJoinErr(null); try { history.replaceState(null, '', location.pathname); } catch {} }}>Fermer</Btn></div></div>}
+    {joinErr && <div className="page" style={{ paddingBottom: 0 }}><div className="alert alert-warn spread"><span><b>Ce lien d’invitation ne marche pas ici.</b> {joinErr}{joinErr === JOIN_NOT_FOUND && (cloudOn ? ' Vos appareils partagent déjà le même espace : choisissez simplement votre personnage.' : ' Une invitation ne fonctionne que dans le navigateur où l’espace de test a été créé (les données restent sur cet ordinateur). Ouvrez le lien dans un autre onglet de ce même navigateur.')}</span><Btn size="s" onClick={() => { setJoinErr(null); try { history.replaceState(null, '', location.pathname); } catch {} }}>Fermer</Btn></div></div>}
+    <ErrorGate page resetKey={route + ':' + (ownerOk || '') + ':' + (SPACE_ROLES[route] ? userFor(route) || '' : '')}>
     {!ownerOk ? <div className="page"><Say>Je prépare votre espace de test…</Say></div>
       : kiosk ? <div className="page"><SpaceView space="client" token={tok('client')} /></div>
       : route === 'accueil' ? <Home go={go} hasWs={!!ownerOk} startTour={() => setTour(0)} createWs={() => { const { token } = api.createWorkspace({}); setOwner(token); }} users={users} pick={pick} owner={ownerOk} openRoom={openRoom} />
@@ -160,6 +164,7 @@ export function App() {
         <SpaceHead space={route} users={users} current={userFor(route)} onPick={id => pick(route, id)} />
         <SpaceView space={route} token={tok(route)} />
       </div>}
+    </ErrorGate>
     {welcome && ownerOk && !kiosk && <Modal title="Bienvenue dans Fibre Welcome" onClose={() => { lsSet('fw:welcomed', '1'); setWelcome(false); }} actions={<><Btn kind="primary" onClick={() => { lsSet('fw:welcomed', '1'); setWelcome(false); setTour(0); }}>Faire la visite (3 min)</Btn><Btn onClick={() => { lsSet('fw:welcomed', '1'); setWelcome(false); }}>Explorer seul</Btn></>}>
       <Say name="Aya" size={44}>Bonjour, je suis <b>Aya</b>, votre guide. Cette application suit une installation de fibre Moov, <b>du paiement jusqu’à la connexion qui marche</b>.</Say>
       <div className="card-soft stack-s">
@@ -336,10 +341,29 @@ function SpaceHead({ space, users, current, onPick }) {
 
 function SpaceView({ space, token }) {
   if (!token) return <div className="alert">Session indisponible.</div>;
-  if (space === 'client') return <ClientApp token={token} />;
-  if (space === 'terrain') return <FieldApp token={token} />;
-  if (space === 'ops') return <OpsConsole token={token} />;
-  return <AdminConsole token={token} />;
+  // Chaque écran a sa propre barrière : un volet qui plante n'emporte pas les autres, et changer de personnage la remet à zéro.
+  return <ErrorGate resetKey={space + ':' + token}>
+    {space === 'client' ? <ClientApp token={token} /> : space === 'terrain' ? <FieldApp token={token} /> : space === 'ops' ? <OpsConsole token={token} /> : <AdminConsole token={token} />}
+  </ErrorGate>;
+}
+
+// Barrière d'erreur : si un écran plante, une carte claire remplace seulement cet écran (jamais toute la page).
+// Elle se remet à zéro quand resetKey change (autre route, autre personnage).
+class ErrorGate extends React.Component {
+  constructor(props) { super(props); this.state = { failed: false, n: 0 }; }
+  static getDerivedStateFromError() { return { failed: true }; }
+  componentDidCatch(error) { try { console.error('Écran en erreur :', error); } catch {} }
+  componentDidUpdate(prev) { if (this.state.failed && prev.resetKey !== this.props.resetKey) this.setState(st => ({ failed: false, n: st.n + 1 })); }
+  retry = () => { try { refresh(); } catch {} this.setState(st => ({ failed: false, n: st.n + 1 })); };
+  render() {
+    if (!this.state.failed) return <React.Fragment key={this.state.n}>{this.props.children}</React.Fragment>;
+    const card = <div className="card-strong stack" role="alert">
+      <b>Cet écran a eu un souci.</b>
+      <span className="small muted">Vos données sont gardées.</span>
+      <div><Btn kind="primary" onClick={this.retry}>Recharger l’écran</Btn></div>
+    </div>;
+    return this.props.page ? <div className="page">{card}</div> : card;
+  }
 }
 
 function Room({ owner, users, room, setRoom, techId }) {
