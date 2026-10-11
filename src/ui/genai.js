@@ -177,7 +177,7 @@ export async function iaStatus(force = false) {
       try {
         const r = await fetch(c.url, { headers: { apikey: c.key || '' }, signal: timeout(15000) });
         const j = await r.json().catch(() => null);
-        v = j && j.ok ? { state: String(j.state), used: j.used, max: j.max, model: j.model } : r.status === 404 ? { state: 'absente' } : { state: j && j.why === 'origine' ? 'origine' : 'injoignable' };
+        v = j && j.ok ? { state: String(j.state), used: j.used, max: j.max, cost: j.cost, maxCost: j.maxCost, model: j.model } : r.status === 404 ? { state: 'absente' } : { state: j && j.why === 'origine' ? 'origine' : 'injoignable' };
       } catch { v = { state: 'injoignable' }; }
     }
   }
@@ -204,7 +204,9 @@ export const IA_STATE = {
   modele_absent: ['bad', 'Modèle indisponible', 'Cette clé n’a pas accès au modèle demandé.'],
   injoignable: ['warn', 'Injoignable', 'Le serveur de l’IA ne répond pas pour le moment : l’assistant répond par règles.'],
   absente: ['warn', 'Pas encore installée', 'La fonction « fw-ia » n’est pas encore installée sur Supabase : l’assistant répond par règles.'],
-  origine: ['bad', 'Adresse non autorisée', 'Cette adresse de page n’a pas le droit d’appeler l’IA.'],
+  origine: ['bad', 'Adresse non autorisée', 'Cette adresse de page n’a pas le droit d’appeler l’IA (par exemple une page ouverte comme fichier : prenez le lien public).'],
+  limite: ['warn', 'Plafond du jour atteint', 'Le nombre de demandes ou la dépense du jour est au plafond : l’assistant répond par règles jusqu’à demain.'],
+  compteur: ['bad', 'Compteur indisponible', 'Le compteur des demandes (base Supabase) ne répond pas : par prudence, Claude n’est pas appelé.'],
   pas_de_serveur: ['neutral', 'Sans serveur', 'Aucun serveur n’est configuré : l’assistant répond par règles.'],
   apercu_compte: ['ok', 'Aperçu privé : votre compte Claude', 'Ici, l’IA passe par le compte Claude de la personne qui regarde, après son accord. Sur le lien public, elle passe par la clé installée dans Supabase.'],
   apercu: ['neutral', 'Aperçu privé', 'L’IA n’est pas disponible dans cet aperçu. Elle marche sur le lien public, une fois la clé installée.'],
@@ -216,7 +218,9 @@ const WHY_TEXT = {
   credit: 'le crédit du compte Anthropic est épuisé',
   cle_refusee: 'la clé de Claude est refusée',
   modele_absent: 'le modèle n’est pas disponible pour cette clé',
-  limite: 'le plafond de demandes est atteint, réessayez plus tard',
+  limite: 'le plafond du jour est atteint, réessayez plus tard',
+  trop_gros: 'la demande est trop longue',
+  trop_long: 'la réponse de Claude était trop longue',
   compteur: 'le compteur de demandes ne répond pas',
   injoignable: 'le serveur de l’IA ne répond pas',
   absente: 'la fonction de l’IA n’est pas encore installée',

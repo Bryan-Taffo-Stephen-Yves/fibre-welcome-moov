@@ -40,8 +40,9 @@ L’assistant du client (onglet Messages) et l’avis sur les photos de Nadia pe
 - **Ce qui part chez Claude.** Pour une question : la question, les quatre derniers échanges au plus et l’état du dossier (étape, rendez-vous, paiement, pièces attendues, estimation, procédures publiques), sans le nom, le numéro de téléphone ni l’adresse du client. Pour une photo : l’image et le type de pièce attendu, rien d’autre, et seulement quand la conseillère clique sur « Avis de l’IA ».
 - **Garde-fou.** Claude doit citer les éléments du dossier qu’il utilise. Avant d’afficher sa réponse, l’application vérifie chaque nombre, chaque date, chaque jour et chaque promesse (« garanti », « demain », « ligne active », paiement confirmé, lien, code secret) avec les éléments cités. Si quelque chose ne colle pas, la réponse est écartée : le client reçoit la réponse par règles et le motif est listé dans Admin, Modèles IA. Le scénario SC-19 le montre avec une réponse piégée.
 - **Photos.** L’avis de Claude (lisible, à refaire, pas sûr) s’ajoute au contrôle simple ; c’est toujours la conseillère qui valide ou refuse. Les chiffres que l’IA a lus sur une pièce sont masqués à l’écran, et le client ne voit jamais cet avis.
-- **La clé.** Elle est gardée dans Supabase (secret `ANTHROPIC_API_KEY`), jamais dans la page ni dans le dépôt. La fonction `supabase/functions/fw-ia` appelle Claude (modèle `claude-opus-5-5`, effort bas, réponse au format imposé) ; elle n’accepte que les pages de l’application (lien public et ordinateur local).
-- **Plafonds et coût.** 60 demandes par visiteur et par jour (10 par minute), 150 par jour pour toute l’application (`supabase/ia.sql`). Au-delà, ou si la clé manque, si le crédit est épuisé ou si Claude ne répond pas, l’assistant répond par règles. Coût estimé : 2 à 3 centimes de dollar par demande, donc 4 dollars par jour au plus.
+- **La clé.** Elle est gardée dans Supabase (secret `ANTHROPIC_API_KEY`), jamais dans la page ni dans le dépôt. La fonction `supabase/functions/fw-ia` appelle Claude (modèle `claude-opus-5-5`, effort bas, réponse au format imposé, texte envoyé limité en taille).
+- **Pages autorisées.** Un navigateur ne peut appeler la fonction que depuis le lien public ou `http://localhost` (essais). Ce n’est pas un verrou (un programme peut l’appeler sans navigateur) : la vraie protection, ce sont les plafonds ci-dessous. Avec `index.html` ouvert comme fichier, l’assistant répond par règles ; pour la vraie IA, prendre le lien public ou lancer `python3 -m http.server 8000` puis ouvrir `http://localhost:8000`.
+- **Plafonds et coût.** Par visiteur : 60 demandes par jour (10 par minute) et 1 dollar par jour. Pour toute l’application : 150 demandes et 3 dollars par jour. La fonction note le coût réel de chaque réponse dans la base (`supabase/ia.sql`) et n’appelle plus Claude quand un plafond du jour serait dépassé. Une question coûte environ 2 centimes de dollar, un avis sur une photo à peu près autant (estimations). Au-delà des plafonds, ou si la clé manque, si le crédit est épuisé ou si Claude ne répond pas, l’assistant répond par règles.
 - **Couper l’IA.** Admin, Modèles IA, « Couper l’IA générative » (noté dans le journal).
 - **Aperçu claude.ai.** L’aperçu privé ne peut pas joindre Supabase : l’IA y passe par le compte Claude de la personne qui regarde, après son accord.
 
@@ -49,7 +50,7 @@ Installer la clé (une seule fois) :
 
 1. Sur console.anthropic.com : créer une clé API (Settings, API keys, Create key) et ajouter un peu de crédit (5 à 10 dollars suffisent pour la démo).
 2. Sur supabase.com, projet « fibre-welcome » : Edge Functions, Secrets, ajouter `ANTHROPIC_API_KEY` avec la clé comme valeur.
-3. Dans l’application : Admin, Modèles IA, « Vérifier ». L’état passe à « Prête : Claude répond ».
+3. Dans l’application : Admin, Modèles IA, « Vérifier ». L’état passe à « Prête : Claude répond ». Cette vérification pose une toute petite question à Claude (moins d’un dixième de centime) : elle voit aussi un crédit épuisé.
 
 ## Ce que contient l’application
 

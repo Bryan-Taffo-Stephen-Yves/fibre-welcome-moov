@@ -521,6 +521,8 @@ function GenAiPanel({ token, ro, g }) {
   const [tone, title, sub] = iaState(st.state);
   const keyHelp = !ro && ['sans_cle', 'cle_refusee', 'credit'].includes(st.state);
   const sec = ms => (ms / 1000).toLocaleString('fr-FR', { maximumFractionDigits: 1 }) + ' s';
+  // Dépense en micro-dollars (millionièmes de dollar), affichée en dollars.
+  const usd = m => (m / 1e6).toLocaleString('fr-FR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' $';
   // En-tête : le résumé en deux mots (Claude répond, ou les règles répondent) ; le détail est dessous.
   const short = !g.on ? 'Coupée' : tone === 'ok' ? 'En marche' : st.state === 'verification' ? 'Vérification…' : 'Réponses par règles';
   return <Panel title="IA générative (Claude)" className="ad-genai" right={<Tag tone={g.on ? tone : 'warn'}>{short}</Tag>}>
@@ -537,9 +539,9 @@ function GenAiPanel({ token, ro, g }) {
       <div><span className="eyebrow">Réponses de Claude</span><div className="ad-big num">{g.answers}</div></div>
       <div><span className="eyebrow">Écartées par le garde-fou</span><div className="ad-big num">{g.rejected}</div></div>
       <div><span className="eyebrow">Photos regardées</span><div className="ad-big num">{g.photos}</div></div>
-      <div><span className="eyebrow">Demandes aujourd’hui</span><div className="ad-big num">{typeof st.used === 'number' ? st.used : '—'}<small>/{st.max || IA_LIMITS.allDay}</small></div></div>
+      <div><span className="eyebrow">Demandes aujourd’hui</span><div className="ad-big num">{typeof st.used === 'number' ? st.used : '—'}<small>/{st.max || IA_LIMITS.allDay}</small></div>{typeof st.cost === 'number' && <span className="tiny muted">Dépense : {usd(st.cost)} sur {usd(st.maxCost || IA_LIMITS.allCost)}</span>}</div>
     </div>
-    <span className="tiny muted">{g.answers ? 'Temps moyen d’une réponse : ' + (g.avgMs != null ? sec(g.avgMs) : '—') + '. ' : ''}Plafonds : {IA_LIMITS.perIpDay} demandes par visiteur et par jour, {IA_LIMITS.allDay} pour toute l’application. Au-delà, l’assistant répond par règles.</span>
+    <span className="tiny muted">{g.answers ? 'Temps moyen d’une réponse : ' + (g.avgMs != null ? sec(g.avgMs) : '—') + '. ' : ''}Plafonds par jour : {IA_LIMITS.perIpDay} demandes et {usd(IA_LIMITS.perIpCost)} par visiteur, {IA_LIMITS.allDay} demandes et {usd(IA_LIMITS.allCost)} pour toute l’application. Au-delà, l’assistant répond par règles.</span>
     {g.lastRejected.length > 0 && <div className="stack-s">
       <b className="small">Dernières réponses écartées</b>
       <ul className="ad-list ad-genai-rej">{g.lastRejected.map(x => <li key={x.id} className="small"><span className="ad-bubble">« {x.q} »</span><span className="tiny muted">{x.why} · {fmtDateTime(x.at)}</span></li>)}</ul>

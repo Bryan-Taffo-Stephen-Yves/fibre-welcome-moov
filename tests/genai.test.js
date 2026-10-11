@@ -308,9 +308,9 @@ test('Fonction fw-ia : réglages de l’appel à Claude, origines et visiteurs',
   assert.equal(p.messages[0].content[0].source.media_type, 'image/jpeg');
   // Les schémas imposés : aucun champ en plus.
   for (const s of [ASSISTANT_SCHEMA, PHOTO_SCHEMA]) { assert.equal(s.additionalProperties, false); assert.deepEqual([...s.required].sort(), Object.keys(s.properties).sort()); }
-  // Origines : le lien du jury, un fichier local et les essais ; pas un autre site.
+  // Origines : le lien du jury et les essais en local ; pas un autre site, ni un cadre isolé (origine « null »).
   assert.equal(originOk('https://bryan-taffo-stephen-yves.github.io'), true);
-  assert.equal(originOk('null'), true);
+  assert.equal(originOk('null'), false);
   assert.equal(originOk('http://localhost:8000'), true);
   assert.equal(originOk('https://evil.example'), false);
   assert.equal(originOk('https://bryan-taffo-stephen-yves.github.io.evil.example'), false);
