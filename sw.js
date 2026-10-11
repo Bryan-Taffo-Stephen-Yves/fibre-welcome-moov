@@ -5,5 +5,9 @@ self.addEventListener('install', e => e.waitUntil(caches.open(CACHE).then(c => c
 self.addEventListener('activate', e => e.waitUntil(caches.keys().then(ks => Promise.all(ks.filter(k => k !== CACHE).map(k => caches.delete(k)))).then(() => self.clients.claim())));
 self.addEventListener('fetch', e => {
   if (e.request.method !== 'GET' || new URL(e.request.url).origin !== location.origin) return;
-  e.respondWith(fetch(e.request).then(r => { const c = r.clone(); caches.open(CACHE).then(k => k.put(e.request, c)); return r; }).catch(() => caches.match(e.request, { ignoreSearch: true })));
+  const cached = () => caches.match(e.request, { ignoreSearch: true });
+  // Réseau d'abord, mais seulement 6 s (réseau très lent) ; une réponse d'erreur ne remplace jamais la bonne copie.
+  const net = fetch(e.request).then(r => { if (r.ok && r.status === 200) { const c = r.clone(); caches.open(CACHE).then(k => k.put(e.request, c)); return r; } return cached().then(m => m || r); });
+  const slow = new Promise(ok => setTimeout(() => cached().then(m => m && ok(m), () => {}), 6000));
+  e.respondWith(Promise.race([net, slow]).catch(() => cached().then(m => m || net)));
 });

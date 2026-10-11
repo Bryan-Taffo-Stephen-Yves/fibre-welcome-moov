@@ -742,12 +742,15 @@ async function startServer() {
   if (!cfg || !cfg.url || typeof fetch !== 'function' || (typeof window !== 'undefined' && window.FW_NO_SERVER)) return;
   db = serverDb(cfg);
   const fromUrl = roomFromUrl(), mine = storedRoom();
+  let badLink = false;
+  try { const raw = new URLSearchParams(location.search).get('salle'); badLink = raw != null && !fromUrl; } catch {}
   let room;
   if (fromUrl && fromUrl !== mine) { foreignRoom = fromUrl; room = fromUrl; }
   else { room = mine || newRoom(); rememberRoom(room); }
   set({ mode: 'server', room, status: 'connecting', message: '', msgKind: '' });
   if (typeof window !== 'undefined') window.addEventListener('online', () => { if (cloudState.status === 'on') { fails = 0; sideTries = 0; if (cloudState.wsId) flushLater(cloudState.wsId, 0); resume(); } else retry(); });
   try { await enter(); } catch (e) { unreachable(e); }
+  if (badLink && deps && deps.notify) deps.notify('Ce lien ne contient pas un code valide (8 lettres ou chiffres) : vous êtes dans votre propre espace.', true);
 }
 
 // ---------- API ----------
