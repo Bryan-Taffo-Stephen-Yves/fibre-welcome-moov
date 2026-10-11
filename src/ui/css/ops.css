@@ -400,6 +400,18 @@ button.op-capbtn:hover { background: var(--surface-3); }
 .op-chk-m { font-variant-numeric: tabular-nums; }
 .op-chk-help { display: flex; align-items: flex-start; gap: 6px; }
 .op-chk-help svg { width: 13px; height: 13px; flex: none; margin-top: 2px; }
+/* Avis de l'IA générative (Claude) sur une photo : une aide, à côté du contrôle simple */
+.op-iaph { display: flex; flex-direction: column; gap: 2px; align-items: flex-start; padding: 6px 10px; border-radius: 12px; border: 1px dashed var(--line); background: var(--surface); }
+.op-iaph-h { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; flex-wrap: wrap; }
+.op-iaph-h svg { width: 14px; height: 14px; flex: none; }
+.op-iaph-ok .op-iaph-h { color: var(--ok); }
+.op-iaph-bad .op-iaph-h { color: var(--bad); }
+.op-iaph-warn .op-iaph-h { color: var(--warn); }
+.op-iaph-note { font-size: 12px; color: var(--ink-2); overflow-wrap: anywhere; }
+.btn.op-iaph-btn { align-self: flex-start; }
+.op-iaph-btn svg { width: 14px; height: 14px; }
+.op-advice-doubt { display: flex; gap: 6px; align-items: flex-start; margin: 0; color: var(--warn); }
+.op-advice-doubt svg { width: 13px; height: 13px; flex: none; margin-top: 2px; }
 
 /* Refus avec motifs tout prêts */
 .op-rev .btn { flex: 1 1 auto; }

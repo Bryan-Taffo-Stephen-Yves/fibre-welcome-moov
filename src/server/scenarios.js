@@ -1,4 +1,4 @@
-// Centre de scénarios SC-01 à SC-18 (CDC 7.4). Chaque scénario prépare un dossier fictif dédié,
+// Centre de scénarios SC-01 à SC-19 (CDC 7.4). Chaque scénario prépare un dossier fictif dédié,
 // puis le guide vérifie les étapes sur l'état réellement stocké : il ne coche jamais une étape
 // que l'application n'a pas réellement faite (CDC 7.2).
 import * as D from './domain.js';
@@ -119,6 +119,13 @@ export const SCENARIOS = [
     { role: 'client', text: 'Client : composer *123# puis choisir 4 (être rappelé).', check: (ws, r) => ws.callbacks.some(c => c.orderId === r.orderIds[0] && /USSD/.test(c.reason)) },
     { role: 'conseiller', text: 'Conseillère : voir la demande de rappel dans le dossier et la traiter.', check: (ws, r) => ws.callbacks.some(c => c.orderId === r.orderIds[0] && c.status !== 'demande') },
   ] },
+  // La réponse piégée est écrite pour le test (elle imite une IA qui se trompe) : elle passe par le même contrôle qu'une
+  // vraie réponse de Claude. Sans clé de Claude, l'assistant répond par règles et le scénario se termine quand même.
+  { code: 'SC-19', title: 'IA générative sous garde-fou', goal: 'Claude rédige les réponses de l’assistant, mais une réponse qui invente une date, une heure ou une promesse est écartée : le client reçoit la réponse par règles.', steps: [
+    { role: 'labo', text: 'Envoyer la réponse piégée (bouton ci-dessous) : elle invente une heure de visite et promet un délai.', check: (ws, r) => (ws.assistantLog || []).some(a => a.orderId === r.orderIds[0] && a.aiRejected) },
+    { role: 'admin', text: 'Administrateur : Modèles IA, panneau « IA générative » : la réponse écartée et son motif sont listés.', check: () => null },
+    { role: 'client', text: 'Client : poser une question à l’assistant (Messages). Avec la clé de Claude, la réponse porte « Rédigé par l’IA Claude » ; sinon, l’assistant répond par règles.', check: (ws, r) => (ws.assistantLog || []).some(a => a.orderId === r.orderIds[0] && !a.aiRejected && !a.refused) },
+  ] },
 ];
 
 function mk(ws, cmds, { zone = 'cocody', customerId = 'U1', to = 'PREPARATION', scenario }) {
@@ -156,7 +163,7 @@ export function runScenarioSetup(ws, code, { realNow, cmds }) {
     case 'SC-01': run.orderIds.push(mk(ws, cmds, { to: 'DOSSIER_RECU', scenario: code }).id); break;
     case 'SC-02': { const o = mk(ws, cmds, { scenario: code }); o.requiredDocs = ['justif_domicile']; D.openBlocker(ws, o, 'PIECE_MANQUANTE', { actor: ws.users.find(u => u.role === 'conseiller'), detail: 'Justificatif de domicile' }); run.orderIds.push(o.id); break; }
     case 'SC-03': { const o = mk(ws, cmds, { scenario: code }); o.address.landmark = ''; D.openBlocker(ws, o, 'ADRESSE_AMBIGUE', { actor: ws.users.find(u => u.role === 'planificateur'), detail: 'Numéro de lot introuvable sur le terrain' }); run.orderIds.push(o.id); break; }
-    case 'SC-04': case 'SC-06': case 'SC-07': case 'SC-11': case 'SC-18': { const o = mk(ws, cmds, { to: 'PRET', scenario: code }); book(ws, o, 'T1', rn); run.orderIds.push(o.id); break; }
+    case 'SC-04': case 'SC-06': case 'SC-07': case 'SC-11': case 'SC-18': case 'SC-19': { const o = mk(ws, cmds, { to: 'PRET', scenario: code }); book(ws, o, 'T1', rn); run.orderIds.push(o.id); break; }
     case 'SC-05': {
       const a = mk(ws, cmds, { to: 'PRET', scenario: code, customerId: 'U1' }), b = mk(ws, cmds, { to: 'PRET', scenario: code, customerId: 'U2' });
       // Ne laisse qu'une seule place sur un créneau précis pour la zone.

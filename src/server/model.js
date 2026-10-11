@@ -77,6 +77,20 @@ export const DOC_TYPES = {
   selfie_cni: { label: 'Photo de vous avec la pièce', short: 'Selfie', why: 'Votre visage et la pièce dans la même photo : on vérifie que c’est bien vous.' },
 };
 export const DOSSIER_DOCS = ['cni_recto', 'cni_verso', 'selfie_cni'];
+// Défauts qu'une IA peut signaler sur une photo de pièce (fonction fw-ia), avec leurs mots pour la conseillère et pour le client.
+export const PHOTO_ISSUES = ['floue', 'sombre', 'reflet', 'coupee', 'trop_petite', 'mauvaise_piece', 'pas_un_document', 'specimen'];
+export const ISSUE_LABEL = { floue: 'floue', sombre: 'trop sombre', reflet: 'reflet', coupee: 'pièce coupée', trop_petite: 'trop petite', mauvaise_piece: 'pas la bonne pièce', pas_un_document: 'pas une pièce', specimen: 'spécimen de démo' };
+// Motif envoyé au client si la conseillère suit l'avis : des mots simples, jamais la note libre de l'IA.
+export const ISSUE_REASON = {
+  floue: 'Photo floue, merci de la reprendre',
+  sombre: 'Photo trop sombre, merci de la reprendre à la lumière',
+  reflet: 'Photo avec un reflet, merci de la reprendre sans éclairage direct',
+  coupee: 'Pièce coupée sur la photo, merci de la reprendre en entier',
+  trop_petite: 'Photo trop petite, merci de la reprendre de plus près',
+  mauvaise_piece: 'Ce n’est pas la pièce demandée, merci d’envoyer la bonne',
+  pas_un_document: 'La photo ne montre pas la pièce demandée, merci de la reprendre',
+};
+
 // Pièces que le technicien peut consulter pendant une mission ouverte (besoin d'en connaître).
 export const TECH_DOCS = ['cni', 'cni_recto', 'autorisation_syndic'];
 
@@ -152,7 +166,7 @@ export const AUDIT_LABELS = {
   'acces.refuse': 'Accès refusé', 'activation.relancer': 'Activation relancée', 'annulation.instruire': 'Annulation instruite', 'blocage.affecter': 'Blocage confié', 'blocage.ouvrir': 'Blocage ouvert', 'blocage.resoudre': 'Blocage levé',
   'capacite.modifier': 'Capacité modifiée', 'compte.activer': 'Compte réactivé', 'compte.desactiver': 'Compte coupé', 'compte.perimetre': 'Zones modifiées', 'config.modifier': 'Réglage modifié', 'continuite.mode_degrade': 'Mode dégradé',
   'dossier.cloturer': 'Dossier clôturé', 'dossier.consulter': 'Fiche consultée', 'dossier.avis': 'Avis automatique suivi', 'doublon.rapprocher': 'Doublon rapproché', 'doublon.separer': 'Doublon séparé', 'equipe.disponible': 'Équipe disponible', 'equipe.indisponible': 'Équipe indisponible',
-  escalade: 'Escalade', 'espace.creer': 'Espace créé', 'espace.reinitialiser': 'Espace réinitialisé', 'export.dossiers': 'Export des dossiers', 'ia.assistant': 'Question à l’assistant', 'ia.modele.activer': 'Modèle activé', 'ia.modele.desactiver': 'Estimations coupées', 'ia.resume.utilise': 'Résumé automatique utilisé',
+  escalade: 'Escalade', 'espace.creer': 'Espace créé', 'espace.reinitialiser': 'Espace réinitialisé', 'export.dossiers': 'Export des dossiers', 'ia.assistant': 'Question à l’assistant', 'ia.photo': 'Avis de l’IA sur une photo', 'ia.generative.activer': 'IA générative activée', 'ia.generative.couper': 'IA générative coupée', 'ia.modele.activer': 'Modèle activé', 'ia.modele.desactiver': 'Estimations coupées', 'ia.resume.utilise': 'Résumé automatique utilisé',
   'integration.rejet': 'Événement rejeté', 'integration.rejouer': 'Échange rejoué', 'invitation.creer': 'Invitation créée', 'invitation.revoquer': 'Invitation révoquée', 'invitation.utiliser': 'Invitation utilisée', 'mission.reaffecter': 'Mission réaffectée', 'paiement.rapprochement_manuel.demande': 'Rapprochement demandé',
   'procedure.reviser': 'Procédure révisée', 'rattachement.demande': 'Rattachement demandé', 'rattachement.valide': 'Rattachement validé', 'rdv.annuler': 'Rendez-vous annulé', 'rdv.confirmer': 'Rendez-vous confirmé', 'rdv.reserver': 'Rendez-vous réservé', 'reseau.ports': 'Ports ajoutés',
   'user.setActive': 'Compte modifié', 'user.setZones': 'Zones modifiées', 'invite.create': 'Invitation', 'invite.revoke': 'Révocation d’invitation', 'config.set': 'Réglage', 'model.activate': 'Choix du modèle', 'kb.update': 'Révision de procédure',

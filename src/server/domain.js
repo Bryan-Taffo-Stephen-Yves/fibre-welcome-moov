@@ -1,6 +1,6 @@
 // Règles métier du serveur simulé (CDC 3, 4, 5). Aucune fonction ici ne vérifie les droits :
 // c'est backend.js qui contrôle la session, le rôle et le périmètre avant d'appeler ces règles.
-import { stateRank, STATE_INFO, BLOCKER_TYPES, CHECKLIST_TECH, SLOTS, APPT_STATES, DOC_TYPES, DOSSIER_DOCS, PREP_CHECKLIST, SLOT_HOURS, TEAM_BASE, hourLabel } from './model.js';
+import { stateRank, STATE_INFO, BLOCKER_TYPES, CHECKLIST_TECH, SLOTS, APPT_STATES, DOC_TYPES, DOSSIER_DOCS, PREP_CHECKLIST, SLOT_HOURS, TEAM_BASE, hourLabel, ISSUE_REASON } from './model.js';
 import { estimate, fmtDate, stageOf } from './ai.js';
 import { H, DAY, startOfDay, isWorkingDay } from './seed.js';
 
@@ -645,8 +645,10 @@ export function photoCheck(q) {
   return { ok: !issues.length, issues, ...m };
 }
 
-// Avis automatique sur les pièces d'un dossier en ligne, pour aider la conseillère. Ce n'est PAS une IA : il lit seulement
-// le contrôle de la photo (netteté, lumière, taille) et repère une même photo envoyée pour deux pièces. La conseillère décide.
+// Avis automatique sur les pièces d'un dossier en ligne, pour aider la conseillère. Par défaut ce n'est PAS une IA : il lit
+// le contrôle de la photo (netteté, lumière, taille) et repère une même photo envoyée pour deux pièces. Si la conseillère a
+// demandé l'avis de l'IA générative sur une photo (doc.ai), les défauts que l'IA a vus s'ajoutent, en mots simples.
+// La conseillère décide toujours.
 const ADVICE_WORDS = { 'floue': 'Photo floue, merci de la reprendre', 'trop sombre': 'Photo trop sombre, merci de la reprendre à la lumière', 'trop claire (reflet)': 'Photo avec un reflet, merci de la reprendre sans éclairage direct', 'trop petite': 'Photo trop petite, merci de la reprendre de plus près' };
 export function dossierAdvice(ws, order) {
   if (!order.dossier) return null;
@@ -655,16 +657,22 @@ export function dossierAdvice(ws, order) {
   const items = review.map(d => {
     const reasons = [];
     if (d.check && !d.check.ok) for (const i of d.check.issues) reasons.push(ADVICE_WORDS[i] || ('Photo ' + i));
+    if (d.ai && d.ai.verdict === 'a_refaire') {
+      const seen = d.ai.issues.map(i => ISSUE_REASON[i]).filter(Boolean);
+      reasons.push(...(seen.length ? seen : ['Photo pas assez lisible, merci de la reprendre']));
+    }
     // Deux photos identiques : seule la seconde est à refaire (la première reste valable).
     const twin = live.find(o => o.id !== d.id && o.thumb && o.thumb === d.thumb && o.mime === d.mime && live.indexOf(o) < live.indexOf(d));
     if (twin) reasons.push('Même photo que « ' + (DOC_TYPES[twin.type].short || DOC_TYPES[twin.type].label).toLowerCase() + ' » : merci d’envoyer la bonne pièce');
     const wait = d.status === 'analyse';
-    return { docId: d.id, type: d.type, label: DOC_TYPES[d.type].label, status: d.status, verdict: wait ? 'attendre' : reasons.length ? 'refaire' : 'ok', reason: reasons.length ? reasons.join(' ; ') : null, notes: reasons };
+    const uniq = [...new Set(reasons)];
+    return { docId: d.id, type: d.type, label: DOC_TYPES[d.type].label, status: d.status, verdict: wait ? 'attendre' : uniq.length ? 'refaire' : 'ok', reason: uniq.length ? uniq.join(' ; ') : null, notes: uniq, ai: d.ai ? d.ai.verdict : null };
   });
   const verdict = !items.length ? 'rien' : items.some(i => i.verdict === 'attendre') ? 'attendre' : items.some(i => i.verdict === 'refaire') ? 'refaire' : 'valider';
   const nOk = items.filter(i => i.verdict === 'ok').length, nBad = items.filter(i => i.verdict === 'refaire').length;
   const summary = verdict === 'rien' ? 'Aucune pièce à regarder pour le moment.' : verdict === 'attendre' ? 'Le contrôle des photos est en cours.' : verdict === 'valider' ? 'Les photos semblent nettes et lisibles : vous pouvez valider.' : nBad + ' photo' + (nBad > 1 ? 's' : '') + ' à refaire' + (nOk ? ', ' + nOk + ' semble' + (nOk > 1 ? 'nt' : '') + ' correcte' + (nOk > 1 ? 's' : '') : '') + '.';
-  return { verdict, summary, items, simulated: true };
+  const withAi = items.filter(i => i.ai).length;
+  return { verdict, summary, items, simulated: true, ai: withAi, aiDoubt: items.filter(i => i.ai === 'incertain').map(i => i.docId) };
 }
 
 export function docCheck(file) {

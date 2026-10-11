@@ -192,7 +192,14 @@ export const INTENTS = [
   { id: 'human', re: /(conseiller|humain|parler à|appeler|quelqu)/i },
 ];
 
-export function assistantAnswer(ws, order, question, docs) {
+// Question à ne jamais envoyer à l'IA générative : tentative de détournement, ou référence d'un autre dossier.
+export function guardQuestion(question, order) {
+  if (INJECTION.test(question)) return 'detournement';
+  if ((question.match(OTHER_REF) || []).some(r => !order || r.toUpperCase() !== order.ref)) return 'autre_dossier';
+  return null;
+}
+
+export function assistantAnswer(ws, order, question, docs, { delegate = false } = {}) {
   const now = ws.clock;
   const trace = { question, at: now, intent: null, tools: ['lire_dossier(' + (order ? order.ref : '—') + ')'], refused: false };
   if (INJECTION.test(question)) {
@@ -246,7 +253,8 @@ export function assistantAnswer(ws, order, question, docs) {
       if (appt && appt.status === 'confirme') blocks.push({ kind: 'fact', title: 'Engagement confirmé', text: 'Visite confirmée le ' + fmtDate(appt.date) + ', ' + (appt.slot === 'm' ? '8 h – 12 h' : '13 h – 17 h') + '.', source: 'Service de réservation (simulé)', fresh });
       est(); break;
     case 'payment':
-      blocks.push({ kind: 'fact', title: 'Dans votre dossier', text: 'Paiement : ' + PAYMENT_STATES[order.payment.status] + '. Référence ' + order.payment.ref + '.', source: 'Connecteur Moov Money (simulé)', fresh });
+      // Un représentant ne voit pas la référence de paiement (même règle que sa vue du dossier).
+      blocks.push({ kind: 'fact', title: 'Dans votre dossier', text: 'Paiement : ' + PAYMENT_STATES[order.payment.status] + '.' + (delegate ? '' : ' Référence ' + order.payment.ref + '.'), source: 'Connecteur Moov Money (simulé)', fresh });
       blocks.push({ kind: 'doc', title: 'Procédure', text: 'Seul le rapprochement fait par Moov confirme un paiement. Une capture d’écran de reçu ne suffit pas.', doc: doc('PR-01') }); break;
     case 'activation':
       factStatus();

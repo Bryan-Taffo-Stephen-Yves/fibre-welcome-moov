@@ -2,7 +2,8 @@
 // Mise en page « tableau de bord » : sections en pilules, cartes arrondies, tableaux sombres, personnages.
 import { useQ, call, api, toast, liveClock, useNow } from './platform.js';
 import { Btn, AsyncBtn, Sim, Explain, Field, Modal, StateTag, Progress, Empty, Icon, Picture, NotifBell, NotifPopups, Avatar, AvatarStack, Sparkline, Bars, Ring, Stacked, AbidjanMap, TrackMap, trackInfo, hourLabel, deName, firstName, fmtDate, fmtDateTime, slotLabel, money, STATE_INFO, ORDER_STATES, BLOCKER_TYPES, APPT_STATES, ROLES } from './kit.jsx';
-import { ZONES, DOC_TYPES, PAYMENT_STATES, REPORT_TYPES, CHECKLIST_TECH, DOSSIER_DOCS } from '../server/model.js';
+import { ZONES, DOC_TYPES, PAYMENT_STATES, REPORT_TYPES, CHECKLIST_TECH, DOSSIER_DOCS, ISSUE_LABEL, ISSUE_REASON } from '../server/model.js';
+import { reviewPhoto, iaReachable, whyText } from './genai.js';
 import { Trips } from './trips.jsx';
 import { Impact } from './impact.jsx';
 const React = window.React;
@@ -101,16 +102,45 @@ function CheckLine({ c }) {
   </div>;
 }
 const CHECK_HELP = 'Contrôle automatique simple : netteté, lumière, taille. Ce n’est pas une IA : c’est vous qui décidez.';
+const AI_HELP = 'Avis de l’IA : la photo part seule (sans nom ni dossier) chez Claude (Anthropic), qui dit si elle est lisible et si c’est la bonne pièce. C’est une aide : vous décidez. En démo, n’utilisez que des pièces fictives.';
+
+// Avis de l'IA générative (Claude) sur une photo, demandé par la conseillère.
+const AI_VERDICT = { lisible: ['ok', 'lisible'], a_refaire: ['bad', 'à refaire'], incertain: ['warn', 'pas sûre, regardez vous-même'] };
+function AiPhotoLine({ ai }) {
+  const [tone, label] = AI_VERDICT[ai.verdict] || ['warn', ai.verdict];
+  const seen = ai.issues.filter(i => i !== 'specimen').map(i => ISSUE_LABEL[i] || i);
+  return <div className={'op-iaph op-iaph-' + tone}>
+    <span className="op-iaph-h">{tone === 'ok' ? Icon.check : Icon.alert}<b>IA Claude : {label}</b>{seen.length > 0 && <span> · {seen.join(', ')}</span>}</span>
+    {ai.note && <span className="op-iaph-note">« {ai.note} »</span>}
+    {ai.issues.includes('specimen') && <span className="op-iaph-note">Pièce de démonstration reconnue.</span>}
+  </div>;
+}
+// La conseillère demande l'avis (jamais automatique : la photo ne part que sur son clic).
+const iaUsable = me => !!(me && me.ws && me.ws.genAi) && iaReachable();
+const aiAsk = async (token, doc) => {
+  const r = await reviewPhoto(token, doc);
+  if (!r.ok) toast('L’IA n’a pas pu donner son avis : ' + (r.message || whyText(r.why)) + '.', true);
+  return r;
+};
+function AiPhotoBtn({ token, doc }) {
+  const me = useQ(token, 'me');
+  const [busy, setBusy] = useState(false);
+  if (!iaUsable(me.data) || doc.ai || !String(doc.mime || '').startsWith('image/') || !doc.img || !['analyse', 'a_valider'].includes(doc.status)) return null;
+  return <Btn size="s" kind="ghost" className="op-iaph-btn" title={AI_HELP} disabled={busy || doc.status === 'analyse'} onClick={async () => { setBusy(true); try { await aiAsk(token, doc); } finally { setBusy(false); } }}>{Icon.search}{busy ? 'L’IA regarde la photo…' : 'Avis de l’IA'}</Btn>;
+}
 
 // Valider ou refuser une pièce, avec des motifs tout prêts (le client lit le motif).
 const REFUSE_REASONS = ['Photo floue, merci de la reprendre', 'Pièce illisible', 'Ce n’est pas la bonne pièce'];
 function ReviewBtns({ token, d }) {
   const [refusing, setRefusing] = useState(false);
   const c = docCheck(d);
-  const [reason, setReason] = useState(c && c.issues && c.issues.includes('floue') ? REFUSE_REASONS[0] : '');
+  const aiReason = d.ai && d.ai.verdict === 'a_refaire' ? ISSUE_REASON[d.ai.issues.find(i => ISSUE_REASON[i])] || null : null;
+  const [reason, setReason] = useState('');
+  // Motif proposé à l'ouverture du refus (l'avis de l'IA peut arriver après l'affichage des boutons).
+  const suggest = c && c.issues && c.issues.includes('floue') ? REFUSE_REASONS[0] : aiReason || '';
   if (!refusing) return <div className="row op-rev">
     <AsyncBtn size="s" kind="primary" onClick={() => call(token, 'doc.review', { docId: d.id, decision: 'valide' })}>Valider</AsyncBtn>
-    <Btn size="s" kind="ghost" onClick={() => setRefusing(true)}>Refuser…</Btn>
+    <Btn size="s" kind="ghost" onClick={() => { if (!reason.trim()) setReason(suggest); setRefusing(true); }}>Refuser…</Btn>
   </div>;
   return <div className="op-refuse">
     <span className="tiny muted">Motif (le client le lira) :</span>
@@ -406,6 +436,8 @@ function DocReview({ token, d, canReview, compact }) {
       {compact && <Pill tone={t}>{l}</Pill>}</div>
     {d.status === 'analyse' && <span className="tiny muted">Contrôle automatique en cours (quelques secondes), la décision sera possible juste après.</span>}
     {c && <CheckLine c={c} />}
+    {d.ai && <AiPhotoLine ai={d.ai} />}
+    {canReview && <AiPhotoBtn token={token} doc={d} />}
     {d.scanNote && d.status === 'a_valider' && <span className="tiny muted">{c ? d.scanNote.replace(/\s*Photo .*$/, '') : d.scanNote}</span>}
     {d.reason && d.status === 'refuse' && <span className="tiny op-bad">Motif donné au client : {d.reason}</span>}
     {canReview && d.status === 'a_valider' && (c ? <ReviewBtns token={token} d={d} /> : refusing ? <>
@@ -764,14 +796,20 @@ function OrderSheet({ token, orderId, role, showPlan, onClose }) {
 
 // ---------- Fiche : dossier en ligne (photos, contrôle, ce qui manque) ----------
 // Avis automatique sur les photos : une aide pour la conseillère, qui garde la décision (rien n'est validé sans son clic).
-function AdviceCard({ token, adv, isC, closed, orderId }) {
+function AdviceCard({ token, adv, isC, closed, orderId, docs, ia }) {
+  const [asking, setAsking] = useState(null);
   if (adv.verdict === 'rien' || closed) return null;
   const tone = adv.verdict === 'valider' ? 'ok' : adv.verdict === 'refaire' ? 'bad' : 'wait';
   const n = adv.items.length, nOk = adv.items.filter(i => i.verdict === 'ok').length, nBad = adv.items.filter(i => i.verdict === 'refaire').length;
+  // Photos que l'IA n'a pas encore regardées (seulement sur demande de la conseillère, une par une).
+  const todo = ia && isC ? docs.filter(d => d && !d.ai && d.status === 'a_valider' && d.img && String(d.mime || '').startsWith('image/')) : [];
+  const askAll = async () => { for (let i = 0; i < todo.length; i++) { setAsking(i + 1 + '/' + todo.length); const r = await aiAsk(token, todo[i]); if (!r.ok) break; } setAsking(null); };
   return <div className={'op-advice op-advice-' + tone}>
-    <div className="op-advice-h"><span className="op-advice-ic" aria-hidden="true">{Icon.search}</span><div className="stack-s" style={{ gap: 2 }}><b className="small">Avis automatique</b><span className="tiny muted">Pré-analyse simulée, pas une vraie IA</span></div></div>
+    <div className="op-advice-h"><span className="op-advice-ic" aria-hidden="true">{Icon.search}</span><div className="stack-s" style={{ gap: 2 }}><b className="small">Avis automatique</b><span className="tiny muted">{adv.ai ? 'Pré-analyse simulée, plus l’avis de l’IA Claude sur ' + (adv.ai > 1 ? adv.ai + ' photos' : 'une photo') : 'Pré-analyse simulée, pas une vraie IA'}</span></div></div>
     <p className="small op-advice-sum">{adv.summary}</p>
+    {adv.aiDoubt && adv.aiDoubt.length > 0 && <p className="tiny op-advice-doubt">{Icon.alert}<span>L’IA n’est pas sûre pour {adv.aiDoubt.length > 1 ? adv.aiDoubt.length + ' photos' : 'une photo'} : regardez-la vous-même avant de suivre l’avis.</span></p>}
     {adv.items.some(i => i.verdict === 'refaire') && <ul className="op-advice-list">{adv.items.filter(i => i.verdict === 'refaire').map(i => <li key={i.docId} className="small"><b>{docShort(i.type)}</b> : {i.reason}</li>)}</ul>}
+    {todo.length > 0 && <div className="row op-iaph-all"><Btn kind="ghost" disabled={!!asking} onClick={askAll}>{Icon.search}{asking ? 'L’IA regarde les photos (' + asking + ')…' : todo.length > 1 ? 'Demander l’avis de l’IA sur les ' + todo.length + ' photos' : 'Demander l’avis de l’IA sur la photo'}</Btn></div>}
     {isC && (adv.verdict === 'valider' || adv.verdict === 'refaire') && <div className="row"><AsyncBtn kind="primary" onClick={() => call(token, 'dossier.followAdvice', { orderId })}>{adv.verdict === 'valider' ? 'Suivre l’avis : valider ' + (n > 1 ? 'les ' + n + ' photos' : 'la photo') : 'Suivre l’avis : ' + (nOk ? 'valider ' + nOk + ', ' : '') + 'refuser ' + nBad}</AsyncBtn><span className="tiny muted">Vous pouvez aussi décider photo par photo.</span></div>}
   </div>;
 }
@@ -790,6 +828,7 @@ function DossierSection({ token, v, isC, ws, onPlan }) {
   const names = unclear.map(x => '« ' + docShort(x.t).toLowerCase() + ' »');
   const prefill = 'Bonjour ' + firstName(o.contactName) + ', ' + (unclear.length === 1 ? 'la photo ' + names[0] + ' n’est pas assez lisible : merci de la reprendre bien à plat, à la lumière. ' : unclear.length > 1 ? 'les photos ' + names.join(' et ') + ' ne sont pas assez lisibles : merci de les reprendre bien à plat, à la lumière. ' : '') + (unclear.length ? 'Vous' : 'vous') + ' pouvez tout envoyer depuis l’onglet Dossier de votre application. Merci !';
   const closed = ['valide', 'annule'].includes(d.status);
+  const ia = !!(ws && ws.genAi) && iaReachable();
   return <section className="card stack op-dossier">
     <div className="card-title op-dossier-h">
       <div className="op-item-h"><span className="op-ic op-ic-acc">{Icon.doc}</span><div className="stack-s" style={{ gap: 2 }}><h2>Dossier en ligne</h2><span className="small muted">{dossierWhen(d, now) || 'Rempli par le client sur son téléphone'}</span></div></div>
@@ -802,7 +841,7 @@ function DossierSection({ token, v, isC, ws, onPlan }) {
       </> : <span className="small op-miss-ok">{Icon.check}{d.status === 'a_verifier' ? 'Tout est envoyé : il reste à regarder les photos.' : 'Rien ne manque.'}</span>}
     </div>
     {d.status === 'verifie' && onPlan && <div className="op-next"><span className="op-next-ic" aria-hidden="true">{Icon.check}</span><div className="grow stack-s" style={{ gap: 2 }}><b className="small">Photos validées. Étape suivante : transmettre au technicien.</b><span className="tiny muted">Vous verrez qui est libre à l’heure demandée par le client.</span></div><Btn kind="primary" onClick={onPlan}>Valider et transmettre</Btn></div>}
-    {v.internal && v.internal.advice && <AdviceCard token={token} adv={v.internal.advice} isC={isC} closed={closed} orderId={o.id} />}
+    {v.internal && v.internal.advice && <AdviceCard token={token} adv={v.internal.advice} isC={isC} closed={closed} orderId={o.id} docs={docs.map(x => x.doc)} ia={ia} />}
     <div className="op-dphs">{docs.map(({ t, doc }) => {
       const c = docCheck(doc);
       const [tone, label] = doc ? DOC_STATUS[doc.status] || ['neutral', doc.status] : ['bad', 'Pas envoyée'];
@@ -811,12 +850,15 @@ function DossierSection({ token, v, isC, ws, onPlan }) {
         <div className="spread op-dph-h"><b className="small">{DOC_TYPES[t].label}</b><Pill tone={tone}>{label}</Pill></div>
         {doc && doc.status === 'analyse' && <span className="tiny muted">Contrôle automatique en cours…</span>}
         {c && <CheckLine c={c} />}
+        {doc && doc.ai && <AiPhotoLine ai={doc.ai} />}
+        {isC && doc && <AiPhotoBtn token={token} doc={doc} />}
         {doc && doc.status === 'refuse' && doc.reason && <span className="tiny op-bad">Refusée : {doc.reason}</span>}
         {doc && <span className="tiny muted">Reçue le {fmtDateTime(doc.at)}</span>}
         {isC && doc && doc.status === 'a_valider' && <ReviewBtns token={token} d={doc} />}
       </article>;
     })}</div>
     <p className="tiny muted op-chk-help">{Icon.search}<span>{CHECK_HELP}</span></p>
+    {ia && isC && !closed && <p className="tiny muted op-chk-help">{Icon.lock}<span>{AI_HELP}</span></p>}
     {!isC && docs.some(x => x.doc && x.doc.status === 'a_valider') && <span className="tiny muted">Seule la conseillère valide les photos.</span>}
     {isC && !closed && (!asking ? <div><Btn kind="ghost" onClick={() => { setText(prefill); setAsking(true); }}>{Icon.chat} Dire au client ce qui manque</Btn></div>
       : <div className="op-compose">

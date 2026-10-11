@@ -5,6 +5,8 @@ import { Btn, AsyncBtn, Tag, Sim, Explain, Field, Modal, Panel, Empty, Avatar, A
 import { ZONES } from '../server/model.js';
 import { Trips } from './trips.jsx';
 import { Impact } from './impact.jsx';
+import { useIaStatus, iaState, modelLabel } from './genai.js';
+import { LIMITS as IA_LIMITS } from '../../supabase/functions/fw-ia/logic.js';
 const React = window.React;
 const { useState, useEffect, useRef } = React;
 
@@ -360,7 +362,7 @@ const ACT = {
   'acces.refuse': 'Accès refusé', 'activation.relancer': 'Activation relancée', 'annulation.instruire': 'Annulation instruite', 'blocage.affecter': 'Blocage confié', 'blocage.ouvrir': 'Blocage ouvert', 'blocage.resoudre': 'Blocage levé',
   'capacite.modifier': 'Capacité modifiée', 'compte.activer': 'Compte réactivé', 'compte.desactiver': 'Compte coupé', 'compte.perimetre': 'Zones modifiées', 'config.modifier': 'Réglage modifié', 'continuite.mode_degrade': 'Mode dégradé',
   'dossier.cloturer': 'Dossier clôturé', 'dossier.consulter': 'Fiche consultée', 'doublon.rapprocher': 'Doublon rapproché', 'doublon.separer': 'Doublon séparé', 'equipe.disponible': 'Équipe disponible', 'equipe.indisponible': 'Équipe indisponible',
-  escalade: 'Escalade', 'espace.creer': 'Espace créé', 'export.dossiers': 'Export des dossiers', 'ia.assistant': 'Question à l’assistant', 'ia.modele.activer': 'Modèle activé', 'ia.modele.desactiver': 'Estimations coupées', 'ia.resume.utilise': 'Résumé IA utilisé',
+  escalade: 'Escalade', 'espace.creer': 'Espace créé', 'export.dossiers': 'Export des dossiers', 'ia.assistant': 'Question à l’assistant', 'ia.photo': 'Avis de l’IA sur une photo', 'ia.generative.activer': 'IA générative activée', 'ia.generative.couper': 'IA générative coupée', 'ia.modele.activer': 'Modèle activé', 'ia.modele.desactiver': 'Estimations coupées', 'ia.resume.utilise': 'Résumé IA utilisé',
   'integration.rejet': 'Événement rejeté', 'integration.rejouer': 'Échange rejoué', 'invitation.creer': 'Invitation créée', 'invitation.revoquer': 'Invitation révoquée', 'mission.reaffecter': 'Mission réaffectée', 'paiement.rapprochement_manuel.demande': 'Rapprochement demandé',
   'procedure.reviser': 'Procédure révisée', 'rattachement.demande': 'Rattachement demandé', 'rattachement.valide': 'Rattachement validé', 'rdv.annuler': 'Rendez-vous annulé', 'rdv.confirmer': 'Rendez-vous confirmé', 'rdv.reserver': 'Rendez-vous réservé', 'reseau.ports': 'Ports ajoutés',
   // Commandes enregistrées telles quelles par le serveur
@@ -489,6 +491,7 @@ function Models({ token, ro }) {
         {!ro && <details className="ad-details"><summary>Plus d’actions</summary><div className="stack-s"><p className="small muted">Couper toute estimation : les clients ne voient plus de délai estimé.</p><div><AsyncBtn size="s" kind="danger" onClick={async () => { const r = await call(token, 'model.activate', { version: null, reason: 'Désactivation' }); if (r.ok) toast('Estimations coupées : les clients ne voient plus de délai estimé.'); }}>Désactiver toute estimation</AsyncBtn></div></div></details>}
       </Panel>
     </div>
+    <GenAiPanel token={token} ro={ro} g={d.genAi} />
     <div className="ad-cols ad-cols-half">
       <Panel title="Suivi en direct">
         <div className="ad-duo">
@@ -503,13 +506,53 @@ function Models({ token, ro }) {
           <div className="grow stack-s">
             <div className="spread"><b className="small">{who ? who.name : 'Client'}</b><span className="tiny muted">{fmtDateTime(a.at)}</span></div>
             <div className="ad-bubble small">« {a.q} »</div>
-            <div>{a.refused ? <Tag tone="bad">Refus</Tag> : a.intent ? <Tag tone="ok">{INTENT[a.intent] || a.intent}</Tag> : <Tag tone="warn">Abstention</Tag>}</div>
+            <div className="row ad-tags">{a.refused ? <Tag tone="bad">Refus</Tag> : a.intent ? <Tag tone="ok">{INTENT[a.intent] || a.intent}</Tag> : <Tag tone="warn">Abstention</Tag>}{a.ai ? <Tag tone="info" title={modelLabel(a.ai)}>Rédigé par Claude</Tag> : a.aiRejected ? <Tag tone="warn" title={a.aiRejected}>IA écartée : règles</Tag> : !a.refused && <Tag>Règles</Tag>}</div>
           </div>
         </li>; })}</ul> : <Empty>Aucune question posée à l’assistant pour l’instant.</Empty>}
         <More shown={na} total={d.assistant.length} onMore={() => setNa(na + 10)} />
       </Panel>
     </div>
   </>;
+}
+
+// IA générative (Claude) : état de la clé, interrupteur, ce que le garde-fou a écarté et pourquoi.
+function GenAiPanel({ token, ro, g }) {
+  const [st, check] = useIaStatus();
+  const [tone, title, sub] = iaState(st.state);
+  const keyHelp = !ro && ['sans_cle', 'cle_refusee', 'credit'].includes(st.state);
+  const sec = ms => (ms / 1000).toLocaleString('fr-FR', { maximumFractionDigits: 1 }) + ' s';
+  // En-tête : le résumé en deux mots (Claude répond, ou les règles répondent) ; le détail est dessous.
+  const short = !g.on ? 'Coupée' : tone === 'ok' ? 'En marche' : st.state === 'verification' ? 'Vérification…' : 'Réponses par règles';
+  return <Panel title="IA générative (Claude)" className="ad-genai" right={<Tag tone={g.on ? tone : 'warn'}>{short}</Tag>}>
+    <div className="ad-genai-state">
+      <span className={'ad-genai-dot ad-genai-' + (g.on ? tone : 'warn')} aria-hidden="true" />
+      <div className="grow stack-s" style={{ gap: 2 }}>
+        <b className="small">{g.on ? title : 'Coupée par l’administrateur'}</b>
+        <span className="tiny muted">{g.on ? sub : 'L’assistant répond par règles et les photos gardent le contrôle simple.'}</span>
+        {st.model && <span className="tiny muted">Modèle : {st.model}</span>}
+      </div>
+      <AsyncBtn size="s" kind="ghost" onClick={check}>Vérifier</AsyncBtn>
+    </div>
+    <div className="ad-genai-kpis">
+      <div><span className="eyebrow">Réponses de Claude</span><div className="ad-big num">{g.answers}</div></div>
+      <div><span className="eyebrow">Écartées par le garde-fou</span><div className="ad-big num">{g.rejected}</div></div>
+      <div><span className="eyebrow">Photos regardées</span><div className="ad-big num">{g.photos}</div></div>
+      <div><span className="eyebrow">Demandes aujourd’hui</span><div className="ad-big num">{typeof st.used === 'number' ? st.used : '—'}<small>/{st.max || IA_LIMITS.allDay}</small></div></div>
+    </div>
+    <span className="tiny muted">{g.answers ? 'Temps moyen d’une réponse : ' + (g.avgMs != null ? sec(g.avgMs) : '—') + '. ' : ''}Plafonds : {IA_LIMITS.perIpDay} demandes par visiteur et par jour, {IA_LIMITS.allDay} pour toute l’application. Au-delà, l’assistant répond par règles.</span>
+    {g.lastRejected.length > 0 && <div className="stack-s">
+      <b className="small">Dernières réponses écartées</b>
+      <ul className="ad-list ad-genai-rej">{g.lastRejected.map(x => <li key={x.id} className="small"><span className="ad-bubble">« {x.q} »</span><span className="tiny muted">{x.why} · {fmtDateTime(x.at)}</span></li>)}</ul>
+    </div>}
+    <Explain>Claude rédige la réponse à partir du dossier, sans le nom ni le numéro du client. Avant de l’afficher, le serveur vérifie chaque nombre, chaque date et chaque promesse avec les éléments cités. Si quelque chose ne colle pas, le client reçoit la réponse par règles, et le motif reste ici. La clé de Claude est gardée dans Supabase : elle n’est jamais dans la page.</Explain>
+    {keyHelp && <details className="ad-details" open={st.state === 'sans_cle'}><summary>Installer la clé de Claude</summary><ol className="small ad-genai-steps">
+      <li>Sur <b>console.anthropic.com</b>, créez une clé API (Settings, puis API keys, puis Create key) et ajoutez un peu de crédit.</li>
+      <li>Sur <b>supabase.com</b>, ouvrez le projet « fibre-welcome », puis Edge Functions, puis Secrets.</li>
+      <li>Ajoutez un secret nommé <b>ANTHROPIC_API_KEY</b>, collez la clé comme valeur, puis enregistrez.</li>
+      <li>Revenez ici et touchez « Vérifier ».</li>
+    </ol><p className="tiny muted">Ne collez jamais la clé ailleurs : ni dans la page, ni dans un message, ni dans le code.</p></details>}
+    {!ro && <div className="row"><AsyncBtn size="s" kind={g.on ? 'danger' : 'primary'} onClick={async () => { const r = await call(token, 'genai.set', { on: !g.on, reason: g.on ? 'Coupure par l’administrateur' : 'Remise en service' }); if (r.ok) toast(g.on ? 'IA générative coupée : l’assistant répond par règles.' : 'IA générative rallumée.'); }}>{g.on ? 'Couper l’IA générative' : 'Rallumer l’IA générative'}</AsyncBtn></div>}
+  </Panel>;
 }
 
 // Barres groupées : référence (gris) contre modèle (vert citron), valeurs réelles en heures.

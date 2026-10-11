@@ -5,6 +5,7 @@ import { Btn, AsyncBtn, Tag, Sim, Explain, Field, Modal, StateTag, Empty, Stale,
 import { PEOPLE } from './people.jsx';
 import { TrackCard } from './trackcard.jsx';
 import { SimplePhone } from './simplephone.jsx';
+import { askClaude, iaReachable, answerText, quietWhy, whyText } from './genai.js';
 import { DOC_TYPES, PREP_CHECKLIST, REPORT_TYPES, PAYMENT_STATES, DOSSIER_DOCS } from '../server/model.js';
 const React = window.React;
 const { useState, useEffect, useRef } = React;
@@ -1061,17 +1062,29 @@ function Messages({ token, orderId, go, me, mode: mode0, setMode: setMode0 }) {
   const mode = mode0 || modeL, setMode = setMode0 || setModeL;
   const [text, setText] = useState('');
   const [aiText, setAiText] = useState('');
-  const [chat, setChatRaw] = useState(() => chats.get(token + orderId) || []);
-  const setChat = f => setChatRaw(c => { const n = typeof f === 'function' ? f(c) : f; chats.set(token + orderId, n); return n; });
+  const ck = token + orderId;
+  const [chat, setChatRaw] = useState(() => chats.get(ck) || []);
+  // La conversation gardée ici fait foi : une réponse qui arrive après un changement d'onglet n'est pas perdue.
+  const setChat = f => { const n = typeof f === 'function' ? f(chats.get(ck) || []) : f; chats.set(ck, n); setChatRaw(n); };
   const endRef = useRef(null);
   useEffect(() => { if (chat.length && endRef.current) endRef.current.scrollIntoView({ block: 'nearest' }); }, [chat.length]);
   if (r.error) return <div className="alert alert-bad">{r.error.message}</div>;
   const v = r.data;
+  // IA générative : Claude rédige à partir du dossier, puis le serveur vérifie sa réponse. Sans IA (pas de clé, panne,
+  // coupée par l'administrateur), la même question reçoit la réponse par règles.
+  const iaOn = !!(me.ws && me.ws.genAi) && iaReachable();
+  const busy = chat.some(m => m.wait);
   const ask = async q => {
-    if (!q.trim()) return;
-    setChat(c => [...c, { me: true, text: q }]); setAiText('');
-    const res = await call(token, 'assistant.ask', { orderId, question: q }, { silent: true });
-    setChat(c => [...c, res.ok ? { ans: res.data, q } : { err: res.error.message }]);
+    if (!q.trim() || busy) return;
+    const hist = [];
+    for (let i = 0; i + 1 < chat.length; i++) if (chat[i].me && chat[i + 1].ans) hist.push({ q: chat[i].text, a: answerText(chat[i + 1].ans) });
+    setChat(c => [...c, { me: true, text: q }, { wait: true }]); setAiText('');
+    let ai = { ok: false, why: 'coupee' }, res;
+    try {
+      if (iaOn) ai = await askClaude(token, orderId, q, hist);
+      res = await call(token, 'assistant.ask', ai.ok ? { orderId, question: q, ai: ai.ai } : { orderId, question: q }, { silent: true });
+    } catch (e) { res = { ok: false, error: { message: 'L’assistant n’a pas pu répondre. Réessayez.' } }; }
+    setChat(c => [...c.filter(m => !m.wait), res.ok ? { ans: res.data, q, why: ai.ok ? null : ai.why } : { err: res.error.message }]);
   };
   const send = async () => { if (!text.trim()) return; if ((await call(token, 'msg.send', { orderId, text })).ok) setText(''); };
   // Pastille : réponses arrivées depuis votre dernier message.
@@ -1086,13 +1099,15 @@ function Messages({ token, orderId, go, me, mode: mode0, setMode: setMode0 }) {
       <div className="cl-bot-head"><Bot size={44} /><div className="cl-hello-t"><b>Assistant Moov</b><span>Réponse automatique, sources citées</span></div></div>
       <div className="cl-msg"><Bot /><div className="bubble bubble-them">Bonjour {firstName(me.user.name)}. Je lis votre dossier et les procédures Moov approuvées. Je ne peux ni confirmer un paiement, ni promettre une date. Si je ne sais pas, je le dis et je vous passe un conseiller.</div></div>
       {chat.map((m, i) => m.me ? <div key={i} className="cl-me"><div className="bubble bubble-me">{m.text}</div></div>
+        : m.wait ? <div key={i} className="cl-msg"><Bot /><div className="bubble bubble-them cl-typing" role="status"><span className="cl-dots" aria-hidden="true"><i /><i /><i /></span>{iaOn ? 'L’assistant lit votre dossier…' : 'Un instant…'}</div></div>
         : m.err ? <div key={i} className="alert alert-warn small">{m.err}</div>
-        : <AiAnswer key={i} a={m.ans} q={m.q} token={token} orderId={orderId} go={go} />)}
-      <div className="cl-chips" aria-label="Questions suggérées">{QUESTIONS.map(q => <button type="button" key={q} className="cl-chip" onClick={() => ask(q)}>{q}</button>)}</div>
+        : <AiAnswer key={i} a={m.ans} q={m.q} why={m.why} token={token} orderId={orderId} go={go} />)}
+      <div className="cl-chips" aria-label="Questions suggérées">{QUESTIONS.map(q => <button type="button" key={q} className="cl-chip" disabled={busy} onClick={() => ask(q)}>{q}</button>)}</div>
       <form className="cl-compose" ref={endRef} onSubmit={e => { e.preventDefault(); ask(aiText); }}>
         <input id="ai-q" value={aiText} onChange={e => setAiText(e.target.value)} placeholder="Posez votre question" aria-label="Question pour l’assistant" autoComplete="off" />
-        <button type="submit" className="cl-send" aria-label="Envoyer" disabled={!aiText.trim()}>{I2.send}</button>
+        <button type="submit" className="cl-send" aria-label="Envoyer" disabled={!aiText.trim() || busy}>{I2.send}</button>
       </form>
+      {iaOn && <p className="tiny muted cl-ai-privacy">{Icon.lock}<span>Vos questions peuvent être lues par l’IA Claude (Anthropic), avec l’état de votre dossier mais sans votre nom ni votre numéro. N’écrivez pas de code secret.</span></p>}
     </div>}
     {mode === 'human' && <div className="cl-chat">
       {v.messages.length === 0 && <div className="card cl-empty"><Empty who="Nadia Konan">Aucun échange pour l’instant. Écrivez-nous : un conseiller vous répond, en général sous 4 h ouvrées.</Empty></div>}
@@ -1110,19 +1125,33 @@ function Messages({ token, orderId, go, me, mode: mode0, setMode: setMode0 }) {
 }
 
 const BLOCK_COLOR = { fact: 'var(--ok)', doc: 'var(--info)', estimate: 'var(--sim)', abstain: 'var(--warn)', guard: 'var(--bad)', warn: 'var(--warn)', action: 'var(--ink)' };
-function AiAnswer({ a, q, token, orderId, go }) {
+function AiAnswer({ a, q, why, token, orderId, go }) {
   const [sent, setSent] = useState(false);
   const handoff = label => sent ? <span className="small cl-sent">{Icon.check}Transmis à un conseiller.</span> : <div><AsyncBtn size="s" onClick={async () => { if ((await call(token, 'assistant.handoff', { orderId, question: q })).ok) setSent(true); }}>{label}</AsyncBtn></div>;
+  const blk = (b, i) => <div key={i} className="cl-blk">
+    <span className="cl-blk-t"><i style={{ background: BLOCK_COLOR[b.kind] }} />{b.title}</span>
+    <span className="small">{b.text}</span>
+    {b.source && <span className="src">Source : {b.source}{b.fresh ? ' · ' + b.fresh.label : ''}</span>}
+    {b.doc && <span className="src">Procédure {b.doc.id} « {b.doc.title} », version {b.doc.version}</span>}
+    {b.action && b.action.go && <div><Btn size="s" onClick={() => go(b.action.go === 'prep' ? 'rdv' : b.action.go)}>Ouvrir{Icon.right}</Btn></div>}
+    {b.action && b.action.handoff && handoff('Transférer à un conseiller')}
+  </div>;
+  // Réponse rédigée par Claude : son texte, puis les éléments du dossier qu'elle cite (vérifiés par le serveur).
+  if (a.ai) {
+    const act = a.ai.action;
+    return <div className="cl-msg"><Bot /><div className="bubble bubble-them cl-ans cl-ans-ai">
+      <p className="cl-ai-text">{a.ai.text}</p>
+      {act && act.go && <div><Btn size="s" onClick={() => go('rdv')}>{act.go === 'prep' ? 'Préparer la visite' : 'Ouvrir Rendez-vous'}{Icon.right}</Btn></div>}
+      {a.handoff && handoff('Parler à un conseiller')}
+      {a.blocks.length > 0 && <details className="cl-ai-src"><summary>{a.blocks.length > 1 ? a.blocks.length + ' sources' : '1 source'} : {a.blocks.map(b => b.title).join(', ')}</summary><div className="cl-ans">{a.blocks.map(blk)}</div></details>}
+      <span className="cl-ai-by">{Icon.check}Rédigé par l’IA Claude, vérifié avec votre dossier</span>
+    </div></div>;
+  }
+  const note = a.trace && a.trace.aiRejected ? 'Réponse de l’IA écartée par le contrôle (' + a.trace.aiRejected + ') : voici la réponse automatique.' : !quietWhy(why) ? 'L’IA n’a pas répondu (' + whyText(why) + ') : voici la réponse automatique.' : null;
   return <div className="cl-msg"><Bot /><div className="bubble bubble-them cl-ans">
-    {a.blocks.map((b, i) => <div key={i} className="cl-blk">
-      <span className="cl-blk-t"><i style={{ background: BLOCK_COLOR[b.kind] }} />{b.title}</span>
-      <span className="small">{b.text}</span>
-      {b.source && <span className="src">Source : {b.source}{b.fresh ? ' · ' + b.fresh.label : ''}</span>}
-      {b.doc && <span className="src">Procédure {b.doc.id} « {b.doc.title} », version {b.doc.version}</span>}
-      {b.action && b.action.go && <div><Btn size="s" onClick={() => go(b.action.go === 'prep' ? 'rdv' : b.action.go)}>Ouvrir{Icon.right}</Btn></div>}
-      {b.action && b.action.handoff && handoff('Transférer à un conseiller')}
-    </div>)}
+    {a.blocks.map(blk)}
     {a.handoff && !a.blocks.some(b => b.action) && handoff('Parler à un conseiller')}
+    {note && <span className="cl-ai-note">{note}</span>}
   </div></div>;
 }
 
