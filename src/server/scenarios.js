@@ -1,4 +1,4 @@
-// Centre de scénarios SC-01 à SC-16 (CDC 7.4). Chaque scénario prépare un dossier fictif dédié,
+// Centre de scénarios SC-01 à SC-18 (CDC 7.4). Chaque scénario prépare un dossier fictif dédié,
 // puis le guide vérifie les étapes sur l'état réellement stocké : il ne coche jamais une étape
 // que l'application n'a pas réellement faite (CDC 7.2).
 import * as D from './domain.js';
@@ -113,6 +113,12 @@ export const SCENARIOS = [
     { role: 'client', text: 'Client : noter la visite du technicien.', check: (ws, r) => { const o = liveOrder(ws, r); return !!o && (ws.techRatings || []).some(x => x.orderId === o.id); } },
     { role: 'client', text: 'Bonus : appeler le service client depuis l’application (la conseillère décroche).', check: (ws, r) => { const o = liveOrder(ws, r); return !!o && (ws.calls || []).some(c => c.orderId === o.id && ['en_cours', 'termine'].includes(c.status)); } },
   ] },
+  { code: 'SC-18', title: 'Client sans smartphone : SMS et USSD', goal: 'Un client suit son dossier et demande un rappel par SMS et par code USSD, sans ouvrir l’application de suivi.', steps: [
+    { role: 'client', text: 'Client : dans « Téléphone simple », envoyer le SMS « SUIVI » au 1234 : la réponse donne l’étape du dossier.', check: (ws, r) => ws.outbox.some(o => o.direction === 'entrant' && o.orderId === r.orderIds[0] && /^(suivi|statut|dossier)/i.test(o.text)) },
+    { role: 'client', text: 'Client : composer *123# puis choisir 3 (délai estimé) : l’écran répond sans promettre de date.', check: (ws, r) => (ws.ussdLog || []).some(u => u.orderId === r.orderIds[0] && u.action === 'delai') },
+    { role: 'client', text: 'Client : composer *123# puis choisir 4 (être rappelé).', check: (ws, r) => ws.callbacks.some(c => c.orderId === r.orderIds[0] && /USSD/.test(c.reason)) },
+    { role: 'conseiller', text: 'Conseillère : voir la demande de rappel dans le dossier et la traiter.', check: (ws, r) => ws.callbacks.some(c => c.orderId === r.orderIds[0] && c.status !== 'demande') },
+  ] },
 ];
 
 function mk(ws, cmds, { zone = 'cocody', customerId = 'U1', to = 'PREPARATION', scenario }) {
@@ -150,7 +156,7 @@ export function runScenarioSetup(ws, code, { realNow, cmds }) {
     case 'SC-01': run.orderIds.push(mk(ws, cmds, { to: 'DOSSIER_RECU', scenario: code }).id); break;
     case 'SC-02': { const o = mk(ws, cmds, { scenario: code }); o.requiredDocs = ['justif_domicile']; D.openBlocker(ws, o, 'PIECE_MANQUANTE', { actor: ws.users.find(u => u.role === 'conseiller'), detail: 'Justificatif de domicile' }); run.orderIds.push(o.id); break; }
     case 'SC-03': { const o = mk(ws, cmds, { scenario: code }); o.address.landmark = ''; D.openBlocker(ws, o, 'ADRESSE_AMBIGUE', { actor: ws.users.find(u => u.role === 'planificateur'), detail: 'Numéro de lot introuvable sur le terrain' }); run.orderIds.push(o.id); break; }
-    case 'SC-04': case 'SC-06': case 'SC-07': case 'SC-11': { const o = mk(ws, cmds, { to: 'PRET', scenario: code }); book(ws, o, 'T1', rn); run.orderIds.push(o.id); break; }
+    case 'SC-04': case 'SC-06': case 'SC-07': case 'SC-11': case 'SC-18': { const o = mk(ws, cmds, { to: 'PRET', scenario: code }); book(ws, o, 'T1', rn); run.orderIds.push(o.id); break; }
     case 'SC-05': {
       const a = mk(ws, cmds, { to: 'PRET', scenario: code, customerId: 'U1' }), b = mk(ws, cmds, { to: 'PRET', scenario: code, customerId: 'U2' });
       // Ne laisse qu'une seule place sur un créneau précis pour la zone.

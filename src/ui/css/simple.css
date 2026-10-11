@@ -1,0 +1,32 @@
+/* Téléphone à touches (SMS et USSD simulés) : boîtier sombre, écran à cristaux liquides, grosses touches. */
+.sp-card { gap: 14px; }
+.sp-intro { display: flex; flex-direction: column; gap: 4px; }
+.sp-intro span { color: var(--ink-2); font-size: 13.5px; line-height: 1.45; }
+.sp-phone { display: flex; flex-direction: column; gap: 12px; background: #1d2230; border-radius: 28px; padding: 16px 16px 18px; max-width: 320px; width: 100%; margin: 0 auto; box-shadow: 0 10px 30px rgba(20, 28, 48, .22); }
+.sp-screen { background: #c9d8b4; color: #1c2a14; border-radius: 12px; padding: 12px; min-height: 150px; max-height: 260px; overflow: auto; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13.5px; line-height: 1.4; display: flex; flex-direction: column; gap: 6px; box-shadow: inset 0 2px 6px rgba(0, 0, 0, .25); }
+.sp-text { margin: 0; white-space: pre-wrap; font: inherit; overflow-wrap: anywhere; }
+.sp-hint { opacity: .75; }
+.sp-input { margin-top: auto; border-top: 1px dashed rgba(28, 42, 20, .4); padding-top: 6px; overflow-wrap: anywhere; }
+.sp-caret { display: inline-block; width: 7px; height: 14px; background: currentColor; margin-left: 2px; vertical-align: -2px; animation: sp-blink 1s steps(1) infinite; }
+@keyframes sp-blink { 50% { opacity: 0; } }
+.sp-pad { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.sp-key { height: 48px; border: 0; border-radius: 14px; background: #2d3548; color: #f2f4fa; font-size: 20px; font-weight: 700; cursor: pointer; }
+.sp-key:hover { background: #38425a; }
+.sp-key:active { transform: translateY(1px); }
+.sp-act { display: grid; grid-template-columns: 1fr 2fr; gap: 8px; }
+.sp-btn { height: 48px; border: 0; border-radius: 14px; color: #fff; font-weight: 700; font-size: 15px; display: inline-flex; align-items: center; justify-content: center; gap: 8px; cursor: pointer; }
+.sp-btn svg { width: 20px; height: 20px; }
+.sp-green { background: #2f9e5f; }
+.sp-red { background: #c24b4b; }
+.sp-btn:disabled { opacity: .45; cursor: not-allowed; }
+.sp-quick { display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; }
+.sp-chip { border: 1px solid #4a536b; background: transparent; color: #e6eaf5; border-radius: 999px; padding: 6px 12px; font-size: 12.5px; font-weight: 600; cursor: pointer; }
+.sp-chip:hover { background: #2d3548; }
+.sp-sms { background: #e8edf6; color: #1b2233; font-family: inherit; min-height: 220px; }
+.sp-bub { max-width: 88%; padding: 8px 10px; border-radius: 14px; font-size: 13px; line-height: 1.4; display: flex; flex-direction: column; gap: 2px; overflow-wrap: anywhere; }
+.sp-bub span { font-size: 10.5px; opacity: .65; }
+.sp-out { align-self: flex-end; background: #f48120; color: #fff; border-bottom-right-radius: 4px; }
+.sp-in { align-self: flex-start; background: #fff; border-bottom-left-radius: 4px; }
+.sp-form { display: flex; gap: 8px; }
+.sp-form .input { min-width: 0; flex: 1; }
+[data-theme="dark"] .sp-in { background: #f4f6fb; }

@@ -28,6 +28,9 @@ Dans l’aperçu claude.ai, c’est la petite base de l’aperçu qui joue ce r�
 7. Administrateur : l'onglet « Trajets » montre les visites en cours avec leurs étapes et leurs durées (trajet, temps sur place, attente de validation), la carte d'ensemble et la liste des techniciens libres ou occupés. Le superviseur et le planificateur y ont accès aussi.
 8. Téléphone : « Appeler » le service client ; Nadia décroche sur l'ordinateur (appel simulé, sans son).
 
+9. Client sans smartphone : dans Messages, l'onglet « SMS / USSD » ouvre un téléphone à touches. Composer `*123#` (menu : où en est mon dossier, rendez-vous, délai estimé, être rappelé) ou envoyer au 1234 un mot-clé (SUIVI, RDV, DELAI, RAPPEL, AIDE, STOP). Tout est simulé, réservé au client et sans date promise ; le scénario SC-18 le vérifie.
+10. Administrateur et superviseur : l'onglet « Impact » montre ce que le test a réellement mesuré (réponses sans conseiller, contacts avec un conseiller) et une estimation du gain avec des hypothèses modifiables, clairement marquée comme simulation.
+
 Le scénario SC-17 du Laboratoire vérifie chaque étape.
 
 ## Ce que contient l’application
@@ -38,7 +41,7 @@ Le scénario SC-17 du Laboratoire vérifie chaque étape.
 | Espace terrain (téléphone) | Technicien | TE-01 à TE-08 : missions, étapes, checklist avec unités, numéro de série contrôlé, photos, réception client, file hors ligne rejouée une seule fois, conflits, incident |
 | Console opérations | Conseiller, planificateur, superviseur | OP-01 à OP-07, PL-01 à PL-05, PL-07, MO-01, MO-02, MO-06, MO-07 : files de travail avec priorité expliquée, recherche, fiche unifiée, résumé IA relié aux événements, notes internes, doublons, planning, capacités, affectation et réaffectation justifiée, ports et matériel, tableau de bord, double validation |
 | Administration | Administrateur, auditeur | MO-03 à MO-12 : comptes et invitations, référentiels et seuils, intégrations et rejeu, audit filtrable, export neutralisé, modèles IA et évaluation, base documentaire, mode dégradé, sauvegarde et restauration |
-| Laboratoire | Testeur | Chapitre 7 : espaces isolés, génération, invitation, horloge accélérable, 17 scénarios SC-01 à SC-17 vérifiés sur l’état réel, simulateur de webhooks et de pannes, boîte d’envoi SMS, journal |
+| Laboratoire | Testeur | Chapitre 7 : espaces isolés, génération, invitation, horloge accélérable, 18 scénarios SC-01 à SC-18 vérifiés sur l’état réel, simulateur de webhooks et de pannes, boîte d’envoi SMS, journal |
 | Salle multi-rôles | Tous | Plusieurs sessions côte à côte sur le même dossier |
 
 ## Organisation du code
@@ -48,9 +51,10 @@ Le scénario SC-17 du Laboratoire vérifie chaque étape.
 | `src/server/model.js` | États, motifs de blocage, rôles, référentiels, lexique |
 | `src/server/domain.js` | Règles métier : transitions, blocages, créneaux atomiques, terrain, activation, webhooks signés et dédoublonnés |
 | `src/server/backend.js` | « API » : sessions, droits par rôle et périmètre, commandes, lectures filtrées, tâches, reprises, espaces de test |
+| `src/server/lowtech.js` | Suivi sans smartphone : réponses aux SMS à mots-clés et écrans USSD |
 | `src/server/techhelp.js` | Guide du technicien sur place : réponses par mots-clés (pas une IA), avec la source et le conseil de transmettre |
 | `src/server/ai.js` | Estimation (référence et modèle par quantiles), risque, assistant, résumé, évaluation temporelle |
-| `src/server/scenarios.js` | Préparation et vérification des 17 scénarios |
+| `src/server/scenarios.js` | Préparation et vérification des 18 scénarios |
 | `src/server/seed.js` | Génération des données fictives par graine |
 | `src/ui/platform.js` | Branchement du serveur simulé : stockage, verrou, synchronisation des onglets, réseau simulé par personnage, file hors ligne du technicien, photothèque (images en IndexedDB) |
 | `src/ui/cloud.js` | Partage entre appareils : salles, version commune et écriture conditionnelle, rejeu des actions faites sans réseau, état compressé, images et sauvegardes (avec leur file d’attente) |
@@ -61,6 +65,7 @@ Le scénario SC-17 du Laboratoire vérifie chaque étape.
 | `src/ui/vendor/qrcode.js` | Dessin du code QR (bibliothèque libre qrcode-generator, licence MIT) |
 | `src/ui/*.jsx` | Interfaces (React, sans framework) |
 | `src/ui/people.jsx` | Personnages dessinés (avatars des rôles, Aya la guide, petites scènes) |
+| `src/ui/simplephone.jsx`, `src/ui/impact.jsx` | Téléphone à touches (SMS et USSD) du client ; écran Impact (mesures et estimation du gain) |
 | `src/ui/trips.jsx`, `src/ui/trackcard.jsx` | Suivi des trajets (administrateur, superviseur, planificateur) et carte de suivi partagée par le client et le technicien |
 | `src/ui/charts.jsx` | Graphiques sans bibliothèque : courbes, barres, anneau, carte d’Abidjan |
 | `src/ui/styles.css`, `src/ui/css/*.css` | Styles communs, puis un fichier par espace (client, terrain, opérations, admin, labo) |
@@ -79,7 +84,7 @@ Style « tableau de bord de suivi » (police Plus Jakarta Sans, cartes arrondies
 ```bash
 npm install        # installe esbuild (outil de construction)
 npm run build      # reconstruit app.js et styles.css depuis src/
-npm test           # 93 tests : recette du serveur simulé et partage entre appareils
+npm test           # 95 tests : recette du serveur simulé et partage entre appareils
 ```
 
 `node build.mjs page.html` produit en plus une page autonome (React chargé depuis cdnjs) pour un aperçu en ligne.

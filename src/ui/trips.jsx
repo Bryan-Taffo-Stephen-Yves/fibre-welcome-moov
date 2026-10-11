@@ -62,7 +62,7 @@ function Steps({ stage, bad, last, failure }) {
 }
 
 // Chiffre clé : petite pastille, grand nombre léger, une ligne d'explication.
-function Tile({ label, value, unit, sub, ic, tone, none }) {
+export function Tile({ label, value, unit, sub, ic, tone, none }) {
   return <div className="card ad-stat tr-tile">
     <div className="ad-stat-h"><span className="eyebrow">{label}</span><span className={'tr-ic' + (tone ? ' tr-ic-' + tone : '')} aria-hidden="true">{ic}</span></div>
     <div className="ad-stat-v">{none ? <span className="small muted">{NONE}</span> : <span className={'num' + (tone ? ' ad-t-' + tone : '')}>{value}</span>}{unit && !none && <span className="small muted">{unit}</span>}</div>

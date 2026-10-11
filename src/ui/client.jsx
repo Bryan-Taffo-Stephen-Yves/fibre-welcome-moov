@@ -4,6 +4,7 @@ import { api, useQ, call, toast, prepareImage, putImage, useOnline, setOnline, n
 import { Btn, AsyncBtn, Tag, Sim, Explain, Field, Modal, StateTag, Empty, Stale, Icon, Picture, Avatar, AvatarStack, Ring, HouseScene, VanScene, NotifPopups, TrackMap, trackInfo, hourLabel, firstName, fmtDate, fmtDateTime, fmtAgo, fmtDur, slotLabel, minutes, money, STATE_INFO, ORDER_STATES, APPT_STATES, ROLES } from './kit.jsx';
 import { PEOPLE } from './people.jsx';
 import { TrackCard } from './trackcard.jsx';
+import { SimplePhone } from './simplephone.jsx';
 import { DOC_TYPES, PREP_CHECKLIST, REPORT_TYPES, PAYMENT_STATES, DOSSIER_DOCS } from '../server/model.js';
 const React = window.React;
 const { useState, useEffect, useRef } = React;
@@ -1076,7 +1077,7 @@ function Messages({ token, orderId, go, me, mode: mode0, setMode: setMode0 }) {
   // Pastille : réponses arrivées depuis votre dernier message.
   const lastMine = v.messages.filter(m => m.from === 'client').at(-1);
   const staffN = v.messages.filter(m => m.from === 'staff' && (!lastMine || m.at >= lastMine.at && m.id !== lastMine.id && m.eventSeq > (lastMine.eventSeq || 0))).length;
-  const tabs = [['ai', 'Assistant'], ['human', 'Conseiller', staffN], ['cb', 'Appeler']];
+  const tabs = [['ai', 'Assistant'], ['human', 'Conseiller', staffN], ['cb', 'Appeler'], ...(me.user.role === 'client' ? [['low', 'SMS / USSD']] : [])];
   return <>
     <div className="pills pills-soft cl-tabs" role="tablist" aria-label="Type d’échange">
       {tabs.map(([k, l, n]) => <button type="button" key={k} role="tab" aria-selected={mode === k} onClick={() => setMode(k)}>{l}{n > 0 && <span className="count">{n}</span>}</button>)}
@@ -1104,6 +1105,7 @@ function Messages({ token, orderId, go, me, mode: mode0, setMode: setMode0 }) {
       </form>
     </div>}
     {mode === 'cb' && <><CallStart token={token} v={v} /><Callback token={token} v={v} /></>}
+    {mode === 'low' && <SimplePhone token={token} />}
   </>;
 }
 
