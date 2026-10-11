@@ -244,6 +244,9 @@ export function Labo({ owner, setOwner, go, openRoom }) {
   };
   // SC-19 : la réponse piégée part comme si l'IA l'avait écrite ; le serveur la contrôle avec le vrai dossier.
   const trap = async run => {
+    // IA coupée : le garde-fou n'a rien à contrôler, on ne journalise pas une fausse question du client.
+    const me = api.q(owner, 'me');
+    if (me.ws && me.ws.genAi === false) return toast('L’IA générative est coupée dans l’administration : rallumez-la pour tester le garde-fou.', true);
     const o = orders.find(x => x.id === run.orderIds[0]);
     const t = tokenFor(owner, (o && o.customerId) || 'U1');
     const r = await api.exec(t, 'assistant.ask', { orderId: run.orderIds[0], question: 'Quand le technicien vient-il ? (test du garde-fou)', ai: TRAP });

@@ -5,7 +5,7 @@ import { Btn, AsyncBtn, Tag, Sim, Explain, Field, Modal, StateTag, Empty, Stale,
 import { PEOPLE } from './people.jsx';
 import { TrackCard } from './trackcard.jsx';
 import { SimplePhone } from './simplephone.jsx';
-import { askClaude, iaReachable, answerText, quietWhy, whyText } from './genai.js';
+import { askClaude, useIa, answerText, quietWhy, whyText } from './genai.js';
 import { DOC_TYPES, PREP_CHECKLIST, REPORT_TYPES, PAYMENT_STATES, DOSSIER_DOCS } from '../server/model.js';
 const React = window.React;
 const { useState, useEffect, useRef } = React;
@@ -1054,8 +1054,11 @@ function Prep({ token, v, arriving }) {
 const QUESTIONS = ['Où en est mon dossier ?', 'Pourquoi faut-il attendre ?', 'Que dois-je préparer ?', 'Comment modifier mon rendez-vous ?'];
 const Bot = ({ size = 32 }) => <span className="cl-bot" style={{ width: size, height: size }} role="img" aria-label="Assistant Moov">{Icon.logo}</span>;
 
-// La conversation avec l'assistant est gardée le temps de la visite (changer d'onglet ne l'efface pas).
+// La conversation avec l'assistant est gardée le temps de la visite (changer d'onglet ne l'efface pas). La réponse
+// qui arrive pendant qu'on est ailleurs va à l'écran ouvert à ce moment-là.
 const chats = new Map();
+const chatSubs = new Map();
+const setChatFor = (ck, f) => { const n = typeof f === 'function' ? f(chats.get(ck) || []) : f; chats.set(ck, n); (chatSubs.get(ck) || []).forEach(fn => fn(n)); };
 function Messages({ token, orderId, go, me, mode: mode0, setMode: setMode0 }) {
   const r = useQ(token, 'client.order', { orderId });
   const [modeL, setModeL] = useState('ai');
@@ -1064,15 +1067,22 @@ function Messages({ token, orderId, go, me, mode: mode0, setMode: setMode0 }) {
   const [aiText, setAiText] = useState('');
   const ck = token + orderId;
   const [chat, setChatRaw] = useState(() => chats.get(ck) || []);
-  // La conversation gardée ici fait foi : une réponse qui arrive après un changement d'onglet n'est pas perdue.
-  const setChat = f => { const n = typeof f === 'function' ? f(chats.get(ck) || []) : f; chats.set(ck, n); setChatRaw(n); };
+  useEffect(() => {
+    const subs = chatSubs.get(ck) || new Set();
+    chatSubs.set(ck, subs); subs.add(setChatRaw); setChatRaw(chats.get(ck) || []);
+    return () => { subs.delete(setChatRaw); };
+  }, [ck]);
+  const setChat = f => setChatFor(ck, f);
   const endRef = useRef(null);
-  useEffect(() => { if (chat.length && endRef.current) endRef.current.scrollIntoView({ block: 'nearest' }); }, [chat.length]);
+  // On descend à chaque question et à chaque réponse (la réponse remplace la bulle d'attente).
+  const settled = chat.filter(m => !m.wait).length;
+  useEffect(() => { if (chat.length && endRef.current) endRef.current.scrollIntoView({ block: 'nearest' }); }, [chat.length, settled]);
+  const iaNow = useIa();
   if (r.error) return <div className="alert alert-bad">{r.error.message}</div>;
   const v = r.data;
   // IA générative : Claude rédige à partir du dossier, puis le serveur vérifie sa réponse. Sans IA (pas de clé, panne,
   // coupée par l'administrateur), la même question reçoit la réponse par règles.
-  const iaOn = !!(me.ws && me.ws.genAi) && iaReachable();
+  const iaOn = !!(me.ws && me.ws.genAi) && iaNow.text;
   const busy = chat.some(m => m.wait);
   const ask = async q => {
     if (!q.trim() || busy) return;
@@ -1147,7 +1157,8 @@ function AiAnswer({ a, q, why, token, orderId, go }) {
       <span className="cl-ai-by">{Icon.check}Rédigé par l’IA Claude, vérifié avec votre dossier</span>
     </div></div>;
   }
-  const note = a.trace && a.trace.aiRejected ? 'Réponse de l’IA écartée par le contrôle (' + a.trace.aiRejected + ') : voici la réponse automatique.' : !quietWhy(why) ? 'L’IA n’a pas répondu (' + whyText(why) + ') : voici la réponse automatique.' : null;
+  // Le motif précis d'un rejet reste dans l'administration : il peut citer le passage inventé.
+  const note = a.trace && a.trace.aiRejected ? 'La réponse de l’IA n’a pas passé le contrôle : voici la réponse automatique.' : !quietWhy(why) ? 'L’IA n’a pas répondu (' + whyText(why) + ') : voici la réponse automatique.' : null;
   return <div className="cl-msg"><Bot /><div className="bubble bubble-them cl-ans">
     {a.blocks.map(blk)}
     {a.handoff && !a.blocks.some(b => b.action) && handoff('Parler à un conseiller')}

@@ -124,7 +124,7 @@ export const SCENARIOS = [
   { code: 'SC-19', title: 'IA générative sous garde-fou', goal: 'Claude rédige les réponses de l’assistant, mais une réponse qui invente une date, une heure ou une promesse est écartée : le client reçoit la réponse par règles.', steps: [
     { role: 'labo', text: 'Envoyer la réponse piégée (bouton ci-dessous) : elle invente une heure de visite et promet un délai.', check: (ws, r) => (ws.assistantLog || []).some(a => a.orderId === r.orderIds[0] && a.aiRejected) },
     { role: 'admin', text: 'Administrateur : Modèles IA, panneau « IA générative » : la réponse écartée et son motif sont listés.', check: () => null },
-    { role: 'client', text: 'Client : poser une question à l’assistant (Messages). Avec la clé de Claude, la réponse porte « Rédigé par l’IA Claude » ; sinon, l’assistant répond par règles.', check: (ws, r) => (ws.assistantLog || []).some(a => a.orderId === r.orderIds[0] && !a.aiRejected && !a.refused) },
+    { role: 'client', text: 'Client : poser une question à l’assistant (Messages). Avec la clé de Claude, la réponse porte « Rédigé par l’IA Claude » ; sinon, l’assistant répond par règles.', check: (ws, r) => (ws.assistantLog || []).some(a => a.orderId === r.orderIds[0] && !a.aiRejected && !a.refused && !a.trap) },
   ] },
 ];
 

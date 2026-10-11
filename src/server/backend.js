@@ -377,7 +377,7 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
       ans = assistantAnswer(ws, order, q, ws.docs.filter(d => d.scope === 'public'), { delegate });
       if (rejected) ans.trace.aiRejected = rejected;
     }
-    (ws.assistantLog ||= []).push({ id: 'AI' + (++ws.seq), orderId: order && order.id, userId: user.id, q, at: ws.clock, intent: ans.trace.intent, refused: ans.trace.refused, blocks: ans.blocks.map(b => b.kind), ai: ans.ai ? model : null, aiRejected: rejected, ms: ans.ai ? ans.ai.ms : null });
+    (ws.assistantLog ||= []).push({ id: 'AI' + (++ws.seq), orderId: order && order.id, userId: user.id, q, at: ws.clock, intent: ans.trace.intent, refused: ans.trace.refused, blocks: ans.blocks.map(b => b.kind), ai: ans.ai ? model : null, aiRejected: rejected, ms: ans.ai ? ans.ai.ms : null, trap: model === 'claude-test-piege' || undefined });
     const how = ans.ai ? 'Claude, ' : rejected ? 'IA écartée (' + rejected + '), règles, ' : '';
     audit(ws, user, 'ia.assistant', order ? order.ref : '—', (ans.trace.refused ? 'REFUS : ' : how + (ans.trace.intent || 'abstention') + ' : ') + q.slice(0, 80), { ai: true });
     return ans;
@@ -1517,11 +1517,13 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
   const stripImg = x => (x && typeof x === 'object' ? { ...x, thumb: null, img: null } : x);
   const noImages = v => {
     const out = { ...v };
-    if (out.documents) out.documents = out.documents.map(stripImg);
+    if (out.documents) out.documents = out.documents.map(d => ({ ...stripImg(d), ai: d.ai ? { ...d.ai, note: '' } : d.ai }));
     if (out.mission && out.mission.report) out.mission = { ...out.mission, report: { ...out.mission.report, photos: (out.mission.report.photos || []).map(stripImg) } };
     if (out.internal && out.internal.workOrder) out.internal = { ...out.internal, workOrder: { ...out.internal.workOrder, photos: (out.internal.workOrder.photos || []).map(stripImg), help: (out.internal.workOrder.help || []).map(h => (h && h.photo ? { ...h, photo: stripImg(h.photo) } : h)) } };
     return out;
   };
+  // Une pièce telle que le client la voit : jamais l'avis interne de l'IA ni le nom de la conseillère.
+  const clientDoc = d => ({ id: d.id, type: d.type, name: d.name, mime: d.mime, status: d.status, reason: d.reason, at: d.at, thumb: d.thumb, img: d.img, scanNote: d.scanNote, check: d.check });
   const normTxt = x => String(x == null ? '' : x).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
   const publicEvent = e => ({ seq: e.seq, type: e.type, at: e.effectiveAt, receivedAt: e.receivedAt, text: e.publicText, source: e.source, actorRole: e.role });
   function clientView(ws, user, o) {
@@ -1539,7 +1541,7 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
       hold: ws.holds.find(h => h.orderId === o.id && h.status === 'actif' && h.expiresReal > ws.lastReal) || null,
       mission: wo && wo.status !== 'annulee' ? { status: wo.status, techName: tech ? tech.name.split(' ')[0] + ' ' + tech.name.split(' ').slice(1).map(x => x[0] + '.').join(' ') : '—', company: team && team.contractor ? team.contractor + ' pour Moov' : 'Moov Africa', badge: 'MOOV-' + (tech ? tech.id.replace('U', '') : '') + '7' , times: wo.times, receptionCode: wo.receptionCode, reception: wo.reception, track: wo.track || null, woId: wo.id, report: wo.status === 'terminee' ? { checklist: CHECKLIST_TECH.map(c => ({ label: c.label, value: wo.checklist[c.id], unit: c.unit })), serial: wo.serial, photos: wo.photos.map(p => ({ id: p.id, name: p.name, thumb: p.thumb, img: p.img, at: p.at })), comment: wo.comment } : null, failure: wo.failure, signoff: wo.signoff || null } : null,
       activation: ws.activations.filter(a => a.orderId === o.id).map(a => ({ ref: a.ref, status: a.status, at: a.requestedAt, confirmedAt: a.confirmedAt })),
-      documents: ws.documents.filter(d => d.orderId === o.id).map(d => ({ id: d.id, type: d.type, name: d.name, mime: d.mime, status: d.status, reason: d.reason, at: d.at, thumb: d.thumb, img: d.img, scanNote: d.scanNote, check: d.check })),
+      documents: ws.documents.filter(d => d.orderId === o.id).map(clientDoc),
       messages: ws.messages.filter(m => m.orderId === o.id && m.visibility === 'public'),
       callbacks: ws.callbacks.filter(c => c.orderId === o.id),
       tickets: ws.tickets.filter(t => t.orderId === o.id && (t.type.startsWith('signalement') || t.type === 'question_assistant')).map(t => ({ id: t.id, type: t.type, status: t.status, at: t.at, text: t.text })),
@@ -1596,7 +1598,7 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
       const ctx = aiContext(ws, o, { delegate: user.role === 'representant' });
       return { ref: ctx.ref, items: aiPayloadItems(ctx) };
     } },
-    'client.document': { roles: ['client'], fn: ({ ws, user, args }) => { const d = byId(ws.documents, args.docId); if (!d) throw new AppError('introuvable', 'Pièce introuvable ou non autorisée.'); scopedOrder(ws, user, d.orderId); return d; } },
+    'client.document': { roles: ['client'], fn: ({ ws, user, args }) => { const d = byId(ws.documents, args.docId); if (!d) throw new AppError('introuvable', 'Pièce introuvable ou non autorisée.'); scopedOrder(ws, user, d.orderId); return clientDoc(d); } },
     notifications: { fn: ({ ws, user }) => ws.notifications.filter(n => n.userId === user.id).slice(-60).reverse() },
     // Chaque personne ne voit que ses propres SMS, même dans l'espace de démo de son propriétaire.
     outbox: { fn: ({ ws, user }) => ws.outbox.filter(o => o.userId === user.id).slice(-60).reverse() },
@@ -1634,7 +1636,8 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
       const noImg = ['admin', 'auditeur'].includes(user.role);
       const dups = ws.orders.filter(x => x.id !== o.id && (x.contactPhone === o.contactPhone || (x.address.street === o.address.street && x.zone === o.zone)) && canSee(ws, user, x)).map(x => ({ id: x.id, ref: x.ref, why: x.contactPhone === o.contactPhone ? 'même téléphone' : 'même adresse', state: x.state }));
       // L'avis de l'IA sur les photos est une aide interne : la conseillère le voit, pas le client.
-      const withAi = cv.documents.map(d => ({ ...d, ai: (byId(ws.documents, d.id) || {}).ai || null }));
+      // Si l'administrateur coupe l'IA, ses avis enregistrés ne sont plus montrés (ils reviennent si on la rallume).
+      const withAi = cv.documents.map(d => ({ ...d, ai: (genAiOn(ws) && (byId(ws.documents, d.id) || {}).ai) || null }));
       const full = { ...cv, documents: withAi, internal: {
         events: ws.events.filter(e => e.orderId === o.id),
         notes: ws.messages.filter(m => m.orderId === o.id && m.visibility === 'interne'),
@@ -1647,6 +1650,12 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
         advice: D.dossierAdvice(ws, o),
       } };
       return noImg ? noImages(full) : full;
+    } },
+    // État actuel d'une pièce, relu juste avant d'envoyer sa photo à l'IA (un écran peut être périmé).
+    'ops.doc': { roles: ['conseiller'], fn: ({ ws, user, args }) => {
+      const d = byId(ws.documents, args.docId); if (!d) throw new AppError('introuvable', 'Pièce introuvable.');
+      scopedOrder(ws, user, d.orderId);
+      return { id: d.id, type: d.type, mime: d.mime, img: d.img, status: d.status, ai: !!d.ai, genAi: genAiOn(ws) };
     } },
     // Droit de voir une image (pièce ou photo) : même règle que le dossier, technicien seulement sur sa mission ouverte.
     // Un identifiant d'image connu ne suffit pas (R-11).

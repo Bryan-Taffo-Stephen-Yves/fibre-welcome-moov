@@ -27,6 +27,10 @@ const viewerSample = () => (sampleP ||= Promise.resolve().then(() => W.claude.us
 // La page sait-elle joindre une IA ici ? (sinon, pas de bouton « Avis de l'IA »)
 export const iaReachable = () => inViewer() || !!serverCfg();
 
+// Les écrans qui montrent l'IA se redessinent quand son état change (panne connue, photo en cours d'analyse).
+const subs = new Set();
+const notify = () => subs.forEach(f => f());
+
 function timeout(ms) {
   if (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) return AbortSignal.timeout(ms);
   const c = new AbortController(); setTimeout(() => c.abort(), ms); return c.signal;
@@ -35,8 +39,14 @@ function timeout(ms) {
 // Panne connue : on ne redemande pas à chaque question (le client attendrait pour rien).
 let down = null;
 const knownDown = () => (down && Date.now() < down.until ? down.why : null);
-const PAUSE = { sans_cle: 120000, credit: 300000, cle_refusee: 300000, modele_absent: 300000, compteur: 60000, limite: 60000, absente: 300000, injoignable: 45000, origine: 600000, not_granted: 3600000, unavailable: 60000, rate_limited: 30000 };
-const markDown = why => { if (PAUSE[why]) down = { why, until: Date.now() + PAUSE[why] }; };
+const PAUSE = { sans_cle: 120000, credit: 300000, cle_refusee: 300000, modele_absent: 300000, compteur: 60000, limite: 60000, absente: 300000, injoignable: 45000, origine: 600000, pas_de_serveur: 600000, rate_limited: 30000, occupe: 30000 };
+const markDown = why => { if (PAUSE[why]) { down = { why, until: Date.now() + PAUSE[why] }; notify(); } };
+// Pannes de réglage (clé, crédit, fonction absente…) : tant qu'elles durent, les boutons de l'IA sont cachés.
+const SETUP = ['sans_cle', 'cle_refusee', 'credit', 'modele_absent', 'absente', 'origine', 'pas_de_serveur'];
+// Aperçu privé : l'usage du compte Claude est refusé ou impossible ici, pour toute la visite de la page.
+const VIEWER_OFF = ['not_granted', 'sampling_disabled', 'not_declared', 'capability_disabled', 'capability_removed'];
+let viewerOff = null;
+let viewerImages = null; // true / false une fois connu (l'aperçu peut-il envoyer une photo ?)
 
 async function viaServer(kind, body, ms) {
   const c = serverCfg();
@@ -58,7 +68,10 @@ const ASSISTANT_FORMAT = 'Réponds uniquement avec un objet JSON, sans aucun aut
 const PHOTO_FORMAT = 'Réponds uniquement avec un objet JSON, sans aucun autre texte, de la forme {"verdict": "lisible", "right_document": "oui", "issues": [], "note": "…"}. « verdict » vaut : ' + enumOf(PHOTO_SCHEMA, 'verdict') + '. « right_document » vaut : ' + enumOf(PHOTO_SCHEMA, 'right_document') + '. « issues » ne contient que : ' + PHOTO_SCHEMA.properties.issues.items.enum.join(', ') + '.';
 const b64Blob = (data, type) => { const s = atob(data); const u = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) u[i] = s.charCodeAt(i); return new Blob([u], { type }); };
 
+// Codes d'erreur de l'aperçu (capacité « sample ») traduits en raisons de l'application.
+const VIEWER_WHY = { refused: 'refus', rate_limited: 'rate_limited', session_expired: 'session_expiree', image_rejected: 'image_refusee', images_unavailable: 'apercu_photo', empty_completion: 'illisible', invalid_json: 'illisible', cancelled: 'annule', upstream_error: 'occupe', queue_overflow: 'occupe' };
 async function viaViewer(kind, body) {
+  if (viewerOff) return { ok: false, why: 'not_granted' };
   const sample = await viewerSample();
   if (!sample) return { ok: false, why: 'apercu' };
   const t0 = Date.now();
@@ -70,13 +83,17 @@ async function viaViewer(kind, body) {
       out = await sample.json(ASSISTANT_SYSTEM + '\n\n' + ASSISTANT_FORMAT + '\n\n' + assistantUserText(v.value), { modelTier: 'quick', cache: false });
     } else {
       const lim = await sample.limits().catch(() => null);
-      if (!lim || !lim.images) return { ok: false, why: 'apercu_photo' };
+      if (!lim || !lim.images) { viewerImages = false; notify(); return { ok: false, why: 'apercu_photo' }; }
       out = await sample.json(PHOTO_SYSTEM + '\n\n' + PHOTO_FORMAT + '\n\nPièce attendue : ' + PHOTO_TYPES[body.docType] + '.', { images: b64Blob(body.data, body.mediaType), cache: false });
     }
     if (!out || typeof out !== 'object' || Array.isArray(out)) return { ok: false, why: 'illisible' };
     return { ok: true, out, model: VIEWER_MODEL, ms: Date.now() - t0 };
   } catch (e) {
-    const why = String((e && e.code) || 'erreur').slice(0, 30);
+    const code = String((e && e.code) || '');
+    if (VIEWER_OFF.includes(code)) { viewerOff = code; statusMemo = null; notify(); return { ok: false, why: 'not_granted' }; }
+    if (code === 'images_unavailable') { viewerImages = false; notify(); }
+    // Erreur de la page elle-même (requête mal formée, trop longue) : rien n'est parti, réponse par règles.
+    const why = VIEWER_WHY[code] || 'illisible';
     markDown(why);
     return { ok: false, why };
   }
@@ -97,10 +114,24 @@ export async function askClaude(token, orderId, question, history = []) {
 
 // Avis de Claude sur une photo, demandé par la conseillère : la photo part seule (sans nom ni dossier), l'avis revient au
 // serveur simulé (« doc.aiReview »), qui le contrôle et le range avec la pièce. La conseillère décide toujours.
-export async function reviewPhoto(token, doc) {
+// Une même photo ne part qu'une fois à la fois, même si on clique sur deux boutons (fiche et liste des pièces).
+const inflight = new Map();
+export function reviewPhoto(token, docId) {
+  if (inflight.has(docId)) return inflight.get(docId);
+  const p = reviewNow(token, docId).catch(() => ({ ok: false, why: 'illisible' })).finally(() => { inflight.delete(docId); notify(); });
+  inflight.set(docId, p); notify();
+  return p;
+}
+async function reviewNow(token, docId) {
   if (!isOnline(token)) return { ok: false, why: 'hors_ligne' };
-  let wsId;
-  try { if (!api.q(token, 'image.allowed', { img: doc.img })) return { ok: false, why: 'droits' }; wsId = api.session(token).wsId; } catch { return { ok: false, why: 'droits' }; }
+  // État actuel de la pièce (jamais celui d'un écran périmé) : rien ne part si elle est déjà traitée ou déjà vue par l'IA.
+  let doc, wsId;
+  try { doc = api.q(token, 'ops.doc', { docId }); wsId = api.session(token).wsId; } catch { return { ok: false, why: 'droits' }; }
+  if (!doc.genAi) return { ok: false, why: 'coupee' };
+  if (doc.ai) return { ok: true, already: true };
+  if (doc.status !== 'a_valider') return { ok: false, why: doc.status === 'analyse' ? 'analyse' : 'traitee' };
+  if (!doc.img || !String(doc.mime || '').startsWith('image/')) return { ok: false, why: 'image' };
+  try { if (!api.q(token, 'image.allowed', { img: doc.img })) return { ok: false, why: 'droits' }; } catch { return { ok: false, why: 'droits' }; }
   const k = knownDown(); if (k) return { ok: false, why: k };
   const src = await getImage(wsId, doc.img);
   const m = /^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/]+=*)$/.exec(src || '');
@@ -108,8 +139,26 @@ export async function reviewPhoto(token, doc) {
   const body = { docType: doc.type, mediaType: m[1], data: m[2] };
   const r = inViewer() ? await viaViewer('photo', body) : await viaServer('photo', body, 60000);
   if (!r.ok) return r;
-  const res = await call(token, 'doc.aiReview', { docId: doc.id, ai: { ...r.out, model: r.model, ms: r.ms } }, { silent: true });
+  const res = await call(token, 'doc.aiReview', { docId, ai: { ...r.out, model: r.model, ms: r.ms } }, { silent: true });
   return res.ok ? { ok: true, review: res.data } : { ok: false, why: 'serveur', message: res.error.message };
+}
+
+// L'IA est-elle utilisable maintenant sur cette page ? (en plus du réglage de l'administrateur, vu par le serveur simulé)
+export function iaNow() {
+  if (!iaReachable() || viewerOff) return { text: false, photo: false };
+  const k = knownDown();
+  if (k && SETUP.includes(k)) return { text: false, photo: false };
+  return { text: true, photo: !(inViewer() && viewerImages === false) };
+}
+export function useIa() {
+  const [, setV] = React.useState(0);
+  React.useEffect(() => {
+    let live = true;
+    const f = () => { if (live) setV(x => x + 1); };
+    subs.add(f); iaStatus(false).then(f, f);
+    return () => { live = false; subs.delete(f); };
+  }, []);
+  return { ...iaNow(), busy: id => inflight.has(id) };
 }
 
 // État de l'IA pour l'administration (lu au plus une fois par minute, sauf « Vérifier »).
@@ -117,8 +166,11 @@ let statusMemo = null;
 export async function iaStatus(force = false) {
   if (!force && statusMemo && Date.now() - statusMemo.at < 60000) return statusMemo.v;
   let v;
-  if (inViewer()) v = (await viewerSample()) ? { state: 'apercu_compte' } : { state: 'apercu' };
-  else {
+  if (inViewer()) {
+    const sample = viewerOff ? null : await viewerSample();
+    if (sample && viewerImages === null) { const lim = await sample.limits().catch(() => null); viewerImages = !!(lim && lim.images); }
+    v = sample ? { state: 'apercu_compte' } : { state: 'apercu' };
+  } else {
     const c = serverCfg();
     if (!c) v = { state: 'pas_de_serveur' };
     else {
@@ -129,7 +181,7 @@ export async function iaStatus(force = false) {
       } catch { v = { state: 'injoignable' }; }
     }
   }
-  if (v.state === 'pret' || v.state === 'apercu_compte') down = null; else markDown(v.state);
+  if (v.state === 'pret' || v.state === 'apercu_compte') { if (down) { down = null; notify(); } } else markDown(v.state);
   statusMemo = { at: Date.now(), v };
   return v;
 }
@@ -172,8 +224,13 @@ const WHY_TEXT = {
   occupe: 'Claude est très demandé en ce moment',
   refus: 'Claude a préféré ne pas répondre',
   hors_ligne: 'vous êtes hors ligne',
-  not_granted: 'l’usage du compte Claude n’a pas été autorisé',
-  rate_limited: 'trop de demandes à la fois',
+  not_granted: 'l’usage du compte Claude n’est pas autorisé dans cet aperçu',
+  rate_limited: 'trop de demandes à la fois, réessayez dans un moment',
+  session_expiree: 'votre session Claude a expiré : reconnectez-vous puis rechargez la page',
+  image_refusee: 'Claude n’a pas pu lire ce fichier photo',
+  annule: 'la demande a été annulée',
+  analyse: 'le contrôle automatique de la photo n’est pas fini, réessayez dans quelques secondes',
+  traitee: 'cette pièce est déjà validée ou refusée',
   apercu: 'l’IA n’est pas disponible dans cet aperçu',
   apercu_photo: 'cet aperçu ne peut pas envoyer de photo à Claude',
   pas_de_serveur: 'aucun serveur d’IA n’est configuré',
@@ -183,7 +240,7 @@ const WHY_TEXT = {
 };
 export const whyText = w => WHY_TEXT[w] || 'la réponse de l’IA était inutilisable';
 // Raisons qui veulent dire « pas d'IA ici, ou pas pour cette question » : inutile de le signaler sous chaque réponse.
-const QUIET = ['sans_cle', 'absente', 'pas_de_serveur', 'apercu', 'coupee', 'degrade', 'vide', 'garde', 'hors_ligne', 'droits', 'origine', 'not_granted', 'unavailable', 'contexte'];
+const QUIET = ['sans_cle', 'absente', 'pas_de_serveur', 'apercu', 'coupee', 'degrade', 'vide', 'garde', 'hors_ligne', 'droits', 'origine', 'not_granted', 'annule', 'contexte'];
 export const quietWhy = w => !w || QUIET.includes(w);
 // Texte d'une réponse précédente, pour que Claude comprenne une question de suite (« et pourquoi ? »).
 export const answerText = a => (a.ai ? a.ai.text : a.blocks.map(b => b.title + ' : ' + b.text).join(' ')).slice(0, LIMITS.historyText);

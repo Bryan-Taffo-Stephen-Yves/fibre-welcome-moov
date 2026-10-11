@@ -654,11 +654,14 @@ export function dossierAdvice(ws, order) {
   if (!order.dossier) return null;
   const live = (order.requiredDocs || []).map(t => ws.documents.filter(d => d.orderId === order.id && d.type === t && d.status !== 'remplace').at(-1)).filter(Boolean);
   const review = live.filter(d => ['analyse', 'a_valider'].includes(d.status));
+  // IA coupée par l'administrateur : ses avis déjà enregistrés ne comptent plus.
+  const iaOn = !(ws.config && ws.config.genAi === false);
   const items = review.map(d => {
     const reasons = [];
+    const ai = iaOn ? d.ai : null;
     if (d.check && !d.check.ok) for (const i of d.check.issues) reasons.push(ADVICE_WORDS[i] || ('Photo ' + i));
-    if (d.ai && d.ai.verdict === 'a_refaire') {
-      const seen = d.ai.issues.map(i => ISSUE_REASON[i]).filter(Boolean);
+    if (ai && ai.verdict === 'a_refaire') {
+      const seen = ai.issues.map(i => ISSUE_REASON[i]).filter(Boolean);
       reasons.push(...(seen.length ? seen : ['Photo pas assez lisible, merci de la reprendre']));
     }
     // Deux photos identiques : seule la seconde est à refaire (la première reste valable).
@@ -666,7 +669,7 @@ export function dossierAdvice(ws, order) {
     if (twin) reasons.push('Même photo que « ' + (DOC_TYPES[twin.type].short || DOC_TYPES[twin.type].label).toLowerCase() + ' » : merci d’envoyer la bonne pièce');
     const wait = d.status === 'analyse';
     const uniq = [...new Set(reasons)];
-    return { docId: d.id, type: d.type, label: DOC_TYPES[d.type].label, status: d.status, verdict: wait ? 'attendre' : uniq.length ? 'refaire' : 'ok', reason: uniq.length ? uniq.join(' ; ') : null, notes: uniq, ai: d.ai ? d.ai.verdict : null };
+    return { docId: d.id, type: d.type, label: DOC_TYPES[d.type].label, status: d.status, verdict: wait ? 'attendre' : uniq.length ? 'refaire' : 'ok', reason: uniq.length ? uniq.join(' ; ') : null, notes: uniq, ai: ai ? ai.verdict : null };
   });
   const verdict = !items.length ? 'rien' : items.some(i => i.verdict === 'attendre') ? 'attendre' : items.some(i => i.verdict === 'refaire') ? 'refaire' : 'valider';
   const nOk = items.filter(i => i.verdict === 'ok').length, nBad = items.filter(i => i.verdict === 'refaire').length;

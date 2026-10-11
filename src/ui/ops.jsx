@@ -3,7 +3,7 @@
 import { useQ, call, api, toast, liveClock, useNow } from './platform.js';
 import { Btn, AsyncBtn, Sim, Explain, Field, Modal, StateTag, Progress, Empty, Icon, Picture, NotifBell, NotifPopups, Avatar, AvatarStack, Sparkline, Bars, Ring, Stacked, AbidjanMap, TrackMap, trackInfo, hourLabel, deName, firstName, fmtDate, fmtDateTime, slotLabel, money, STATE_INFO, ORDER_STATES, BLOCKER_TYPES, APPT_STATES, ROLES } from './kit.jsx';
 import { ZONES, DOC_TYPES, PAYMENT_STATES, REPORT_TYPES, CHECKLIST_TECH, DOSSIER_DOCS, ISSUE_LABEL, ISSUE_REASON } from '../server/model.js';
-import { reviewPhoto, iaReachable, whyText } from './genai.js';
+import { reviewPhoto, useIa, whyText } from './genai.js';
 import { Trips } from './trips.jsx';
 import { Impact } from './impact.jsx';
 const React = window.React;
@@ -116,17 +116,18 @@ function AiPhotoLine({ ai }) {
   </div>;
 }
 // La conseillère demande l'avis (jamais automatique : la photo ne part que sur son clic).
-const iaUsable = me => !!(me && me.ws && me.ws.genAi) && iaReachable();
-const aiAsk = async (token, doc) => {
-  const r = await reviewPhoto(token, doc);
-  if (!r.ok) toast('L’IA n’a pas pu donner son avis : ' + (r.message || whyText(r.why)) + '.', true);
+const aiPhotoOk = d => !!d && !d.ai && d.status === 'a_valider' && !!d.img && String(d.mime || '').startsWith('image/');
+const aiAsk = async (token, docId) => {
+  const r = await reviewPhoto(token, docId);
+  if (!r.ok && r.why !== 'traitee') toast('L’IA n’a pas pu donner son avis : ' + (r.message || whyText(r.why)) + '.', true);
   return r;
 };
 function AiPhotoBtn({ token, doc }) {
   const me = useQ(token, 'me');
-  const [busy, setBusy] = useState(false);
-  if (!iaUsable(me.data) || doc.ai || !String(doc.mime || '').startsWith('image/') || !doc.img || !['analyse', 'a_valider'].includes(doc.status)) return null;
-  return <Btn size="s" kind="ghost" className="op-iaph-btn" title={AI_HELP} disabled={busy || doc.status === 'analyse'} onClick={async () => { setBusy(true); try { await aiAsk(token, doc); } finally { setBusy(false); } }}>{Icon.search}{busy ? 'L’IA regarde la photo…' : 'Avis de l’IA'}</Btn>;
+  const ia = useIa();
+  if (!(me.data && me.data.ws && me.data.ws.genAi) || !ia.photo || doc.ai || !String(doc.mime || '').startsWith('image/') || !doc.img || !['analyse', 'a_valider'].includes(doc.status)) return null;
+  const busy = ia.busy(doc.id);
+  return <Btn size="s" kind="ghost" className="op-iaph-btn" title={AI_HELP} disabled={busy || doc.status === 'analyse'} onClick={() => aiAsk(token, doc.id)}>{Icon.search}{busy ? 'L’IA regarde la photo…' : 'Avis de l’IA'}</Btn>;
 }
 
 // Valider ou refuser une pièce, avec des motifs tout prêts (le client lit le motif).
@@ -802,8 +803,13 @@ function AdviceCard({ token, adv, isC, closed, orderId, docs, ia }) {
   const tone = adv.verdict === 'valider' ? 'ok' : adv.verdict === 'refaire' ? 'bad' : 'wait';
   const n = adv.items.length, nOk = adv.items.filter(i => i.verdict === 'ok').length, nBad = adv.items.filter(i => i.verdict === 'refaire').length;
   // Photos que l'IA n'a pas encore regardées (seulement sur demande de la conseillère, une par une).
-  const todo = ia && isC ? docs.filter(d => d && !d.ai && d.status === 'a_valider' && d.img && String(d.mime || '').startsWith('image/')) : [];
-  const askAll = async () => { for (let i = 0; i < todo.length; i++) { setAsking(i + 1 + '/' + todo.length); const r = await aiAsk(token, todo[i]); if (!r.ok) break; } setAsking(null); };
+  const todo = ia && isC ? docs.filter(aiPhotoOk) : [];
+  // Chaque photo est relue juste avant de partir : une pièce validée ou déjà vue entre-temps est sautée.
+  const askAll = async () => {
+    const ids = todo.map(d => d.id);
+    try { for (let i = 0; i < ids.length; i++) { setAsking(i + 1 + '/' + ids.length); const r = await aiAsk(token, ids[i]); if (!r.ok && r.why !== 'traitee') break; } }
+    finally { setAsking(null); }
+  };
   return <div className={'op-advice op-advice-' + tone}>
     <div className="op-advice-h"><span className="op-advice-ic" aria-hidden="true">{Icon.search}</span><div className="stack-s" style={{ gap: 2 }}><b className="small">Avis automatique</b><span className="tiny muted">{adv.ai ? 'Pré-analyse simulée, plus l’avis de l’IA Claude sur ' + (adv.ai > 1 ? adv.ai + ' photos' : 'une photo') : 'Pré-analyse simulée, pas une vraie IA'}</span></div></div>
     <p className="small op-advice-sum">{adv.summary}</p>
@@ -828,7 +834,8 @@ function DossierSection({ token, v, isC, ws, onPlan }) {
   const names = unclear.map(x => '« ' + docShort(x.t).toLowerCase() + ' »');
   const prefill = 'Bonjour ' + firstName(o.contactName) + ', ' + (unclear.length === 1 ? 'la photo ' + names[0] + ' n’est pas assez lisible : merci de la reprendre bien à plat, à la lumière. ' : unclear.length > 1 ? 'les photos ' + names.join(' et ') + ' ne sont pas assez lisibles : merci de les reprendre bien à plat, à la lumière. ' : '') + (unclear.length ? 'Vous' : 'vous') + ' pouvez tout envoyer depuis l’onglet Dossier de votre application. Merci !';
   const closed = ['valide', 'annule'].includes(d.status);
-  const ia = !!(ws && ws.genAi) && iaReachable();
+  const iaNow = useIa();
+  const ia = !!(ws && ws.genAi) && iaNow.photo;
   return <section className="card stack op-dossier">
     <div className="card-title op-dossier-h">
       <div className="op-item-h"><span className="op-ic op-ic-acc">{Icon.doc}</span><div className="stack-s" style={{ gap: 2 }}><h2>Dossier en ligne</h2><span className="small muted">{dossierWhen(d, now) || 'Rempli par le client sur son téléphone'}</span></div></div>

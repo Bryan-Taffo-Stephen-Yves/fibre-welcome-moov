@@ -448,7 +448,7 @@ function Audit({ token }) {
 
 // ---------- Modèles IA ----------
 const MODEL_NAME = { 'baseline-1': 'Référence simple', 'quantiles-2': 'Modèle v2' };
-const INTENT = { status: 'Où en est mon dossier', why: 'Pourquoi ce blocage', prepare: 'Préparer la visite', appt: 'Rendez-vous', when: 'Délai', payment: 'Paiement', activation: 'Activation', refund: 'Remboursement', human: 'Parler à quelqu’un' };
+const INTENT = { status: 'Où en est mon dossier', why: 'Pourquoi ce blocage', prepare: 'Préparer la visite', appt: 'Rendez-vous', when: 'Délai', payment: 'Paiement', activation: 'Activation', refund: 'Remboursement', human: 'Parler à quelqu’un', other: 'Autre question' };
 
 function Models({ token, ro }) {
   const r = useQ(token, 'admin.models');
