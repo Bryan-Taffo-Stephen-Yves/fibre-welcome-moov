@@ -397,13 +397,13 @@ const TOUR = [
   { route: 'client', sel: 'client-next', click: 'client-tab-home', title: 'Et ce qu’elle doit faire', text: 'La prochaine action est toujours mise en avant. Quand Awa n’a rien à faire, l’application le lui dit aussi.' },
   { route: 'client', sel: 'client-estimate', click: 'client-tab-home', title: 'Une estimation honnête', text: 'Le délai restant est une fourchette avec un niveau de confiance. Ce n’est jamais présenté comme un rendez-vous confirmé.' },
   { route: 'client', sel: 'client-tab-rdv', title: 'Prendre rendez-vous', text: h => 'Ici, Awa choisit un créneau. Il lui est gardé ' + minutes(h) + ' pendant qu’elle confirme : deux personnes ne peuvent pas prendre la dernière place.' },
-  { route: 'client', sel: 'client-tab-msg', title: 'Poser une question', text: 'L’assistant répond à partir du dossier et des procédures Moov, en citant ses sources. S’il ne sait pas, il passe la main à un conseiller.' },
+  { route: 'client', sel: 'client-tab-msg', title: 'Poser une question', text: 'L’assistant répond à partir du dossier et des procédures Moov, en citant ses sources. Quand l’IA Claude est branchée, elle rédige la réponse et un garde-fou la vérifie. S’il ne sait pas, il passe la main à un conseiller.' },
   { route: 'ops', sel: 'ops-queues-panel', click: 'ops-queues', pick: { ops: 'conseiller' }, title: 'Côté Moov : Nadia débloque les dossiers', text: 'La conseillère voit les dossiers bloqués, en retard ou oubliés, triés par priorité. Chaque priorité est expliquée en toutes lettres.' },
   { route: 'ops', sel: 'ops-planning-panel', click: 'ops-planning', pick: { ops: 'planificateur' }, title: 'Hervé organise les équipes', text: 'Le planificateur voit la charge de chaque équipe, confirme les rendez-vous et réaffecte une mission si un technicien est absent.' },
   { route: 'terrain', sel: 'field-network', title: 'Brice, même sans réseau', text: 'Ce bouton coupe le réseau de cet onglet. Les actions de Brice restent sur son téléphone et partent une seule fois au retour du réseau.' },
   { route: 'admin', sel: 'admin-audit-panel', click: 'admin-audit', pick: { admin: 'admin' }, title: 'Tout est tracé', text: 'Le journal garde chaque action, chaque accès refusé et chaque décision de l’IA. L’auditrice peut le lire sans rien modifier.' },
   { route: 'salle', sel: 'room', title: 'Plusieurs rôles à la fois', text: 'Ici, la cliente, le planificateur et le technicien sont côte à côte. Agissez dans un volet : les autres se mettent à jour.' },
-  { route: 'labo', sel: 'labo-scenarios', title: 'À vous de jouer', text: 'Lancez « SC-01 Installation nominale » : le guide vous dit quoi faire et coche chaque étape quand elle est vraiment faite. Il y a 18 scénarios.' },
+  { route: 'labo', sel: 'labo-scenarios', title: 'À vous de jouer', text: 'Lancez « SC-01 Installation nominale » : le guide vous dit quoi faire et coche chaque étape quand elle est vraiment faite. Il y a 19 scénarios.' },
   { route: 'labo', sel: 'labo-sim', title: 'Provoquer des pannes', text: 'Le simulateur envoie des paiements, les double, coupe un système Moov ou fait échouer une activation, pour voir comment l’application réagit.' },
 ];
 

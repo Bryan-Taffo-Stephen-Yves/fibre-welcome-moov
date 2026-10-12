@@ -143,7 +143,7 @@ export function Home({ go, startTour, hasWs, createWs, users = [], pick, owner, 
           <span className="lb-player-body">
             <span className="lb-player-role">Bac à sable</span>
             <b className="lb-player-name">Laboratoire</b>
-            <span className="lb-player-line">18 scénarios guidés et des pannes à provoquer</span>
+            <span className="lb-player-line">19 scénarios guidés et des pannes à provoquer</span>
           </span>
           <span className="arrow-btn lb-player-go" aria-hidden="true">{Icon.arrow}</span>
         </button>
@@ -201,6 +201,16 @@ const EV_LABEL = {
 const holdNote = e => (e && e.type === 'CRENEAU_TENU' && e.payload && e.payload.expiresInMin ? ' ' + e.payload.expiresInMin + ' min' : '');
 const evLabel = t => (STATE_INFO[t] && STATE_INFO[t].label) || EV_LABEL[t] || (BLOCKER_TYPES[t] && BLOCKER_TYPES[t].label) || cap(String(t).toLowerCase().replace(/_/g, ' '));
 
+// Réponse piégée de SC-19, écrite pour le test : elle invente une heure et promet un délai, comme une IA qui se tromperait.
+const TRAP = { answer: 'Bonne nouvelle : le technicien viendra demain à 7 h 45, c’est garanti.', cites: ['F3'], action: 'aucune', can_answer: true, topic: 'rendez_vous', model: 'claude-test-piege', ms: 0 };
+function TrapResult({ r }) {
+  return <div className="lb-trap" role="status">
+    <div className="lb-trap-row lb-trap-bad"><span className="lb-trap-k">Réponse piégée</span><span>« {TRAP.answer} »</span></div>
+    <div className="lb-trap-row"><span className="lb-trap-k">Garde-fou</span><span>Écartée : {r.why}.</span></div>
+    <div className="lb-trap-row lb-trap-ok"><span className="lb-trap-k">Le client reçoit</span><span>{r.blocks.slice(0, 2).map(b => b.title + ' : ' + b.text).join(' ')}</span></div>
+  </div>;
+}
+
 export function Labo({ owner, setOwner, go, openRoom }) {
   const st = useQ(owner, 'labo.state');
   const [confirm, setConfirm] = useState(null);
@@ -213,6 +223,7 @@ export function Labo({ owner, setOwner, go, openRoom }) {
   const [lastInv, setLastInv] = useState(null);
   const [newName, setNewName] = useState('Espace B');
   const [filter, setFilter] = useState('all');
+  const [trapRes, setTrapRes] = useState(null);
   const cs = useCloud();
   if (st.error) return <div className="page"><div className="alert alert-bad">{st.error.message}</div></div>;
   const s = st.data;
@@ -229,6 +240,19 @@ export function Labo({ owner, setOwner, go, openRoom }) {
     if (win) await api.exec(win[0], 'appt.book', { orderId: win[1], holdId: win[2].id });
     const lose = r1.ok ? r2 : r1;
     toast((win ? win[3] + ' obtient la place. ' : '') + 'L’autre demande reçoit : « ' + (lose.ok ? 'réussite' : lose.error.message) + ' »' + (lose.error && lose.error.extra && lose.error.extra.alternatives ? ' avec ' + lose.error.extra.alternatives.length + ' alternative(s).' : ''));
+    refresh();
+  };
+  // SC-19 : la réponse piégée part comme si l'IA l'avait écrite ; le serveur la contrôle avec le vrai dossier.
+  const trap = async run => {
+    // IA coupée : le garde-fou n'a rien à contrôler, on ne journalise pas une fausse question du client.
+    const me = api.q(owner, 'me');
+    if (me.ws && me.ws.genAi === false) return toast('L’IA générative est coupée dans l’administration : rallumez-la pour tester le garde-fou.', true);
+    const o = orders.find(x => x.id === run.orderIds[0]);
+    const t = tokenFor(owner, (o && o.customerId) || 'U1');
+    const r = await api.exec(t, 'assistant.ask', { orderId: run.orderIds[0], question: 'Quand le technicien vient-il ? (test du garde-fou)', ai: TRAP });
+    if (!r.ok) return toast(r.error.message, true);
+    if (!r.data.trace.aiRejected) return toast('L’IA générative est coupée dans l’administration : rallumez-la pour tester le garde-fou.', true);
+    setTrapRes({ code: run.code, at: run.startedAt, why: r.data.trace.aiRejected, blocks: r.data.blocks });
     refresh();
   };
   const roomFor = sc => { const roles = [...new Set(sc.steps.map(x => x.role))].filter(r => !['labo', 'auto'].includes(r)); openRoom(roles.slice(0, 3)); };
@@ -321,8 +345,10 @@ export function Labo({ owner, setOwner, go, openRoom }) {
             {featured.active ? <Btn className="lb-lime" onClick={() => roomFor(featured)}>{Icon.columns}Ouvrir les rôles utiles côte à côte</Btn> : <AsyncBtn className="lb-lime" onClick={() => launch(featured)}>Lancer {featured.code}</AsyncBtn>}
             {featured.code === 'SC-17' && <Btn onClick={() => go('offres')}>{Icon.box}Ouvrir le site des offres</Btn>}
             {featured.code === 'SC-05' && featured.run && <AsyncBtn kind="sim" onClick={() => race(featured.run)}>Lancer les deux demandes simultanées</AsyncBtn>}
+            {featured.code === 'SC-19' && featured.run && <AsyncBtn kind="sim" onClick={() => trap(featured.run)}>Envoyer la réponse piégée</AsyncBtn>}
             {featured.active && <AsyncBtn onClick={() => launch(featured)}>Relancer</AsyncBtn>}
           </div>
+          {featured.code === 'SC-19' && trapRes && featured.run && trapRes.at === featured.run.startedAt && <TrapResult r={trapRes} />}
           {featured.code === 'SC-16' && <p className="small muted">Créez un autre espace dans « Mes espaces », plus bas, puis réinitialisez celui-ci : l’autre espace garde sa génération.</p>}
           <Explain title="Comment ça marche ?">« Lancer » crée un dossier fictif préparé pour le scénario. Ensuite, c’est vous qui agissez dans les bons espaces. Chaque étape se coche <b>toute seule</b> quand le serveur constate que c’est vraiment fait : le guide ne triche pas.</Explain>
         </div>

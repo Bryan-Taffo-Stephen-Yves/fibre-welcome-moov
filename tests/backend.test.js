@@ -290,7 +290,7 @@ test('R-22 / R-23 : évaluation reproductible avec la même graine', () => {
 
 test('Tous les scénarios se préparent sans erreur', async () => {
   const t = setup(99);
-  for (const code of ['SC-01', 'SC-02', 'SC-03', 'SC-04', 'SC-05', 'SC-06', 'SC-07', 'SC-08', 'SC-09', 'SC-10', 'SC-11', 'SC-12', 'SC-13', 'SC-14', 'SC-15', 'SC-16', 'SC-17', 'SC-18']) {
+  for (const code of ['SC-01', 'SC-02', 'SC-03', 'SC-04', 'SC-05', 'SC-06', 'SC-07', 'SC-08', 'SC-09', 'SC-10', 'SC-11', 'SC-12', 'SC-13', 'SC-14', 'SC-15', 'SC-16', 'SC-17', 'SC-18', 'SC-19']) {
     const r = await t.api.exec(t.token, 'demo.scenario', { code });
     assert.equal(r.ok, true, code + ' : ' + (r.error && r.error.message));
   }
