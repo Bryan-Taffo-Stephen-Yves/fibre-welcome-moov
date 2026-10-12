@@ -218,8 +218,8 @@ export const photoUserContent = ({ type, media, data }) => [
 
 // Réglages de l'appel : effort bas (réponses courtes et rapides), format JSON imposé. Ce modèle réfléchit toujours un
 // peu avant d'écrire (on ne peut pas l'en empêcher) : cette réflexion compte dans max_tokens et se paie comme la
-// réponse. Une réponse fait au plus 700 caractères (environ 250 jetons) et la réflexion reste courte à effort bas :
-// 2 000 jetons (1 500 pour une photo, avis d'une phrase) laissent de la marge sans couper les réponses.
+// réponse. Une réponse (une suite de repères) tient en une centaine de jetons et la réflexion reste courte à effort
+// bas : 2 000 jetons (1 500 pour une photo, avis d'une phrase) laissent de la marge sans couper les réponses.
 export function requestFor(kind, value) {
   const photo = kind === 'photo';
   return {
