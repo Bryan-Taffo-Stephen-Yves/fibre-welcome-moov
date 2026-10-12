@@ -2,12 +2,11 @@
 // Le serveur simulé ne parle jamais à Internet. Le navigateur lit le contexte du dossier (assistant.context), l'envoie
 // à la fonction « fw-ia » (Supabase) qui appelle Claude avec la clé gardée côté serveur, puis rapporte la réponse
 // (assistant.ask, champ ai). Avant de la montrer, on la vérifie ici avec l'état réel du dossier :
-// - chaque source citée existe, et au moins une est citée quand l'IA répond ;
-// - chaque nombre, date, jour, heure, durée, montant ou référence existe, avec le même rôle, dans une source citée
-//   (le « 12 » de « 8 h – 12 h » n'autorise pas un « 12 septembre ») ; un délai tiré de l'estimation est dit estimé ;
-// - aucune date pour l'activation, le paiement ou le remboursement : aucune source ne les date ;
-// - pas de promesse de délai, pas de paiement ni d'activation présentés comme confirmés si le dossier ne le dit pas ;
-// - jamais de montant ni de délai de remboursement, de lien, ni de demande de code.
+// - Claude n'écrit pas les faits, il les insère (« {F3} ») : les dates, heures, montants, états et procédures montrés
+//   au client sont toujours le texte exact du dossier ;
+// - ses propres phrases (pour introduire et relier) ne contiennent ni nombre, ni date, ni délai, ni montant, ni état,
+//   ni promesse, ni lien, ni demande de code ;
+// - chaque source citée existe, et au moins une est citée quand l'IA répond.
 // Sinon, le client voit la réponse par règles et le journal garde le motif. Le contexte ne contient ni nom,
 // ni téléphone, ni adresse : l'IA n'en a pas besoin.
 import { STATE_INFO, BLOCKER_TYPES, APPT_STATES, PAYMENT_STATES, SLOTS, hourLabel, PHOTO_ISSUES } from './model.js';
@@ -92,200 +91,100 @@ export function aiContext(ws, order, { delegate = false } = {}) {
   if (!order.cancelled) {
     const e = estimate(ws, order);
     if (e.abstain) add('E1', 'abstain', 'Estimation', e.reason);
-    else if (!e.done) add('E1', 'estimate', 'Estimation (ce n’est pas un engagement)', 'Délai restant probable : ' + fmtRange(e.loH, e.hiH) + ', fiabilité ' + e.reliability + '. Calculé par le modèle ' + e.modelVersion + ', entraîné sur des données synthétiques.' + (e.risk ? ' ' + e.risk : ''), { source: 'Modèle ' + e.modelVersion });
+    else if (!e.done) add('E1', 'estimate', 'Estimation (ce n’est pas un engagement)', 'Il reste probablement ' + fmtRange(e.loH, e.hiH) + ' (fiabilité ' + e.reliability + '). Calcul du modèle ' + e.modelVersion + ', entraîné sur des données synthétiques.' + (e.risk ? ' ' + e.risk : ''), { source: 'Modèle ' + e.modelVersion });
   }
   for (const d of ws.docs) if (d.scope === 'public' && PROCEDURE_TEXT[d.id] && !(d.expires < now)) add(d.id, 'doc', 'Procédure « ' + d.title + ' »', PROCEDURE_TEXT[d.id], { doc: { id: d.id, title: d.title, version: d.version } });
   if (stale) add('W1', 'warn', 'Attention', 'Le lien avec Moov Prospect est interrompu : le statut affiché peut être ancien.');
+  // Mise en garde que Claude peut insérer (il n'écrit jamais lui-même le mot « code »).
+  add('S1', 'warn', 'Sécurité', 'Moov ne vous demande jamais votre code secret Moov Money, ni un code reçu par SMS : ne le donnez à personne.');
   return { ref: order.ref, items, cancelled: !!order.cancelled, payConfirmed: pay.status === 'confirme', active };
 }
 // Ce qui part vers la fonction (et donc vers Claude) : identifiant, nature, titre et texte. Rien d'autre.
 export const aiPayloadItems = ctx => ctx.items.map(({ id, kind, title, text }) => ({ id, kind, title, text }));
 
 // ---------- Garde-fou ----------
+// Claude ne réécrit pas les faits : il les insère. « {F3} » dans sa réponse est remplacé par le texte exact de l'élément
+// F3, et une phrase recopiée mot pour mot d'un élément compte aussi comme insérée. Ce qui reste, ses propres phrases,
+// sert seulement à introduire, relier et dire quoi faire dans l'application : on y refuse tout ce qui ressemble à un
+// fait (nombre, date, heure, délai, montant, état, étape, promesse, lien, contact, code). Les dates, heures, montants et
+// états montrés au client viennent donc toujours tels quels du dossier.
 const TOPIC_INTENT = { statut: 'status', attente: 'why', preparation: 'prepare', rendez_vous: 'appt', delai: 'when', paiement: 'payment', activation: 'activation', annulation: 'refund', conseiller: 'human', hors_sujet: null, autre: null };
 const ACTIONS = { aucune: null, preparer: { go: 'prep' }, rendez_vous: { go: 'rdv' }, conseiller: { handoff: true } };
-const norm = s => String(s == null ? '' : s).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[’‘`´]/g, "'").replace(/[   ]/g, ' ');
-// Même écriture pour toutes les heures et tous les nombres : « 1.5 » devient « 1,5 », « 10:00 » et « 8h30 » deviennent
-// « 10 h 00 » et « 8 h 30 », « midi » devient « 12 h ».
-const prep = t => norm(t).replace(/(\d)\.(\d{1,2})(?!\d)/g, '$1,$2').replace(/\b(\d{1,2}):(\d{2})\b/g, '$1 h $2').replace(/(\d)\s*h\s*(\d{2})\b/g, '$1 h $2')
-  .replace(/(?<!apres[- ])\bmidi\b/g, '12 h').replace(/\bminuit\b/g, '0 h');
-const MONTHS = { janvier: 1, janv: 1, fevrier: 2, fevr: 2, fev: 2, mars: 3, avril: 4, avr: 4, mai: 5, juin: 6, juillet: 7, juil: 7, aout: 8, septembre: 9, sept: 9, octobre: 10, oct: 10, novembre: 11, nov: 11, decembre: 12, dec: 12 };
-const DAYS = { lundi: 1, lun: 1, mardi: 2, mar: 2, mercredi: 3, mer: 3, jeudi: 4, jeu: 4, vendredi: 5, ven: 5, samedi: 6, sam: 6, dimanche: 7, dim: 7 };
-const MW = Object.keys(MONTHS).join('|');
-const DW = '\\b(lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche)\\b|\\b(lun|mar|mer|jeu|ven|sam|dim)\\.';
-const UNITS = { h: 'h', heure: 'h', heures: 'h', j: 'j', jour: 'j', jours: 'j', sem: 'sem', semaine: 'sem', semaines: 'sem', mois: 'mois', min: 'min', minute: 'min', minutes: 'min', an: 'an', ans: 'an' };
-// Une quantité : nombre, unité, et minutes seulement après une heure (« 9 h 30 »).
-const QU = '(?:(heures?|h)\\b(?: (\\d{2})\\b)?|(jours?|j|semaines?|sem|mois|minutes?|min|ans?)\\b)';
-const RANGE_RE = new RegExp("(?:\\b(?:entre|de|du)\\s+)?(\\d+(?:,\\d+)?)(?:\\s*" + QU + ")?\\s*(?:-|–|—|\\ba\\b|\\bau\\b|\\bet\\b|jusqu'a)\\s*(\\d+(?:,\\d+)?)\\s*" + QU, 'g');
-const SINGLE_RE = new RegExp('(\\d+(?:,\\d+)?)\\s*' + QU, 'g');
-const val = x => String(Number(String(x).replace(/[ .]/g, '').replace(',', '.')));
-const qty = (v, hu, mm, ou) => (hu ? val(v) + (mm && mm !== '00' ? ':' + mm : '') + 'h' : val(v) + (ou ? UNITS[ou] : ''));
-const START = /\b(entre|de|des|a partir de|apres|pas avant)\s*$/, END = /\b(et|jusqu'a|avant|au plus tard a)\s*$/;
-const DURATION = /\b(dans|sous|encore|reste\w*|restant|delai|duree|pendant|environ|d'ici|en)\s+(?:(?:de|d'|les|la|un|une|au moins|moins de|plus de)\s+)?$/;
-
-// Les faits chiffrés ou datés d'un texte, chacun avec son rôle : référence, montant, date, heure ou durée, fourchette,
-// jour de la semaine, mois, nombre seul. Un nombre lu dans un rôle ne peut pas resservir dans un autre : le « 12 » de
-// « 12 h » n'autorise pas un « 12 septembre ».
-function facts(text) {
-  let s = prep(text);
-  const src = s, toks = [];
-  const take = (re, fn) => {
-    s = s.replace(re, (...m) => {
-      const i = m[m.length - 2], t = fn(m, i);
-      if (!t) return m[0];
-      toks.push({ ...t, i, txt: m[0].trim() });
-      return '#'.repeat(m[0].length);
-    });
-  };
-  take(/\bfw-\d{4}-\d+\b/g, m => ({ t: 'fw', k: m[0] }));
-  take(/\b[a-z]{1,5}-\d{3,}\b/g, m => ({ t: 'ref', k: m[0] }));
-  take(/(\d{1,3}(?:[ .]\d{3})+|\d+)\s*(f ?cfa|fcfa|cfa|xof|francs?|f)\b/g, m => ({ t: 'money', k: val(m[1]) }));
-  take(new RegExp('\\b(\\d{1,2})(?:er)?\\s+(' + MW + ')\\b\\.?(?:\\s+(\\d{4})\\b)?', 'g'), m => ({ t: 'date', k: val(m[1]) + '/' + MONTHS[m[2]], year: m[3] }));
-  take(/\b(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\b/g, m => ({ t: 'date', k: val(m[1]) + '/' + val(m[2]), year: m[3] }));
-  take(RANGE_RE, (m, i) => {
-    const b = qty(m[5], m[6], m[7], m[8]), a = qty(m[1], m[2], m[3], m[4] || (!m[2] ? m[8] : '')) + (!m[2] && !m[4] && m[6] ? 'h' : '');
-    return { t: 'range', k: a + '-' + b, ends: [a, b], h: !!(m[2] || m[6]), dur: DURATION.test(src.slice(Math.max(0, i - 30), i)) || !!m[8] };
-  });
-  take(SINGLE_RE, (m, i) => {
-    const before = src.slice(Math.max(0, i - 30), i);
-    return { t: 'q', k: qty(m[1], m[2], m[3], m[4]), h: !!m[2], dur: !!m[4] || DURATION.test(before), lim: START.test(before) ? 0 : END.test(before) ? 1 : null };
-  });
-  take(new RegExp("\\b(?:le|du|au|jusqu'au|ce|des le|avant le|apres le|" + Object.keys(DAYS).filter(d => d.length > 3).join('|') + '|(?:lun|mar|mer|jeu|ven|sam|dim)\\.)\\s+(\\d{1,2})(?:er)?\\b', 'g'), m => ({ t: 'day', k: val(m[1]) }));
-  for (const m of s.matchAll(new RegExp(DW, 'g'))) toks.push({ t: 'wd', k: String(DAYS[m[1] || m[2]]), i: m.index, txt: m[0] });
-  take(new RegExp('\\b(' + MW + ')\\b', 'g'), m => ({ t: 'month', k: String(MONTHS[m[1]]) }));
-  take(/\d{1,3}(?:[ .]\d{3})+(?!\d)|\d+(?:,\d+)?/g, m => ({ t: 'n', k: val(m[0]) }));
-  for (const t of toks) if (t.t === 'date' && t.year) toks.push({ t: 'year', k: val(t.year), i: t.i, txt: t.year });
-  return { s: src, toks };
-}
-
-// Coupe un texte en phrases (les points des abréviations « mar. » ou « sept. » ne comptent pas), ou en morceaux de
-// phrase (virgule, deux-points, parenthèse, « puis »).
-const ABBR = /(?:^|[^a-z])(lun|mar|mer|jeu|ven|sam|dim|janv|fevr|fev|avr|juil|sept|oct|nov|dec|env|etc|m|mme|ref|n)$/;
-function cuts(s, parts) {
-  const out = [];
-  let a = 0;
-  for (let i = 0; i <= s.length; i++) {
-    const c = s[i];
-    let cut = i === s.length || c === '!' || c === '?' || c === ';' || (c === '.' && !/\d/.test(s[i + 1] || '') && !ABBR.test(s.slice(a, i)));
-    if (parts && !cut) cut = (c === ',' && !(/\d/.test(s[i - 1] || '') && /\d/.test(s[i + 1] || ''))) || c === ':' || c === '(' || c === ')' || s.startsWith(' puis ', i);
-    if (cut) { out.push([a, i]); a = i + 1; }
-  }
-  return out;
-}
-const spanAt = (spans, i) => spans.find(([a, b]) => i >= a && i <= b) || [i, i];
-
-const SOON = /\b(aujourd'hui|demain|apres-demain|hier|ce soir|ce matin|cet apres-midi|cette nuit|cette semaine|semaine prochaine|mois prochain|ce week-?end|d'ici|sous peu|bientot|rapidement|tres vite|au plus vite|brefs delais|incessamment|prochainement|(dans |au cours )?(les|des) prochain(e)?s|dans la (journee|matinee|soiree|semaine)|dans l'heure|en fin de (journee|semaine|mois)|fin de (semaine|mois)|tout de suite|immediatement|sans tarder|sans delai|d'un jour a l'autre|le (meme|jour) (jour|meme)|dans la foulee|aussitot|a court terme)\b/;
-const QTY = /\b(un|une|deux|trois|quatre|cinq|six|sept|huit|neuf|dix|onze|douze|quinze|vingt|trente|quarante|cinquante|soixante|cent|mille|quelques|plusieurs)\s+(?:[a-z'-]+\s+)?(minutes?|heures?|jours?|semaines?|mois|ans?|francs?|fcfa|xof)\b/;
-const PROMISE = /\b(je (vous )?(le |la )?(garantis|promets)|c'est (garanti|promis|certain|sur et certain)|c'est sur(?= *[.!,;]|$)|(est|sont) garantie?s?|sans faute|a coup sur|100 ?%|je vous (l'|le )?assure|soyez (assuree?s?|certaine?s?|sure?s?)|sans aucun doute|(s'engage|nous engageons|m'engage)\b|assurement)/;
-// Une date ou une heure ne peut pas être attachée à l'activation, à la confirmation du paiement ou au remboursement :
-// aucune source ne les date. Elle peut l'être à la visite (« le technicien viendra le mar. 29 sept. »).
-const EVENT = /\b(activ\w*|actif|operationnel\w*|en service|connecte\w*|fonctionnera|marchera|rembours\w*|rapproch\w*)\b|\bpaiement\b[^.!?;,]{0,25}\b(sera|seront|va etre)\b/;
-const VISIT = /\b(technicien\w*|visite|rendez-vous|rdv|creneau|passage|passera|viendra|vient|venir|intervention|installateur)\b/;
-const REFUND = /\b(rembours\w*|restitu\w*|recuper\w*|integralement|integralite|totalite)\b|\bvous (rendr(a|ont|ait|aient)|sera rendue?s?|seront rendue?s?)\b/;
-const AMOUNTISH = /\b(integral\w*|totalite|tout votre argent|toute la somme|votre argent|la somme (payee|versee|reglee)|le montant (paye|verse|regle|total))\b/;
-const HEDGE = /\b(estim\w*|probabl\w*|environ|en principe|pas (un |d'|une )?(engagement|promesse|garantie)|sans garantie|indicati\w*|prevision\w*|devrai(t|ent)|pourrai(t|ent)|a titre)\b/;
-// Paiement confirmé ou ligne active, dans les tournures courantes (« Moov a bien reçu votre paiement » aussi).
-const PAY_CLAIM = [
-  /\b(paiement|reglement|versement|argent)\b[^.!?;]{0,40}?\b(est|a ete|a bien ete|etait)\s+(bien\s+|deja\s+|maintenant\s+|desormais\s+)?(confirme|valide|recu|rapproche|enregistre|accepte|verifie|passe|arrive|en ordre|pris en compte)\b/g,
-  /\b(tout est|c'est) (bon|en ordre|regle|ok)\b[^.!?;]{0,30}?\bpaiement\b|\bpaiement\b[^.!?;]{0,30}?\b(tout est|c'est) (bon|en ordre|regle|ok)\b/g,
-  /\b(a|ont|avons)\s+(bien\s+|deja\s+)?(recu|confirme|valide|rapproche|enregistre|accepte|verifie)\b[^.!?;]{0,30}?\b(paiement|reglement|versement|argent|somme)\b/g,
-  /\bvous avez (bien |deja )?(paye|regle|verse)\b/g,
-  /\b(paiement|reglement)\s+(bien\s+)?(confirme|valide|recu|accepte|rapproche)\b/g,
-];
-const ACTIVE_CLAIM = [
-  /\b(fibre|ligne|internet|connexion|service|abonnement|acces)\b[^.!?;]{0,40}?\b(est|a ete|a bien ete|sont|ont ete)\s+(bien\s+|deja\s+|maintenant\s+|desormais\s+)?(active|activee|actif|actives|activees|operationnel\w*|en service|ouverte?|fonctionnel\w*|disponible|prete?|en marche|en ligne)\b/g,
-  /\b(a|ont|avons)\s+(bien\s+|deja\s+)?(active|ouvert|mis en service)\b[^.!?;]{0,30}?\b(fibre|ligne|internet|connexion|service|abonnement|acces)\b/g,
-  /\bvous etes (bien |deja |maintenant |desormais )?connecte/g,
-  /\b(internet|fibre|connexion|ligne)\b[^.!?;]{0,20}?\b(fonctionne|marche)\b/g,
-];
-// Ce n'est pas une affirmation quand c'est nié (« n'est pas encore active ») ou soumis à une condition (« une fois que
-// votre paiement est confirmé », « il est confirmé seulement quand… », « Après l'installation, la ligne est activée… »).
-const NEG = /\bne\b|\bn'|\bpas\b|\bjamais\b|\baucune?\b/;
-const COND = /\b(une fois|des que|quand|lorsque|si|s'il|apres que|avant que|tant que|jusqu'a ce que|pour que|afin que)\b/;
-const STEP = /\b(activ\w*|install\w*|visite|paiement|rapproch\w*|confirm\w*|valid\w*|passage)\b/;
-const AFTER_STEP = /\bapres (l'|la |le |votre )?(installation|visite|passage|intervention|activation)\b/;
-const COND_AFTER = /^[^.!?;,]{0,15}?\b(seulement|uniquement|qu'apres|que lorsque|que quand|que si|qu'une fois|quand|lorsque|une fois|des que|apres)\b/;
-function claimed(s, res) {
-  const sents = cuts(s, false), parts = cuts(s, true);
-  for (const re of res) for (const m of s.matchAll(re)) {
-    const [p] = spanAt(parts, m.index), [st] = spanAt(sents, m.index);
-    const before = s.slice(p, m.index);
-    if (NEG.test(before.slice(-25) + ' ' + m[0]) || COND.test(before) || AFTER_STEP.test(s.slice(Math.max(st, p - 45), m.index))) continue;
-    const lead = s.slice(st, p);
-    if (lead && COND.test(lead.slice(0, 12)) && STEP.test(lead)) continue;
-    if (/\best\b/.test(m[0]) && !/\ba (bien )?ete\b/.test(m[0]) && COND_AFTER.test(s.slice(m.index + m[0].length))) continue;
-    return true;
-  }
-  return false;
-}
-const LINK = /(https?:\/\/|www\.|\b[\w.-]+@[\w-]+\.[a-z]{2,})/;
-const SECRET_WORD = /\b(mot de passe|cvv|cryptogramme|numero de (carte|compte)|code (secret|pin|confidentiel|otp|moov money|recu|sms|de validation|de confirmation|d'acces)|code que vous avez recu)\b/;
-const SECRET_ASK = /\b(donnez|envoyez|communiquez|indiquez|transmettez|saisissez|entrez|tapez|dictez|fournissez|partagez|precisez|confirmez|ecrivez|redonnez)(-moi|-nous| moi| nous)?\b[^.!?;]{0,40}?\b(code|mot de passe|pin|numero de carte|cvv)\b/g;
+// Écriture commune : minuscules, sans accents ni caractères invisibles, mêmes apostrophes, tirets et espaces partout
+// (NFKD ramène aussi les chiffres et lettres « décoratifs » à leur forme simple).
+const norm = s => String(s == null ? '' : s).normalize('NFKD').toLowerCase().replace(/[̀-ͯ]/g, '').replace(/[­​-‍⁠﻿]/g, '')
+  .replace(/[’‘`´ʼ′]/g, "'").replace(/[‐-―−]/g, '-').replace(/\s+/g, ' ').trim();
 const clean = s => String(s == null ? '' : s).replace(/\s+/g, ' ').trim();
-const dateLike = t => ['date', 'day', 'wd', 'month', 'year'].includes(t.t) || ((t.t === 'q' || t.t === 'range') && t.h && !t.dur);
-const shown = t => t.txt.replace(/#/g, '').trim();
+const MARK = /\{\s*([A-Za-z][A-Za-z0-9-]{0,11})\s*\}/g;
+// Renvoi entre parenthèses (« (F3) », « [source : PR-04] ») : une simple citation, retirée du texte.
+const NOTE = /\s*[([]\s*(?:sources?|voir|cf\.?)?\s*:?\s*([A-Z][A-Z0-9-]{0,11}(?:\s*(?:,|;|et)\s*[A-Z][A-Z0-9-]{0,11})*)\s*[)\]]/gi;
+// Ce que l'élément inséré affiche : son texte, précédé d'un mot quand il n'est pas un fait.
+const sayOf = i => (i.kind === 'estimate' ? 'Estimation (ce n’est pas un engagement) : ' + i.text.charAt(0).toLowerCase() + i.text.slice(1) : i.text);
+const sentencesOf = i => i.text.split(/(?<=[.!?])\s+/).map(s => norm(s).replace(/[.!?]+$/, '')).filter(s => s.length >= 12);
+
+// Tournures permises malgré un mot surveillé : dire qu'on ne peut pas confirmer, que ce n'est pas un engagement, etc.
+const ALLOWED = [
+  /\b(?:ne |n')(?:peux|peut|pouvons|pourrai|pourrons|sais|savons) pas (?:vous )?(?:confirmer|garantir|promettre|annoncer|dire|donner|indiquer|preciser|predire)\b/g,
+  /\b(?:pas|sans) (?:un |une |d'|de )?(?:engagement|promesse|garantie)s?\b/g,
+  /\bcartes? (?:nationales? )?d'identite\b/g,
+  /\bla marche a suivre\b/g,
+  /\bce qu'il faut (?:savoir|retenir)\b/g,
+];
+// Ce que les phrases de Claude ne peuvent pas contenir. [motif, règle] : le premier trouvé est gardé dans le journal.
+const OWN = [
+  ['nombre, date ou heure écrits par l’IA', /\p{N}[\p{N} .,:h/-]*/u],
+  ['écriture inattendue', /[^\p{Script=Latin}\P{L}]/u],
+  ['symbole inattendu', /[*#@<>{}|\\^~$€£%]/],
+  ['lien ou contact', /:\/\/|\bwww\b|\barobase\b|\(at\)|\b[a-z0-9-]+ ?(?:\.|\bpoint\b) ?(?:ci|com|net|org|fr|me|ly|io|app|info|biz|africa|gl|co|tv)\b|\b(?:site|sites|lien|liens|url|web|e-?mail|mail|courriel|whatsapp|facebook|telegram|instagram|tiktok|sms|ussd|appel\w*|rappel\w*|telephon\w*|numeros?|compos\w*|joign\w*)\b/],
+  ['code ou donnée secrète', /\b(?:codes?|pin|otp|mots? de passe|mdp|identifiants?|cartes?|cvv|cryptogramme|confidentiel\w*|secret\w*|chiffres?|expiration)\b/],
+  ['nombre écrit par l’IA', /\b(?:deux|trois|quatre|cinq|six|sept|huit|neuf|dix|onze|douze|treize|quatorze|quinze|seize|vingts?|trente|quarante|cinquante|soixante|septante|octante|nonante|cents?|mille|millions?|milliards?|premiere?s?|seconde?s?|\w+iemes?|demie?s?|quarts?|moitie|dizaines?|douzaines?|quinzaines?|huitaines?|vingtaines?|trentaines?|centaines?|milliers?)\b/],
+  ['date, heure ou délai écrits par l’IA', /\b(?:lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche|janvier|fevrier|mars|avril|mai|juin|juillet|aout|septembre|octobre|novembre|decembre|aujourd'hui|demain|hier|apres-demain|avant-hier|lendemain|surlendemain|veille|matin|matins|matinee|matinees|midi|apres-midi|soir|soirs|soiree|soirees|nuit|nuits|minuit|aube|heures?|minutes?|jours?|journees?|semaines?|week-?ends?|week end|mois|ans|annees?|trimestres?|bientot|prochaine?s?|prochainement|recemment|rapidement|vite|tot|tard|immediat\w*|aussitot|sous peu|d'ici|tout de suite|dans un instant|incessamment|sans tarder|sans delai|d'un moment a l'autre|noel|toussaint|paques|tabaski|ramadan|fetes|nouvel an)\b|\b(?:lun|mar|mer|jeu|ven|sam|dim|janv|fev|fevr|avr|juil|sept|oct|nov|dec)\./],
+  ['montant ou paiement écrits par l’IA', /\b(?:francs?|f ?cfa|cfa|xof|euros?|dollars?|montants?|somme|(?:les|des|vos|ces) sommes|prix|tarifs?|frais|couts?|coute\w*|gratuit\w*|rembours\w*|payant\w*|pay(?:e|ee|es|ees|er|ez|ons|ent|era|eras|erez|eront|erai|ait|aient)|regl(?:e|ee|es|ees|er|ez|ement|ements)|vers(?:e|ee|es|ees|er|ez|ement|ements)|credit\w*|debit\w*|encaiss\w*|argent|acomptes?|cautions?|solde\w*|recharg\w*|transfer\w*|virements?|supplements?)\b/],
+  ['état du dossier écrit par l’IA', /\b(?:confirm\w*|recue?s?|reception\w*|valid\w*|approuv\w*|accept\w*|rapproch\w*|verifiee?s?|verification technique|actif|actifs|actives?|activ\w*|operationnel\w*|fonctionn\w*|march(?:e|era|ent|eront|ait|aient)|raccordee?s?|branchee?s?|installee?s?|connecte\w*|en service|en route|en chemin|sur place|en cours|en attente|arriv\w*|parti|termin(?:e|ee|es|ees|er|era|ent)|finie?s?|achev\w*|clotur\w*|resolu\w*|levee?s?|debloqu\w*|bloqu\w*|manqu\w*|complete?s?|incomplet\w*|affect\w*|assign\w*|planifi\w*|reservee?s?|annulee?s?|prete?s?|disponibles?|etapes?|stade|echou\w*|echec|incidents?|suspendu\w*|pannes?|ok|en ordre|tout est bon|c'est bon|(?:aucun|pas de) (?:souci|probleme)s?|plus rien|rien a (?:faire|payer|craindre)|surf\w*|navigu\w*|profit\w*|allum\w*|tourn(?:e|ent)|demarr\w*|deja|desormais|internet|wi-?fi|box|modem|routeur|abonnement\w*|attribu\w*|en priorite|meilleurs delais|(?:est|sont|se trouvent?) (?:deja )?chez vous)\b/],
+  ['exigence écrite par l’IA', /\b(?:doi(?:t|vent)|devez|devons|faut|besoin|necessaire\w*|obligatoire\w*|requis\w*|exige\w*|il (?:vous )?reste|reste a)\b/],
+  ['annonce de ce qui va se passer', /\b(?:\w+(?:era|eront|erai|erons|iront|dra|dront|drez|vra|vront|vrez|ura|uront|urez)|serez|ferez|irez|(?:va|vont|allez|allons) (?:vous |le |la |les |lui |leur |y |en |bien |tres )*\w+(?:er|ir|re|oir))\b/],
+  ['promesse', /\b(?:garanti\w*|promet\w*|promis\w*|promesses?|certainement|certitude|surement|assur(?:e|ee|es|ees|ement|ance|ances|ons)|je vous l'assure|engag\w*|sans faute|sans (?:aucun )?doute|aucun doute|absolument|definitivement|forcement|a coup sur|(?:c'est|soyez|suis|sommes|etes|soit|en suis) (?:sure?s?|certaine?s?)|compter sur|je (?:vais|m'occupe|m'en occupe|transmets|relance|contacte|previens|programme|reserve|annule|modifie|valide|confirme)|nous (?:allons|nous occupons|transmettons)|j'ai (?:fait|envoye|transmis|demande|signale|note|enregistre|programme|planifie|reserve|annule|modifie|relance|contacte|prevenu|valide|confirme|verifie)|(?:va|vont) (?:vous )?(?:appeler|rappeler|contacter|venir|passer|arriver|installer|activer|rembourser|envoyer|livrer|valider|confirmer|traiter|regler)|(?:viendr|passer|arriver|installer|activer|rembourser|enverr|livrer|recevr|rappeller|appeller|contacter|traiter|valider|confirmer|regler)(?:a|ont|ez|ai|ons))\b/],
+];
 
 export function checkAiAnswer(ctx, ai) {
   if (!ai || typeof ai !== 'object') return { ok: false, why: 'réponse illisible' };
   const answer = clean(ai.answer);
-  if (answer.length < 2 || answer.length > 700) return { ok: false, why: 'réponse vide ou trop longue' };
+  if (answer.length < 2 || answer.length > 1200) return { ok: false, why: 'réponse vide ou trop longue' };
   if (typeof ai.can_answer !== 'boolean' || !Object.hasOwn(ACTIONS, ai.action) || !Object.hasOwn(TOPIC_INTENT, ai.topic) || !Array.isArray(ai.cites)) return { ok: false, why: 'réponse illisible' };
   const ids = new Map(ctx.items.map(i => [i.id, i]));
-  const cites = [...new Set(ai.cites.map(String))].slice(0, 12);
-  const unknown = cites.find(c => !ids.has(c));
-  if (unknown) return { ok: false, why: 'source inconnue (' + unknown.slice(0, 12) + ')' };
-  if (ai.can_answer && !cites.length) return { ok: false, why: 'aucune source citée' };
   const bad = why => ({ ok: false, why });
-  const cited = cites.map(c => ids.get(c));
-  const allowed = norm(cited.map(i => i.title + ' ' + i.text).join(' '));
-  const known = cited.flatMap(i => facts(i.title + ' : ' + i.text).toks.map(t => ({ ...t, kind: i.kind })));
-  const refNums = facts(ctx.ref).toks;
-  const { s: a, toks } = facts(answer);
-
-  // 1. Chaque fait chiffré ou daté de la réponse existe, avec le même rôle, dans une source citée.
-  let onlyEstimate = false;
-  for (const t of toks) {
-    if (t.t === 'fw') { if (t.k !== norm(ctx.ref)) return bad('autre dossier'); continue; }
-    const kinds = new Set(), from = pred => known.forEach(c => pred(c) && kinds.add(c.kind));
-    if (t.t === 'day') from(c => (c.t === 'day' && c.k === t.k) || (c.t === 'date' && c.k.split('/')[0] === t.k));
-    else if (t.t === 'month') from(c => (c.t === 'month' && c.k === t.k) || (c.t === 'date' && c.k.split('/')[1] === t.k));
-    else if (t.t === 'q') {
-      from(c => c.t === 'q' && c.k === t.k);
-      // « entre 8 h et midi », « à partir de 8 h » : une borne de la fourchette citée, du bon côté.
-      if (!kinds.size && t.lim != null) from(c => c.t === 'range' && c.ends[t.lim] === t.k);
-    } else if (t.t === 'n') from(c => (c.t === 'n' || c.t === 'money') && c.k === t.k);
-    else from(c => c.t === t.t && c.k === t.k);
-    if (!kinds.size && t.t === 'n' && refNums.some(r => r.k.split('-').includes(t.k))) kinds.add('fact');
-    if (!kinds.size) {
-      const what = { money: 'montant', date: 'date', day: 'date', wd: 'jour', month: 'mois', year: 'année', q: t.h ? 'heure ou durée' : 'durée', range: 'fourchette', ref: 'référence', n: 'nombre' }[t.t];
-      return bad(what + ' absent' + (['date', 'day', 'heure ou durée', 'durée', 'fourchette', 'référence', 'année'].includes(what) ? 'e' : '') + ' des sources (' + shown(t) + ')');
-    }
-    if ([...kinds].every(k => k === 'estimate') && t.t !== 'n') onlyEstimate = true;
+  const cites = [...new Set(ai.cites.map(c => String(c).toUpperCase()))].slice(0, 12);
+  const unknown = cites.find(c => !ids.has(c));
+  if (unknown) return bad('source inconnue (' + unknown.slice(0, 12) + ')');
+  const use = id => { if (!cites.includes(id)) cites.push(id); };
+  // 1. Éléments insérés : « {F3} » devient le texte exact de F3 ; les renvois « (F3) » sont de simples citations.
+  let n = 0, unk = null;
+  const text = answer.replace(NOTE, (m, list) => { const l = list.toUpperCase().split(/\s*(?:,|;|ET)\s*/); if (!l.every(x => ids.has(x))) return m; l.forEach(use); return ''; });
+  const parts = [];
+  let own = '', last = 0;
+  for (const m of text.matchAll(MARK)) {
+    const id = m[1].toUpperCase();
+    if (!ids.has(id)) { unk = unk || m[1]; continue; }
+    parts.push(text.slice(last, m.index), sayOf(ids.get(id)));
+    own += text.slice(last, m.index) + ' / ';
+    last = m.index + m[0].length; n++; use(id);
   }
-  // 2. Un délai tiré de l'estimation reste une estimation : la réponse doit le dire.
-  if (onlyEstimate && !HEDGE.test(a)) return bad('estimation présentée comme un engagement');
-  const sents = cuts(a, false), parts = cuts(a, true);
-  const inSent = ([x, y]) => toks.filter(t => t.i >= x && t.i <= y);
-  for (const [x, y] of sents) {
-    const sent = a.slice(x, y);
-    // 3. Pas de date pour l'activation, le paiement ou le remboursement.
-    if (EVENT.test(sent)) for (const t of inSent([x, y]).filter(dateLike)) {
-      const [p, q] = spanAt(parts, t.i), part = a.slice(p, q);
-      if (EVENT.test(part) || !VISIT.test(part)) return bad('date ou heure non prévue par le dossier (' + shown(t) + ')');
-    }
-    // 4. Jamais de montant ni de délai de remboursement.
-    if (REFUND.test(sent) && (AMOUNTISH.test(sent) || inSent([x, y]).some(t => ['money', 'n', 'q', 'range'].includes(t.t)))) return bad('montant ou délai de remboursement');
+  if (unk) return bad('source inconnue (' + unk.slice(0, 12) + ')');
+  parts.push(text.slice(last)); own += text.slice(last);
+  if (n > 4) return bad('trop d’éléments insérés');
+  // 2. Une phrase recopiée mot pour mot d'un élément vaut une insertion.
+  let o = norm(own);
+  for (const i of ctx.items) for (const s of sentencesOf(i)) {
+    const re = new RegExp('(^|[.!?:/] ?)' + s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ' ?(?=[.!?/]|$)', 'g');
+    if (re.test(o)) { o = o.replace(re, '$1 / '); use(i.id); }
   }
-  const soon = SOON.exec(a); if (soon && !allowed.includes(soon[0])) return bad('promesse de délai');
-  const qtyW = QTY.exec(a); if (qtyW && !allowed.includes(qtyW[0])) return bad('durée absente des sources');
-  if (PROMISE.test(a)) return bad('promesse');
-  if (claimed(a, PAY_CLAIM) && !(ctx.payConfirmed && cites.includes('F4'))) return bad('paiement présenté comme confirmé');
-  // Une ligne active se lit dans l'activation (F7) ou dans l'étape du dossier (F1 dit alors « Votre fibre est active »).
-  if (claimed(a, ACTIVE_CLAIM) && !(ctx.active && (cites.includes('F7') || cites.includes('F1')))) return bad('activation présentée comme faite');
-  if (LINK.test(a)) return bad('lien ou adresse');
-  for (const m of a.matchAll(SECRET_ASK)) if (!/\b(ne|n')\s*$|\bn'$/.test(a.slice(Math.max(0, m.index - 4), m.index)) && !/\bjamais\b/.test(m[0])) return bad('demande de code');
-  for (const [x, y] of sents) { const sent = a.slice(x, y); if (SECRET_WORD.test(sent) && !/\bjamais\b|\bne\b[^.!?;]*\bpas\b|\bn'[^.!?;]*\bpas\b/.test(sent)) return bad('demande de code'); }
-  return { ok: true, value: { answer, cites, action: ai.action, canAnswer: ai.can_answer, topic: ai.topic } };
+  if (ai.can_answer && !cites.length) return bad('aucune source citée');
+  if (o.replace(/[\s/.,;:!?«»"'()-]/g, '').length > 400) return bad('réponse trop longue');
+  // 3. Les phrases de Claude : aucun fait, aucune promesse, aucun lien, aucun code.
+  for (const r of ALLOWED) o = o.replace(r, ' ');
+  for (const [why, re] of OWN) { const m = re.exec(o); if (m) return bad(why + ' (' + m[0].replace(/[\s.,:/-]+$/, '').trim().slice(0, 30) + ')'); }
+  const shown = clean(parts.join(' '));
+  return { ok: true, value: { answer: shown, cites, action: ai.action, canAnswer: ai.can_answer, topic: ai.topic } };
 }
 
 export const aiModelName = m => (typeof m === 'string' && /^claude-[a-z0-9-]{1,40}$/.test(m) ? m : AI_MODEL);
