@@ -42,7 +42,7 @@ export function corsHeaders(origin) {
 
 // Caractères de contrôle, de format (invisibles, sens d'écriture) et moitiés de caractère retirés : JSON.stringify les
 // écrirait en \u0001, six fois plus long. Le retour à la ligne reste ; tabulation et autres sauts deviennent une espace.
-const clean = s => s.replace(/[\t\v\f\r\u0085\u2028\u2029]/g, ' ').replace(/(?!\n)[\p{Cc}\p{Cf}\p{Cs}]/gu, '');
+const clean = s => s.replace(/[\t\v\f\r\u0085\p{Zl}\p{Zp}]/gu, ' ').replace(/(?!\n)[\p{Cc}\p{Cf}\p{Cs}]/gu, '');
 const str = (x, n) => (typeof x === 'string' ? clean(x.slice(0, n)) : '');
 
 // ---------- Assistant du client ----------
