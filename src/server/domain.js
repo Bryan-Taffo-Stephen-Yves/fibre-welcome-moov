@@ -156,7 +156,7 @@ export function holdSlot(ws, order, { date, slot }, actor, realNow) {
 }
 
 // Un dossier rempli en ligne a déjà choisi son créneau à l'envoi : il peut le changer pendant la vérification.
-export const canPlan = order => !order.cancelled && ['PRET_A_PLANIFIER', 'RDV_CONFIRME'].includes(order.state) || (order.state === 'PREPARATION' && !!(order.dossier && order.dossier.submittedAt));
+export const canPlan = order => !order.cancelled && (['PRET_A_PLANIFIER', 'RDV_CONFIRME'].includes(order.state) || (order.state === 'PREPARATION' && !!(order.dossier && order.dossier.submittedAt)));
 
 // Une fois le technicien parti, le rendez-vous ne se change plus depuis l'application : on passe par le conseiller.
 export function missionUnderway(ws, order) {

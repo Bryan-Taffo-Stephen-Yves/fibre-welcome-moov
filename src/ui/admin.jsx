@@ -546,7 +546,7 @@ function GenAiPanel({ token, ro, g }) {
       <b className="small">Dernières réponses écartées</b>
       <ul className="ad-list ad-genai-rej">{g.lastRejected.map(x => <li key={x.id} className="small"><span className="ad-bubble">« {x.q} »</span><span className="tiny muted">{x.why} · {fmtDateTime(x.at)}</span></li>)}</ul>
     </div>}
-    <Explain>Claude rédige la réponse à partir du dossier, sans le nom ni le numéro du client. Avant de l’afficher, le serveur vérifie chaque nombre, chaque date et chaque promesse avec les éléments cités. Si quelque chose ne colle pas, le client reçoit la réponse par règles, et le motif reste ici. La clé de Claude est gardée dans Supabase : elle n’est jamais dans la page.</Explain>
+    <Explain>Claude rédige la réponse à partir du dossier, sans le nom ni le numéro du client. Il n’écrit aucune phrase lui-même : il choisit des informations du dossier, montrées telles quelles avec leur source, et des phrases d’un recueil approuvé. Avant d’afficher la réponse, le serveur vérifie qu’il n’y a aucun autre mot et que chaque phrase est vraie pour ce dossier. Sinon, le client reçoit la réponse par règles, et le motif reste ici. La clé de Claude est gardée dans Supabase : elle n’est jamais dans la page.</Explain>
     {keyHelp && <details className="ad-details" open={st.state === 'sans_cle'}><summary>Installer la clé de Claude</summary><ol className="small ad-genai-steps">
       <li>Sur <b>console.anthropic.com</b>, créez une clé API (Settings, puis API keys, puis Create key) et ajoutez un peu de crédit.</li>
       <li>Sur <b>supabase.com</b>, ouvrez le projet « fibre-welcome », puis Edge Functions, puis Secrets.</li>

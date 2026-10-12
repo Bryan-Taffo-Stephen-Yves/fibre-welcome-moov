@@ -38,7 +38,7 @@ Le scénario SC-17 du Laboratoire vérifie chaque étape.
 L’assistant du client (onglet Messages) et l’avis sur les photos de Nadia peuvent passer par une vraie IA générative : Claude, d’Anthropic. Sans clé installée, tout marche comme avant : l’assistant répond par règles.
 
 - **Ce qui part chez Claude.** Pour une question : la question, les quatre derniers échanges au plus et l’état du dossier (étape, rendez-vous, paiement, pièces attendues, estimation, procédures publiques), sans le nom, le numéro de téléphone ni l’adresse du client. Pour une photo : l’image et le type de pièce attendu, rien d’autre, et seulement quand la conseillère clique sur « Avis de l’IA ».
-- **Garde-fou.** Claude doit citer les éléments du dossier qu’il utilise. Avant d’afficher sa réponse, l’application vérifie chaque nombre, chaque date, chaque jour et chaque promesse (« garanti », « demain », « ligne active », paiement confirmé, lien, code secret) avec les éléments cités. Si quelque chose ne colle pas, la réponse est écartée : le client reçoit la réponse par règles et le motif est listé dans Admin, Modèles IA. Le scénario SC-19 le montre avec une réponse piégée.
+- **Garde-fou.** Claude n’écrit aucune phrase lui-même : il choisit et assemble. Sa réponse est une suite de repères : `{F3}` devient le texte exact d’un élément du dossier (rendez-vous, paiement, estimation, procédure, mise en garde) et `{P12}` une phrase d’un recueil approuvé, sans aucun fait (« Voici ce que dit votre dossier sur le rendez-vous. », « Un conseiller peut vous aider. »). Chaque phrase doit être à sa place, juste avant l’élément qu’elle introduit, et vraie pour ce dossier (par exemple, « choisir votre créneau » seulement si le dossier peut être planifié). Tout autre mot fait écarter la réponse : le client reçoit la réponse par règles et le motif est listé dans Admin, Modèles IA. L’IA comprend donc la question, même en français familier ou avec des fautes, mais chaque mot montré au client a été écrit et relu à l’avance. Le scénario SC-19 le montre avec une réponse piégée.
 - **Photos.** L’avis de Claude (lisible, à refaire, pas sûr) s’ajoute au contrôle simple ; c’est toujours la conseillère qui valide ou refuse. Les chiffres que l’IA a lus sur une pièce sont masqués à l’écran, et le client ne voit jamais cet avis.
 - **La clé.** Elle est gardée dans Supabase (secret `ANTHROPIC_API_KEY`), jamais dans la page ni dans le dépôt. La fonction `supabase/functions/fw-ia` appelle Claude (modèle `claude-opus-5-5`, effort bas, réponse au format imposé, texte envoyé limité en taille).
 - **Pages autorisées.** Un navigateur ne peut appeler la fonction que depuis le lien public ou `http://localhost` (essais). Ce n’est pas un verrou (un programme peut l’appeler sans navigateur) : la vraie protection, ce sont les plafonds ci-dessous. Avec `index.html` ouvert comme fichier, l’assistant répond par règles ; pour la vraie IA, prendre le lien public ou lancer `python3 -m http.server 8000` puis ouvrir `http://localhost:8000`.
@@ -82,7 +82,7 @@ Installer la clé (une seule fois) :
 | `src/ui/server-db.js`, `src/ui/server-config.js` | Accès au serveur de démonstration (Supabase) : adresse, clé publique, suivi des versions |
 | `supabase/schema.sql` | Table et fonctions publiques du serveur, avec leurs garde-fous : taille, budget total de données, volume et nouveaux documents limités par adresse IP (par /64 en IPv6), 80 images par espace, un seul code de salle par lecture, numéros de version qui ne reculent jamais (à rejouer tel quel sur un nouveau projet) |
 | `supabase/functions/fw-ia/` | Fonction Supabase qui appelle Claude : pages autorisées, tailles, plafonds, état de la clé et du crédit (`logic.js` est aussi testé dans Node) |
-| `supabase/ia.sql` | Compteur des demandes à l’IA (par visiteur, par minute, pour toute l’application) |
+| `supabase/ia.sql` | Compteur de l’IA : demandes et dépense en dollars du jour, par visiteur et pour toute l’application, avec réservation du coût le plus haut avant chaque appel |
 | `supabase/a-coller-dans-supabase.sql` | Dernière mise à jour du serveur existant, à coller une fois dans l’éditeur SQL de Supabase |
 | `src/ui/vendor/fflate.js` | Compression pour les navigateurs plus anciens (bibliothèque libre fflate, licence MIT) |
 | `src/ui/vendor/qrcode.js` | Dessin du code QR (bibliothèque libre qrcode-generator, licence MIT) |
@@ -93,7 +93,8 @@ Installer la clé (une seule fois) :
 | `src/ui/charts.jsx` | Graphiques sans bibliothèque : courbes, barres, anneau, carte d’Abidjan |
 | `src/ui/styles.css`, `src/ui/css/*.css` | Styles communs, puis un fichier par espace (client, terrain, opérations, admin, labo) |
 | `tests/backend.test.js` | 44 tests de recette (R-01, R-05 à R-15, R-19 à R-23, scénarios, droits sur les images, démo en direct, SMS et USSD, impact) |
-| `tests/genai.test.js` | 12 tests de l’IA générative : ce qui part chez Claude, garde-fou (réponses piégées), avis sur les photos, droits, scénario SC-19, contrôles de la fonction |
+| `tests/genai.test.js` | 16 tests de l’IA générative : ce qui part chez Claude, garde-fou (assemblages permis, mots hors du recueil, phrases mal placées), avis sur les photos, droits, scénario SC-19, contrôles de la fonction |
+| `tests/fwia.test.js` | 6 tests de la fonction `fw-ia` : caractères invisibles retirés, texte envoyé borné, pages autorisées, coût réel de chaque appel et réservation avant l’appel, budgets, `ia.sql` rejouable |
 | `tests/sync.test.js` | 51 tests du partage entre appareils contre une imitation du serveur : écritures croisées, action faite sans réseau, réponse perdue (même après de nombreuses écritures), deux onglets, page rechargée ou tuée avant l’envoi, réseau qui ne répond plus, liaison lente, réponse bloquée en route, code tapé pendant la connexion, réinitialisations croisées, ménage en retard, suppression sans réseau, repartage, nettoyage du serveur, refus du serveur, sauvegardes, photos envoyées plus tard, page ouverte sans réseau, lien piégé, données piégées, navigateur ancien |
 | `.github/workflows/` | `pages.yml` met le lien public à jour ; `keepalive.yml` garde le serveur éveillé (lecture tous les deux jours) |
 
@@ -108,7 +109,7 @@ Style « tableau de bord de suivi » (police Plus Jakarta Sans, cartes arrondies
 ```bash
 npm install        # installe esbuild (outil de construction)
 npm run build      # reconstruit app.js et styles.css depuis src/
-npm test           # 107 tests : recette du serveur simulé, IA générative et partage entre appareils
+npm test           # 117 tests : recette du serveur simulé, IA générative et partage entre appareils
 ```
 
 `node build.mjs page.html` produit en plus une page autonome (React chargé depuis cdnjs) pour un aperçu en ligne.

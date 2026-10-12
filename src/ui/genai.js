@@ -64,7 +64,7 @@ async function viaServer(kind, body, ms) {
 
 // Aperçu privé : mêmes consignes que la fonction, avec le format demandé en toutes lettres (pas de format imposé ici).
 const enumOf = (s, k) => s.properties[k].enum.join(', ');
-const ASSISTANT_FORMAT = 'Réponds uniquement avec un objet JSON, sans aucun autre texte, de la forme {"answer": "…", "cites": ["F1"], "action": "aucune", "can_answer": true, "topic": "statut"}. « action » vaut : ' + enumOf(ASSISTANT_SCHEMA, 'action') + '. « topic » vaut : ' + enumOf(ASSISTANT_SCHEMA, 'topic') + '.';
+const ASSISTANT_FORMAT = 'Réponds uniquement avec un objet JSON, sans aucun autre texte, de la forme {"answer": "{P10} {F1}", "cites": ["F1"], "action": "aucune", "can_answer": true, "topic": "statut"}. « action » vaut : ' + enumOf(ASSISTANT_SCHEMA, 'action') + '. « topic » vaut : ' + enumOf(ASSISTANT_SCHEMA, 'topic') + '.';
 const PHOTO_FORMAT = 'Réponds uniquement avec un objet JSON, sans aucun autre texte, de la forme {"verdict": "lisible", "right_document": "oui", "issues": [], "note": "…"}. « verdict » vaut : ' + enumOf(PHOTO_SCHEMA, 'verdict') + '. « right_document » vaut : ' + enumOf(PHOTO_SCHEMA, 'right_document') + '. « issues » ne contient que : ' + PHOTO_SCHEMA.properties.issues.items.enum.join(', ') + '.';
 const b64Blob = (data, type) => { const s = atob(data); const u = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) u[i] = s.charCodeAt(i); return new Blob([u], { type }); };
 

@@ -4,8 +4,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createBackend, memoryStorage } from '../src/server/backend.js';
+import { canPlan } from '../src/server/domain.js';
 import { aiContext, checkAiAnswer, checkPhotoReview, PROCEDURE_TEXT } from '../src/server/genai.js';
-import { LIMITS, MODEL, checkAssistantInput, checkPhotoInput, requestFor, assistantUserText, visitorKey, originOk, corsHeaders, ASSISTANT_SCHEMA, PHOTO_SCHEMA } from '../supabase/functions/fw-ia/logic.js';
+import { LIMITS, MODEL, PHRASES, checkAssistantInput, checkPhotoInput, requestFor, assistantUserText, visitorKey, originOk, corsHeaders, ASSISTANT_SCHEMA, PHOTO_SCHEMA } from '../supabase/functions/fw-ia/logic.js';
 
 function setup(seed = 42) {
   let now = Date.UTC(2026, 8, 28, 9, 0, 0);
@@ -69,13 +70,14 @@ test('Représentant : la référence de paiement ne part pas vers l’IA, ni dan
   assert.ok(!JSON.stringify(rules.blocks).includes(ref));
 });
 
-test('Garde-fou : les faits insérés par Claude sont le texte exact du dossier, avec leurs sources', async () => {
+test('Garde-fou : Claude n’écrit rien lui-même, il assemble des éléments du dossier et des phrases approuvées', async () => {
   const t = setup();
   const { oid, o, client } = await withAppointment(t);
   const ctx = aiContext(t.ws(), t.ws().orders.find(x => x.id === oid));
   const text = id => ctx.items.find(i => i.id === id).text;
-  const r = ok(await t.api.exec(client, 'assistant.ask', { orderId: oid, question: 'Où en est mon dossier ?', ai: AI('Voici où en est votre dossier. {F1} {F3}', ['F1']) }));
-  assert.equal(r.ai.text, 'Voici où en est votre dossier. ' + text('F1') + ' ' + text('F3'));
+  const phrase = id => PHRASES.find(p => p.id === id).text;
+  const r = ok(await t.api.exec(client, 'assistant.ask', { orderId: oid, question: 'Où en est mon dossier ?', ai: AI('{P10} {F1} {P12} {F3}', ['F1']) }));
+  assert.equal(r.ai.text, phrase('P10') + ' ' + text('F1') + ' ' + phrase('P12') + ' ' + text('F3'));
   assert.ok(r.ai.text.includes(o.ref) && /29 sept\., 8 h – 12 h/.test(r.ai.text), 'date et heure telles que dans le dossier');
   assert.equal(r.ai.model, 'claude-opus-5-5');
   assert.equal(r.ai.ms, 2100);
@@ -86,86 +88,148 @@ test('Garde-fou : les faits insérés par Claude sont le texte exact du dossier,
   assert.equal(log.ai, 'claude-opus-5-5'); assert.equal(log.aiRejected, null);
   assert.ok(t.ws().audit.some(a => a.action === 'ia.assistant' && /^Claude, /.test(a.detail)), 'journal : réponse de Claude');
   // Une estimation insérée garde sa mention « pas un engagement ».
-  const est = checkAiAnswer(ctx, AI('{E1}', ['E1']));
-  assert.match(est.value.answer, /^Estimation \(ce n’est pas un engagement\) : il reste probablement /);
+  const est = checkAiAnswer(ctx, AI('{P16} {E1}', []));
+  assert.match(est.value.answer, /^Voici l’estimation du délai\. Estimation \(ce n’est pas un engagement\) : il reste probablement /);
   // Une abstention de Claude passe la main à un conseiller.
-  const ab = ok(await t.api.exec(client, 'assistant.ask', { orderId: oid, question: 'Quel temps fera-t-il ?', ai: AI('Je ne peux pas répondre à cette question : un conseiller peut vous aider.', [], { can_answer: false, action: 'conseiller', topic: 'hors_sujet' }) }));
+  const ab = ok(await t.api.exec(client, 'assistant.ask', { orderId: oid, question: 'Quel temps fera-t-il ?', ai: AI('{P41} {P33}', [], { can_answer: false, action: 'conseiller', topic: 'hors_sujet' }) }));
+  assert.equal(ab.ai.text, phrase('P41') + ' ' + phrase('P33'));
   assert.equal(ab.ai.abstain, true); assert.equal(ab.handoff, true); assert.equal(ab.trace.intent, null);
   // Action proposée : ouvrir le rendez-vous (mais jamais sur un dossier annulé).
-  const go = ok(await t.api.exec(client, 'assistant.ask', { orderId: oid, question: 'Comment changer mon rendez-vous ?', ai: AI('Vous pouvez le modifier depuis l’onglet Rendez-vous.', ['PR-04'], { action: 'rendez_vous', topic: 'rendez_vous' }) }));
+  const go = ok(await t.api.exec(client, 'assistant.ask', { orderId: oid, question: 'Comment changer mon rendez-vous ?', ai: AI('{P17} {PR-04} {P31}', [], { action: 'rendez_vous', topic: 'rendez_vous' }) }));
   assert.deepEqual(go.ai.action, { go: 'rdv' });
+  // Un élément ou une phrase recopiés en entier, mot pour mot (accents, majuscules et ponctuation près), comptent aussi.
+  const copy = checkAiAnswer(ctx, AI(phrase('P12') + ' ' + text('F3') + ' ' + phrase('P30').toUpperCase(), []));
+  assert.equal(copy.ok, true, copy.why); assert.deepEqual(copy.value.cites, ['F3']);
+  const glued = checkAiAnswer(ctx, AI('Je n’ai pas cette information dans votre dossier, un conseiller peut vous aider.', [], { can_answer: false, action: 'conseiller' }));
+  assert.equal(glued.ok, true, glued.why); assert.equal(glued.value.answer, phrase('P40') + ' ' + phrase('P34'));
+  // Un repère répété ne compte qu'une fois ; minuscules et espaces dans les accolades sont tolérés.
+  assert.equal(checkAiAnswer(ctx, AI('{p12}{ f3 } {F3}', [])).value.answer, phrase('P12') + ' ' + text('F3'));
 });
 
-test('Garde-fou : les phrases de Claude ne contiennent aucun fait, aucune promesse, aucun lien, aucun code', async () => {
+test('Garde-fou : tout mot hors du recueil fait écarter la réponse, et chaque phrase doit être vraie et à sa place', async () => {
   const t = setup();
   const { oid, o } = await withAppointment(t);
   const ws = t.ws();
   const ctx = aiContext(ws, ws.orders.find(x => x.id === oid));
-  const check = (answer, cites = ['F1'], extra) => checkAiAnswer(ctx, AI(answer, cites, extra));
+  const pending = ws.orders.find(x => x.payment && x.payment.status === 'en_attente' && x.state === 'DOSSIER_RECU');
+  const cp = aiContext(ws, pending);
+  assert.match(cp.items.find(i => i.id === 'F4').text, /Montant attendu/, 'paiement pas encore rapproché : montant attendu, pas payé');
+  const check = (answer, extra, c = ctx) => checkAiAnswer(c, AI(answer, [], extra));
   const bad = [
+    // Phrases écrites par Claude : écartées, avec le motif le plus parlant pour l'administration.
     ['Le technicien viendra le mardi 29 septembre, entre 8 h et 12 h.', /nombre, date ou heure écrits par l’IA \(29\)/],
-    ['Le technicien viendra le vingt-neuf septembre.', /nombre écrit par l’IA \(vingt\)/],
-    ['Le technicien viendra mardi en huit.', /nombre écrit par l’IA \(huit\)/],
-    ['Le technicien passera dans la matinée.', /date, heure ou délai écrits par l’IA \(matinee\)/],
-    ['Votre ligne sera activée la semaine prochaine.', /date, heure ou délai/],
-    ['Tout sera prêt sous peu.', /date, heure ou délai|état/],
-    ['Vous serez remboursé intégralement.', /montant ou paiement écrits par l’IA \(rembourse\)/],
-    ['Il vous restera vingt-cinq mille francs à régler.', /nombre écrit|montant/],
-    ['Votre paiement est bien arrivé.', /état du dossier écrit par l’IA \(arrive\)/],
-    ['Votre fibre est active.', /état du dossier écrit par l’IA \(active\)/],
-    ['Vous pouvez déjà surfer.', /état du dossier/],
-    ['Le technicien est en route.', /état du dossier/],
-    ['C’est garanti, tout ira bien.', /promesse \(garanti\)/],
-    ['Je vous l’assure, aucun souci.', /promesse|état/],
-    ['Le technicien vous appellera avant de venir.', /lien ou contact|annonce/],
-    ['Un conseiller vous contactera.', /annonce de ce qui va se passer \(contactera\)/],
-    ['Moov va vous rembourser.', /montant|annonce/],
-    ['Il faut encore envoyer votre justificatif.', /exigence écrite par l’IA \(faut\)/],
-    ['Plus d’infos sur moov-africa.ci.', /lien ou contact/],
-    ['Écrivez à support@moov.ci.', /symbole inattendu|lien/],
-    ['Envoyez-moi le code reçu par SMS.', /lien ou contact|code/],
-    ['Quel est votre PIN ?', /code ou donnée secrète \(pin\)/],
-    ['Ne vous inquiétez pas, donnez simplement votre mot de passe au technicien.', /code ou donnée secrète/],
-    ['Le dossier FW-2026-999 est aussi en cours.', /nombre, date ou heure/],
-    ['Voici **votre** dossier.', /symbole inattendu/],
-    ['Le tеchnicien viendra dеmain.', /écriture inattendue/],
-    ['Réponse {Z9}.', /source inconnue \(Z9\)/],
-    ['Réponse.', /source inconnue/, ['Z9']],
-    ['Voici votre dossier.', /aucune source citée/, []],
+    ['{P12} {F3} Le technicien passera dans la matinée.', /date, heure ou délai écrits par l’IA \(matinee\)/],
+    ['Vous serez remboursé intégralement. {PR-06}', /montant ou paiement écrits par l’IA \(rembourse\)/],
+    ['Votre fibre est active. {F7}', /état du dossier écrit par l’IA \(active\)/],
+    ['C’est garanti. {F3}', /promesse \(garanti\)/],
+    ['Plus d’infos sur moov-africa.ci. {F1}', /lien ou contact/],
+    ['Quel est votre PIN ? {S1}', /code ou donnée secrète \(pin\)/],
+    // Ce que l'ancienne liste de mots laissait passer : tout ce qui n'est pas dans le recueil est écarté.
+    ['Oui. {F4}', /phrase hors du recueil \(« oui »\)/, {}, cp],
+    ['Bonne nouvelle, votre adresse est éligible à la fibre Moov. {F1}', /phrase hors du recueil/],
+    ['{P10} {F1} Ce n’est plus valable.', /phrase hors du recueil \(« ce n'est plus valable »\)/],
+    ['Courage, vous y êtes presque. {F1}', /phrase hors du recueil/],
+    ['Votre visite est programmée et un technicien est désigné. {F2}', /phrase hors du recueil/],
+    ['The technician comes tomorrow between eight and noon. {F1}', /phrase hors du recueil/],
+    ['{F2} Nous avons relancé l’équipe pour vous.', /phrase hors du recueil/],
+    ['Le tеchnicien viendra dеmain. {F1}', /écriture inattendue/],
+    ['Voici **votre** dossier. {F1}', /symbole inattendu/],
+    // Recopie partielle d'un élément : la phrase rassurante de l'élément ne peut pas être laissée de côté.
+    ['Le modèle prévoit un délai plus long que votre rendez-vous. {P30}', /phrase hors du recueil/],
+    [ctx.items.find(i => i.id === 'F1').text.split('. ')[1], /état du dossier écrit par l’IA \(confirme\)/],
+    // Repères inconnus, nombre d'éléments et de phrases, réponse sans élément.
+    ['{Z9} {F1}', /source inconnue \(Z9\)/],
+    ['{P99} {F1}', /phrase inconnue \(P99\)/],
     ['{F1} {F2} {F3} {F4} {F7}', /trop d’éléments insérés/],
+    ['{P1} {P2} {P3} {P4} {P35} {F1}', /trop de phrases/],
+    ['{P1} {P35}', /aucun élément du dossier inséré/],
+    // Une phrase qui introduit un élément doit être juste avant lui, et le bon.
+    ['{P13} {E1}', /phrase mal placée \(P13\)/],
+    ['{F4} {P13}', /phrase mal placée \(P13\)/],
+    ['{P18} {PR-04}', /phrase mal placée \(P18\)/],
+    // Une phrase n'est employée que là où elle est vraie.
+    ['{P10} {F1} {P30}', /phrase hors de propos \(P30\)/, {}, cp],
+    ['{P12} {F3} {P31}', /phrase hors de propos \(P31\)/],
+    ['{P18} {PR-03} {P31}', /phrase hors de propos \(P31\)/, { action: 'preparer' }],
+    ['{P40} {P32}', /phrase hors de propos \(P32\)/, { can_answer: false, action: 'preparer' }],
+    ['{P10} {F1} {P33}', /phrase hors de propos \(P33\)/],
   ];
-  for (const [answer, why, cites] of bad) {
-    const r = check(answer, cites);
+  for (const [answer, why, extra, c] of bad) {
+    const r = check(answer, extra, c);
     assert.equal(r.ok, false, answer);
     assert.match(r.why, why, answer + ' → ' + r.why);
   }
-  // Une phrase recopiée mot pour mot d'un élément compte comme insérée, mais seulement si elle est entière.
-  const f1 = ctx.items.find(i => i.id === 'F1').text;
-  const first = f1.split('. ')[0] + '.';
-  const copy = check('Voici où en est votre dossier. ' + first, []);
-  assert.equal(copy.ok, true, copy.why); assert.deepEqual(copy.value.cites, ['F1']);
-  const pending = ws.orders.find(x => x.payment && x.payment.status === 'en_attente' && x.state === 'DOSSIER_RECU');
-  const cp = aiContext(ws, pending);
-  assert.equal(checkAiAnswer(cp, AI('Votre demande est arrivée chez Moov.', ['F1'])).ok, true, 'phrase de F1 recopiée');
-  assert.match(checkAiAnswer(cp, AI('Votre demande est arrivée chez Moov et votre paiement aussi.', ['F1'])).why, /état du dossier/, 'phrase recopiée puis prolongée');
-  assert.match(cp.items.find(i => i.id === 'F4').text, /Montant attendu/, 'paiement pas encore rapproché : montant attendu, pas payé');
-  // Ce qui reste permis : relier, dire quoi faire, refuser, mettre en garde (avertissement inséré), citer « (F3) ».
-  for (const [answer, cites, extra] of [
-    ['Voici votre rendez-vous. {F3} Vous pouvez le modifier depuis l’onglet Rendez-vous.', ['PR-04']],
-    ['Concernant votre paiement : {F4} {PR-01}', []],
-    ['Pour préparer la visite : {PR-03} Pensez à avoir votre carte d’identité.', []],
-    ['Voici ce qu’il faut savoir sur une annulation. {PR-06} Vous pouvez en parler à un conseiller.', []],
-    ['Pour votre sécurité : {S1}', []],
-    ['Voici votre rendez-vous (F3). Vous pouvez le modifier depuis l’onglet Rendez-vous [PR-04].', []],
-    ['Je ne peux pas confirmer cela, et ce n’est pas un engagement : un conseiller peut vous aider.', [], { can_answer: false, action: 'conseiller' }],
-    ['Votre dossier ' + o.ref.replace(/\d/g, '') + ' : {F1}', []],
-  ]) { const r = check(answer, cites, extra); assert.equal(r.ok, true, answer + ' → ' + r.why); }
+  assert.match(checkAiAnswer(ctx, AI('{F1}', ['Z9'])).why, /source inconnue \(Z9\)/);
+  // Ce qui passe : les bons assemblages, la mise en garde, le renvoi « (F3) ».
+  for (const [answer, extra, c] of [
+    ['{P12} {F3} {F6} {P31}', { action: 'rendez_vous' }],
+    ['{P13} {F4} {P17} {PR-01}', {}, cp],
+    ['{P18} {PR-03} {P32}', { action: 'preparer' }],
+    ['{P3} {P19} {S1} {P39}', { topic: 'autre' }],
+    ['{P2} {P10} {F1} {F2} {P16} {E1}', {}],
+    ['{P10} {F1} {P30}', {}],
+    ['{P12} {F3} (F3)', {}],
+    ['{P42} {P44} {P34}', { can_answer: false, action: 'aucune' }],
+    ['{P11} {F1} {P34}', { action: 'conseiller' }],
+  ]) { const r = check(answer, extra, c); assert.equal(r.ok, true, answer + ' → ' + r.why); }
+  // Le recueil ne contient aucun fait : ni chiffre, ni date, ni montant, ni état, ni promesse.
+  // (Les phrases d'abstention, « Je ne peux pas… », nomment ce que l'assistant refuse de faire.)
+  for (const p of PHRASES) assert.doesNotMatch(p.text, /^Je ne peux/.test(p.text) ? /\d/ : /\d|demain|garanti|confirm|pay|rembours|actif|activée/i, p.id);
   assert.ok(ctx.items.some(i => i.id === 'S1' && /code/.test(i.text)), 'mise en garde prête à insérer');
   // Forme : champs manquants, action ou sujet inconnus.
   assert.equal(checkAiAnswer(ctx, { answer: 'x', cites: [] }).ok, false);
-  assert.equal(check('Bonjour.', ['F1'], { action: 'payer' }).ok, false);
-  assert.equal(check('Bonjour.', ['F1'], { topic: 'meteo' }).ok, false);
+  assert.equal(check('{P10} {F1}', { action: 'payer' }).ok, false);
+  assert.equal(check('{P10} {F1}', { topic: 'meteo' }).ok, false);
   assert.equal(checkAiAnswer(ctx, null).ok, false);
+});
+
+test('Garde-fou : ce que le client doit savoir est ajouté, et chaque phrase suit l’état réel du dossier', async () => {
+  const t = setup();
+  const { oid } = await withAppointment(t);
+  const phrase = id => PHRASES.find(p => p.id === id).text;
+  // Point bloquant ouvert et données anciennes : ajoutés à la fin quand Claude les oublie (pas dans une abstention).
+  const ws = t.ws(), o = ws.orders.find(x => x.id === oid);
+  ws.blockers.push({ id: 'BX', orderId: o.id, type: 'PIECE_MANQUANTE', detail: 'Justificatif de domicile', status: 'ouvert' });
+  ws.integrations.prospect.up = false; ws.integrations.prospect.lastSync = ws.clock - 3600e3;
+  const ctx = aiContext(ws, o), text = id => ctx.items.find(i => i.id === id).text;
+  const r = checkAiAnswer(ctx, AI('{P12} {F3}', []));
+  assert.equal(r.ok, true, r.why);
+  assert.equal(r.value.answer, phrase('P12') + ' ' + text('F3') + ' ' + phrase('P20') + ' ' + text('F2') + ' ' + text('W1'));
+  assert.deepEqual(r.value.cites, ['F3', 'F2', 'W1']);
+  assert.equal(checkAiAnswer(ctx, AI('{P41} {P33}', [], { can_answer: false, action: 'conseiller' })).value.answer, phrase('P41') + ' ' + phrase('P33'));
+  // Mise en garde : le code de réception, lui, se donne au technicien à la fin de la visite.
+  assert.match(text('S1'), /ni de payer sur un autre numéro.*sauf votre code de réception/);
+  // Technicien parti : plus de délai chiffré, plus de « modifier votre créneau », plus de procédure de modification.
+  const ws2 = t.ws(), o2 = ws2.orders.find(x => x.id === oid);
+  ws2.workOrders.find(w => w.id === ws2.appointments.find(a => a.id === o2.apptId).woId).status = 'en_route';
+  const c2 = aiContext(ws2, o2);
+  assert.equal(c2.items.find(i => i.id === 'E1').kind, 'abstain');
+  assert.ok(!c2.items.some(i => i.id === 'PR-04'));
+  assert.match(checkAiAnswer(c2, AI('{P12} {F6} {P30}', [])).why, /phrase hors de propos \(P30\)/);
+  // Paiement pas encore rapproché : ne pas payer deux fois. Commande annulée : plus rien n'est attendu, plus de visite.
+  const ws3 = t.ws(), pend = ws3.orders.find(x => x.payment && x.payment.status === 'en_attente');
+  assert.match(aiContext(ws3, pend).items.find(i => i.id === 'F4').text, /Montant attendu.*ne payez pas une seconde fois/);
+  pend.cancelled = true;
+  const c3 = aiContext(ws3, pend);
+  assert.equal(c3.items.find(i => i.id === 'F4').text, 'Paiement : aucun paiement n’est attendu, la commande est annulée.');
+  assert.ok(!c3.items.some(i => ['PR-03', 'PR-04'].includes(i.id)) && !c3.canPlan && !c3.canPrep);
+  assert.match(checkAiAnswer(c3, AI('{P11} {F1} {P32}', [], { action: 'preparer' })).why, /phrase hors de propos \(P32\)/);
+  // Une commande annulée ne se planifie jamais, même avec un dossier en ligne déjà envoyé.
+  assert.equal(canPlan({ cancelled: true, state: 'PREPARATION', dossier: { submittedAt: 1 } }), false);
+  assert.equal(canPlan({ cancelled: false, state: 'PREPARATION', dossier: { submittedAt: 1 } }), true);
+  // Représentant : pas d'envoi de pièce, ni de créneau sans le droit « rdv ».
+  const ws4 = t.ws(), c4 = aiContext(ws4, ws4.orders.find(x => x.id === oid), { delegate: true, rdv: false });
+  assert.match(checkAiAnswer(c4, AI('{P10} {F1} {P30}', [])).why, /hors de propos \(P30\)/);
+  assert.match(checkAiAnswer(c4, AI('{P10} {F1} {P36}', [])).why, /hors de propos \(P36\)/);
+  // « Sur vos pièces » : la liste du dossier en ligne quand il y en a une.
+  const fake = { items: [{ id: 'F2', kind: 'fact', title: 'Points bloquants', text: 'Aucun point bloquant n’est ouvert sur le dossier.' }, { id: 'F5', kind: 'fact', title: 'Dossier en ligne', text: 'Il manque encore : la photo du recto.' }], mustShow: [] };
+  assert.match(checkAiAnswer(fake, AI('{P14} {F2}', [])).why, /phrase mal placée \(P14\)/);
+  assert.equal(checkAiAnswer(fake, AI('{P14} {F5}', [])).ok, true);
+  // Un long mot sans parenthèse fermante ne bloque pas la vérification.
+  const t0 = Date.now();
+  assert.equal(checkAiAnswer(ctx, AI('{P12} {F3} (' + 'aet'.repeat(380), [])).ok, false);
+  assert.ok(Date.now() - t0 < 500, 'vérification immédiate');
+  assert.equal(checkAiAnswer(ctx, AI('{P12} {F3} (cf. F3 et F4)', [])).value.cites.join(), 'F3,F4,F2,W1');
 });
 
 test('Garde-fou : réponse écartée, le client reçoit la réponse par règles et le motif est gardé', async () => {
@@ -382,7 +446,7 @@ test('Contexte : la précision d’adresse écrite par le client ne part pas che
 test('Question hors des sujets connus : une réponse de Claude n’est pas une abstention', async () => {
   const t = setup();
   const { oid, client } = await withAppointment(t);
-  const r = ok(await t.api.exec(client, 'assistant.ask', { orderId: oid, question: 'Le technicien apporte-t-il la box ?', ai: AI('Pour préparer la visite : {PR-03}', ['PR-03'], { topic: 'autre' }) }));
+  const r = ok(await t.api.exec(client, 'assistant.ask', { orderId: oid, question: 'Le technicien apporte-t-il la box ?', ai: AI('{P18} {PR-03}', ['PR-03'], { topic: 'autre' }) }));
   assert.equal(r.ai.abstain, false); assert.equal(r.trace.intent, 'other');
   assert.equal(t.ws().assistantLog.at(-1).intent, 'other');
   assert.ok(!/abstention/.test(t.ws().audit.filter(a => a.action === 'ia.assistant').at(-1).detail));

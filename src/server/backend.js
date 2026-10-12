@@ -368,7 +368,7 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
     let ans = null, rejected = null;
     const model = args.ai ? aiModelName(args.ai.model) : null;
     if (args.ai && order && genAiOn(ws) && !guardQuestion(q, order)) {
-      const ctx = aiContext(ws, order, { delegate });
+      const ctx = aiContext(ws, order, { delegate, rdv: canSee(ws, user, order, 'rdv') });
       const chk = checkAiAnswer(ctx, args.ai);
       if (chk.ok) ans = aiAnswerOf(ws, ctx, chk.value, { question: q, model, ms: aiMs(args.ai.ms) });
       else rejected = chk.why;
@@ -1595,7 +1595,7 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
       if (ws.sim.degraded) return { skip: 'degrade' };
       if (!q.trim()) return { skip: 'vide' };
       if (guardQuestion(q, o)) return { skip: 'garde' };
-      const ctx = aiContext(ws, o, { delegate: user.role === 'representant' });
+      const ctx = aiContext(ws, o, { delegate: user.role === 'representant', rdv: canSee(ws, user, o, 'rdv') });
       return { ref: ctx.ref, items: aiPayloadItems(ctx) };
     } },
     'client.document': { roles: ['client'], fn: ({ ws, user, args }) => { const d = byId(ws.documents, args.docId); if (!d) throw new AppError('introuvable', 'Pièce introuvable ou non autorisée.'); scopedOrder(ws, user, d.orderId); return clientDoc(d); } },

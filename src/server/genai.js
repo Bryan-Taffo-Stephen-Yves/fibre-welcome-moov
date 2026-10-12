@@ -2,16 +2,16 @@
 // Le serveur simulé ne parle jamais à Internet. Le navigateur lit le contexte du dossier (assistant.context), l'envoie
 // à la fonction « fw-ia » (Supabase) qui appelle Claude avec la clé gardée côté serveur, puis rapporte la réponse
 // (assistant.ask, champ ai). Avant de la montrer, on la vérifie ici avec l'état réel du dossier :
-// - Claude n'écrit pas les faits, il les insère (« {F3} ») : les dates, heures, montants, états et procédures montrés
-//   au client sont toujours le texte exact du dossier ;
-// - ses propres phrases (pour introduire et relier) ne contiennent ni nombre, ni date, ni délai, ni montant, ni état,
-//   ni promesse, ni lien, ni demande de code ;
-// - chaque source citée existe, et au moins une est citée quand l'IA répond.
+// - Claude n'écrit aucune phrase : il choisit des repères, que l'application remplace par le texte exact d'un élément
+//   du dossier (« {F3} ») ou par une phrase d'un recueil approuvé (« {P12} ») ;
+// - chaque phrase est à sa place (juste avant l'élément qu'elle introduit) et vraie pour ce dossier ;
+// - chaque source citée existe, et au moins un élément est inséré quand l'IA répond.
 // Sinon, le client voit la réponse par règles et le journal garde le motif. Le contexte ne contient ni nom,
 // ni téléphone, ni adresse : l'IA n'en a pas besoin.
-import { STATE_INFO, BLOCKER_TYPES, APPT_STATES, PAYMENT_STATES, SLOTS, hourLabel, PHOTO_ISSUES } from './model.js';
+import { STATE_INFO, BLOCKER_TYPES, APPT_STATES, PAYMENT_STATES, SLOTS, hourLabel, PHOTO_ISSUES, ORDER_STATES } from './model.js';
 import { estimate, fmtDate, fmtDateTime, fmtRange, fmtAgo } from './ai.js';
-import { dossierState } from './domain.js';
+import { dossierState, canPlan, missionUnderway } from './domain.js';
+import { PHRASES } from '../../supabase/functions/fw-ia/logic.js';
 
 export const AI_MODEL = 'claude-opus-5-5';
 export const genAiOn = ws => !(ws.config && ws.config.genAi === false);
@@ -63,8 +63,9 @@ function dossierText(ds) {
 }
 
 // Contexte donné à l'IA : uniquement le dossier du client (déjà filtré par ses droits), sans donnée personnelle.
-// Chaque élément a un identifiant stable que l'IA doit citer.
-export function aiContext(ws, order, { delegate = false } = {}) {
+// Chaque élément a un identifiant stable que l'IA doit citer. rdv : la personne peut gérer le rendez-vous (un
+// représentant seulement si sa délégation le permet).
+export function aiContext(ws, order, { delegate = false, rdv = true } = {}) {
   const now = ws.clock;
   const stale = !ws.integrations.prospect.up;
   const fresh = { label: stale ? 'Données non actualisées depuis ' + fmtAgo(now - ws.integrations.prospect.lastSync) : 'Statut à jour (' + fmtAgo(now - order.updatedAt) + ')', stale };
@@ -78,9 +79,12 @@ export function aiContext(ws, order, { delegate = false } = {}) {
   const appt = order.apptId && ws.appointments.find(a => a.id === order.apptId);
   add('F3', 'fact', 'Rendez-vous', appt ? 'Rendez-vous ' + String(APPT_STATES[appt.status] || appt.status).toLowerCase() + ' le ' + fmtDate(appt.date) + ', ' + slotText(appt) + '.' : 'Aucun rendez-vous n’est réservé pour l’instant.', { source: 'Service de réservation (simulé)', fresh });
   const pay = order.payment || {};
-  // Tant que Moov n'a pas rapproché le paiement, le montant est « attendu », pas « payé ».
+  // Tant que Moov n'a pas rapproché le paiement, le montant est « attendu », pas « payé » : le client ne doit pas payer
+  // une seconde fois. Sur une commande annulée, plus rien n'est attendu.
   const paid = ['confirme', 'rembourse_demande', 'rembourse_valide', 'rembourse'].includes(pay.status);
-  add('F4', 'fact', 'Paiement', 'Paiement : ' + String(PAYMENT_STATES[pay.status] || pay.status || 'inconnu').toLowerCase() + '.' + (pay.amount ? (paid ? ' Montant payé : ' : ' Montant attendu : ') + money(pay) + '.' : '') + (pay.ref && !delegate ? ' Référence ' + pay.ref + '.' : ''), { source: 'Connecteur Moov Money (simulé)', fresh });
+  add('F4', 'fact', 'Paiement', order.cancelled && !paid ? 'Paiement : aucun paiement n’est attendu, la commande est annulée.'
+    : 'Paiement : ' + String(PAYMENT_STATES[pay.status] || pay.status || 'inconnu').toLowerCase() + '.' + (pay.amount ? (paid ? ' Montant payé : ' : ' Montant attendu : ') + money(pay) + '.' : '') + (pay.ref && !delegate ? ' Référence ' + pay.ref + '.' : '')
+      + (pay.status === 'en_attente' ? ' Moov vérifie ce paiement : ne payez pas une seconde fois.' : ''), { source: 'Connecteur Moov Money (simulé)', fresh });
   const ds = dossierState(ws, order);
   if (ds) add('F5', 'fact', 'Dossier en ligne', dossierText(ds), { source: src, fresh });
   const wo = order.woId && ws.workOrders.find(w => w.id === order.woId);
@@ -88,49 +92,70 @@ export function aiContext(ws, order, { delegate = false } = {}) {
   const act = ws.activations.filter(a => a.orderId === order.id).at(-1);
   const active = ['SERVICE_ACTIF', 'CLOTURE'].includes(order.state);
   add('F7', 'fact', 'Activation de la ligne', active ? 'Le système de Moov a confirmé l’activation : la fibre est active.' : act && ACTIVATION_TEXT[act.status] ? ACTIVATION_TEXT[act.status] : 'L’activation n’est pas encore demandée : elle vient après l’installation.', { source: 'Système d’activation de Moov (simulé)', fresh });
-  if (!order.cancelled) {
+  const underway = missionUnderway(ws, order);
+  const refund = ws.refunds.filter(r => r.orderId === order.id).at(-1);
+  const cancelling = !order.cancelled && !!refund && refund.status !== 'rejete';
+  // Technicien en route ou annulation en cours : un délai en jours n'a plus de sens, l'IA ne doit pas en donner.
+  if (underway) add('E1', 'abstain', 'Estimation', 'Le technicien est en route ou chez vous : pas d’estimation de délai.');
+  else if (cancelling) add('E1', 'abstain', 'Estimation', 'Une annulation de la commande est en cours : pas d’estimation de délai.');
+  else if (!order.cancelled) {
     const e = estimate(ws, order);
     if (e.abstain) add('E1', 'abstain', 'Estimation', e.reason);
     else if (!e.done) add('E1', 'estimate', 'Estimation (ce n’est pas un engagement)', 'Il reste probablement ' + fmtRange(e.loH, e.hiH) + ' (fiabilité ' + e.reliability + '). Calcul du modèle ' + e.modelVersion + ', entraîné sur des données synthétiques.' + (e.risk ? ' ' + e.risk : ''), { source: 'Modèle ' + e.modelVersion });
   }
-  for (const d of ws.docs) if (d.scope === 'public' && PROCEDURE_TEXT[d.id] && !(d.expires < now)) add(d.id, 'doc', 'Procédure « ' + d.title + ' »', PROCEDURE_TEXT[d.id], { doc: { id: d.id, title: d.title, version: d.version } });
+  // Ce que l'application permet vraiment (mêmes règles que les onglets Rendez-vous et Préparer) : les phrases de l'IA
+  // qui en parlent ne sont acceptées que dans ces cas, et les procédures qui ne s'appliquent plus ne partent pas.
+  const equipBlocked = !!ws.sim.equipmentShortage && ws.config.policyEquipment === 'bloquer';
+  const plan = canPlan(order) && !underway && !cancelling && !equipBlocked && rdv;
+  const prep = !order.cancelled && ORDER_STATES.indexOf(order.state) < ORDER_STATES.indexOf('INSTALLATION_TERMINEE');
+  const skip = { 'PR-03': !prep, 'PR-04': order.cancelled || underway };
+  for (const d of ws.docs) if (d.scope === 'public' && PROCEDURE_TEXT[d.id] && !(d.expires < now) && !skip[d.id]) add(d.id, 'doc', 'Procédure « ' + d.title + ' »', PROCEDURE_TEXT[d.id], { doc: { id: d.id, title: d.title, version: d.version } });
   if (stale) add('W1', 'warn', 'Attention', 'Le lien avec Moov Prospect est interrompu : le statut affiché peut être ancien.');
-  // Mise en garde que Claude peut insérer (il n'écrit jamais lui-même le mot « code »).
-  add('S1', 'warn', 'Sécurité', 'Moov ne vous demande jamais votre code secret Moov Money, ni un code reçu par SMS : ne le donnez à personne.');
-  return { ref: order.ref, items, cancelled: !!order.cancelled, payConfirmed: pay.status === 'confirme', active };
+  // Mise en garde que Claude peut insérer (il n'écrit jamais lui-même le mot « code »). Le code de réception, lui, se
+  // donne bien au technicien à la fin de la visite : la mise en garde le dit, pour ne pas bloquer l'installation.
+  add('S1', 'warn', 'Sécurité', 'Moov ne vous demande jamais votre code secret Moov Money, ni de payer sur un autre numéro ou par un lien. Ne donnez à personne un code reçu par SMS, sauf votre code de réception : au technicien, chez vous, à la fin de la visite.');
+  // Ce que le client doit savoir dès que l'IA répond : un point bloquant, des pièces à envoyer, des données anciennes.
+  // Si Claude ne l'a pas inséré, l'application l'ajoute à la fin de la réponse.
+  const mustShow = [openB.length && 'F2', ds && ds.missing.length && !ds.submittedAt && 'F5', stale && 'W1'].filter(Boolean);
+  return { ref: order.ref, items, cancelled: !!order.cancelled, payConfirmed: pay.status === 'confirme', active, canPlan: plan, canPrep: prep, delegate, mustShow };
 }
 // Ce qui part vers la fonction (et donc vers Claude) : identifiant, nature, titre et texte. Rien d'autre.
 export const aiPayloadItems = ctx => ctx.items.map(({ id, kind, title, text }) => ({ id, kind, title, text }));
 
 // ---------- Garde-fou ----------
-// Claude ne réécrit pas les faits : il les insère. « {F3} » dans sa réponse est remplacé par le texte exact de l'élément
-// F3, et une phrase recopiée mot pour mot d'un élément compte aussi comme insérée. Ce qui reste, ses propres phrases,
-// sert seulement à introduire, relier et dire quoi faire dans l'application : on y refuse tout ce qui ressemble à un
-// fait (nombre, date, heure, délai, montant, état, étape, promesse, lien, contact, code). Les dates, heures, montants et
-// états montrés au client viennent donc toujours tels quels du dossier.
+// Claude n'écrit aucune phrase lui-même : sa réponse est une suite de repères. « {F3} » devient le texte exact de
+// l'élément F3 du dossier, « {P12} » une phrase du recueil approuvé (PHRASES, dans la fonction fw-ia). Un élément ou une
+// phrase recopiés en entier, mot pour mot, comptent aussi. Tout autre mot fait écarter la réponse : les dates, heures,
+// montants, états, procédures et mises en garde montrés au client viennent donc toujours tels quels du dossier, et le
+// reste du texte a été écrit et relu à l'avance.
 const TOPIC_INTENT = { statut: 'status', attente: 'why', preparation: 'prepare', rendez_vous: 'appt', delai: 'when', paiement: 'payment', activation: 'activation', annulation: 'refund', conseiller: 'human', hors_sujet: null, autre: null };
 const ACTIONS = { aucune: null, preparer: { go: 'prep' }, rendez_vous: { go: 'rdv' }, conseiller: { handoff: true } };
 // Écriture commune : minuscules, sans accents ni caractères invisibles, mêmes apostrophes, tirets et espaces partout
 // (NFKD ramène aussi les chiffres et lettres « décoratifs » à leur forme simple).
-const norm = s => String(s == null ? '' : s).normalize('NFKD').toLowerCase().replace(/[̀-ͯ]/g, '').replace(/[­​-‍⁠﻿]/g, '')
-  .replace(/[’‘`´ʼ′]/g, "'").replace(/[‐-―−]/g, '-').replace(/\s+/g, ' ').trim();
+const norm = s => String(s == null ? '' : s).normalize('NFKD').toLowerCase().replace(/[\u0300-\u036f]/g, '').replace(/[\u00ad\u200b-\u200d\u2060\ufeff]/g, '')
+  .replace(/[\u2019\u2018`\u00b4\u02bc\u2032]/g, "'").replace(/[\u2010-\u2015\u2212]/g, '-').replace(/\s+/g, ' ').trim();
 const clean = s => String(s == null ? '' : s).replace(/\s+/g, ' ').trim();
-const MARK = /\{\s*([A-Za-z][A-Za-z0-9-]{0,11})\s*\}/g;
+const MARK = /\{\s*([a-z][a-z0-9-]{0,11})\s*\}/y;
+const SEP = /[\s.,;:!?\u2026\u00ab\u00bb"'()/-]+/y;
 // Renvoi entre parenthèses (« (F3) », « [source : PR-04] ») : une simple citation, retirée du texte.
-const NOTE = /\s*[([]\s*(?:sources?|voir|cf\.?)?\s*:?\s*([A-Z][A-Z0-9-]{0,11}(?:\s*(?:,|;|et)\s*[A-Z][A-Z0-9-]{0,11})*)\s*[)\]]/gi;
+// (« et » seulement entre deux espaces : sinon un long mot plein de « et » sans parenthèse fermante bloquait la page.)
+const NOTE = /\s*[([]\s*(?:sources?|voir|cf\.?)?\s*:?\s*([A-Z][A-Z0-9-]{0,11}(?:(?:\s*[,;]\s*|\s+et\s+)[A-Z][A-Z0-9-]{0,11})*)\s*[)\]]/gi;
 // Ce que l'élément inséré affiche : son texte, précédé d'un mot quand il n'est pas un fait.
 const sayOf = i => (i.kind === 'estimate' ? 'Estimation (ce n’est pas un engagement) : ' + i.text.charAt(0).toLowerCase() + i.text.slice(1) : i.text);
-const sentencesOf = i => i.text.split(/(?<=[.!?])\s+/).map(s => norm(s).replace(/[.!?]+$/, '')).filter(s => s.length >= 12);
+const bare = s => norm(s).replace(/[.!?:\s]+$/, '');
+const PHRASE = new Map(PHRASES.map(p => [p.id, p]));
+const PHRASE_BARE = PHRASES.map(p => ({ id: p.id, key: bare(p.text) }));
+// Conditions des phrases (« when ») : la phrase n'est vraie que dans ce cas.
+const WHEN = {
+  planifier: ctx => !!ctx.canPlan,
+  rendez_vous: (ctx, ai) => ai.can_answer && ai.action === 'rendez_vous' && !ctx.cancelled,
+  preparer: (ctx, ai) => ai.can_answer && ai.action === 'preparer' && !!ctx.canPrep,
+  conseiller: (ctx, ai) => !ai.can_answer || ai.action === 'conseiller',
+  client: ctx => !ctx.delegate,
+};
+const fits = (id, list) => list.some(x => (x.endsWith('*') ? id.startsWith(x.slice(0, -1)) : id === x));
 
-// Tournures permises malgré un mot surveillé : dire qu'on ne peut pas confirmer, que ce n'est pas un engagement, etc.
-const ALLOWED = [
-  /\b(?:ne |n')(?:peux|peut|pouvons|pourrai|pourrons|sais|savons) pas (?:vous )?(?:confirmer|garantir|promettre|annoncer|dire|donner|indiquer|preciser|predire)\b/g,
-  /\b(?:pas|sans) (?:un |une |d'|de )?(?:engagement|promesse|garantie)s?\b/g,
-  /\bcartes? (?:nationales? )?d'identite\b/g,
-  /\bla marche a suivre\b/g,
-  /\bce qu'il faut (?:savoir|retenir)\b/g,
-];
-// Ce que les phrases de Claude ne peuvent pas contenir. [motif, règle] : le premier trouvé est gardé dans le journal.
+// Pour le journal : ce qu'une phrase hors du recueil contient de dangereux. [motif, règle] : le premier trouvé est gardé.
 const OWN = [
   ['nombre, date ou heure écrits par l’IA', /\p{N}[\p{N} .,:h/-]*/u],
   ['écriture inattendue', /[^\p{Script=Latin}\P{L}]/u],
@@ -146,6 +171,29 @@ const OWN = [
   ['promesse', /\b(?:garanti\w*|promet\w*|promis\w*|promesses?|certainement|certitude|surement|assur(?:e|ee|es|ees|ement|ance|ances|ons)|je vous l'assure|engag\w*|sans faute|sans (?:aucun )?doute|aucun doute|absolument|definitivement|forcement|a coup sur|(?:c'est|soyez|suis|sommes|etes|soit|en suis) (?:sure?s?|certaine?s?)|compter sur|je (?:vais|m'occupe|m'en occupe|transmets|relance|contacte|previens|programme|reserve|annule|modifie|valide|confirme)|nous (?:allons|nous occupons|transmettons)|j'ai (?:fait|envoye|transmis|demande|signale|note|enregistre|programme|planifie|reserve|annule|modifie|relance|contacte|prevenu|valide|confirme|verifie)|(?:va|vont) (?:vous )?(?:appeler|rappeler|contacter|venir|passer|arriver|installer|activer|rembourser|envoyer|livrer|valider|confirmer|traiter|regler)|(?:viendr|passer|arriver|installer|activer|rembourser|enverr|livrer|recevr|rappeller|appeller|contacter|traiter|valider|confirmer|regler)(?:a|ont|ez|ai|ons))\b/],
 ];
 
+// Découpe la réponse en repères (ou textes recopiés en entier) ; renvoie le premier passage qui n'en est pas un.
+function partsOf(text, ctx) {
+  const items = ctx.items.map(i => ({ id: i.id, key: bare(i.text) })).filter(i => i.key.length >= 8);
+  const all = [...PHRASE_BARE.map(p => ({ ...p, phrase: true })), ...items].sort((a, b) => b.key.length - a.key.length);
+  const n = norm(text), parts = [];
+  let at = 0;
+  for (;;) {
+    SEP.lastIndex = at; if (SEP.exec(n)) at = SEP.lastIndex;
+    if (at >= n.length) return { parts };
+    MARK.lastIndex = at;
+    const m = MARK.exec(n);
+    if (m) { parts.push({ id: m[1].toUpperCase() }); at = MARK.lastIndex; continue; }
+    const v = all.find(x => n.startsWith(x.key, at) && !/[\p{L}\p{N}]/u.test(n.charAt(at + x.key.length)));
+    if (v) { parts.push({ id: v.id }); at += v.key.length; continue; }
+    const rest = n.slice(at), stop = rest.search(/\{/);
+    return { parts, stray: stop > 0 ? rest.slice(0, stop) : rest };
+  }
+}
+const motifOf = stray => {
+  for (const [why, re] of OWN) { const m = re.exec(stray); if (m) return why + ' (' + m[0].replace(/[\s.,:/-]+$/, '').trim().slice(0, 30) + ')'; }
+  return 'phrase hors du recueil (« ' + stray.replace(/[\s.,;:!?-]+$/, '').slice(0, 40) + ' »)';
+};
+
 export function checkAiAnswer(ctx, ai) {
   if (!ai || typeof ai !== 'object') return { ok: false, why: 'réponse illisible' };
   const answer = clean(ai.answer);
@@ -157,33 +205,34 @@ export function checkAiAnswer(ctx, ai) {
   const unknown = cites.find(c => !ids.has(c));
   if (unknown) return bad('source inconnue (' + unknown.slice(0, 12) + ')');
   const use = id => { if (!cites.includes(id)) cites.push(id); };
-  // 1. Éléments insérés : « {F3} » devient le texte exact de F3 ; les renvois « (F3) » sont de simples citations.
-  let n = 0, unk = null;
-  const text = answer.replace(NOTE, (m, list) => { const l = list.toUpperCase().split(/\s*(?:,|;|ET)\s*/); if (!l.every(x => ids.has(x))) return m; l.forEach(use); return ''; });
-  const parts = [];
-  let own = '', last = 0;
-  for (const m of text.matchAll(MARK)) {
-    const id = m[1].toUpperCase();
-    if (!ids.has(id)) { unk = unk || m[1]; continue; }
-    parts.push(text.slice(last, m.index), sayOf(ids.get(id)));
-    own += text.slice(last, m.index) + ' / ';
-    last = m.index + m[0].length; n++; use(id);
+  const text = answer.replace(NOTE, (m, list) => { const l = list.toUpperCase().split(/\s*[,;]\s*|\s+ET\s+/); if (!l.every(x => ids.has(x))) return m; l.forEach(use); return ''; });
+  // 1. Rien d'autre que des repères (ou des textes approuvés recopiés en entier).
+  const { parts: raw, stray } = partsOf(text, ctx);
+  if (stray) return bad(motifOf(stray));
+  // 2. Chaque repère existe ; un repère répété ne compte qu'une fois.
+  const seen = new Set(), parts = [];
+  for (const p of raw) {
+    if (!ids.has(p.id) && !PHRASE.has(p.id)) return bad((/^P\d+$/.test(p.id) ? 'phrase inconnue (' : 'source inconnue (') + p.id + ')');
+    if (!seen.has(p.id)) { seen.add(p.id); parts.push(p); }
   }
-  if (unk) return bad('source inconnue (' + unk.slice(0, 12) + ')');
-  parts.push(text.slice(last)); own += text.slice(last);
-  if (n > 4) return bad('trop d’éléments insérés');
-  // 2. Une phrase recopiée mot pour mot d'un élément vaut une insertion.
-  let o = norm(own);
-  for (const i of ctx.items) for (const s of sentencesOf(i)) {
-    const re = new RegExp('(^|[.!?:/] ?)' + s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ' ?(?=[.!?/]|$)', 'g');
-    if (re.test(o)) { o = o.replace(re, '$1 / '); use(i.id); }
+  const inserted = parts.filter(p => ids.has(p.id));
+  if (inserted.length > 4) return bad('trop d’éléments insérés');
+  if (parts.length - inserted.length > 4) return bad('trop de phrases');
+  if (ai.can_answer && !inserted.length) return bad('aucun élément du dossier inséré');
+  // 3. Chaque phrase est à sa place : juste avant l'élément qu'elle introduit (« firstOf » : le premier de la liste qui
+  // existe dans ce dossier), et seulement quand elle est vraie.
+  for (const [k, p] of parts.entries()) {
+    const ph = PHRASE.get(p.id);
+    if (!ph) continue;
+    const next = ph.next && ph.firstOf ? ph.next.filter(id => ids.has(id)).slice(0, 1) : ph.next;
+    if (next && !(parts[k + 1] && ids.has(parts[k + 1].id) && fits(parts[k + 1].id, next))) return bad('phrase mal placée (' + p.id + ')');
+    if (ph.when && !WHEN[ph.when](ctx, ai)) return bad('phrase hors de propos (' + p.id + ')');
   }
-  if (ai.can_answer && !cites.length) return bad('aucune source citée');
-  if (o.replace(/[\s/.,;:!?«»"'()-]/g, '').length > 400) return bad('réponse trop longue');
-  // 3. Les phrases de Claude : aucun fait, aucune promesse, aucun lien, aucun code.
-  for (const r of ALLOWED) o = o.replace(r, ' ');
-  for (const [why, re] of OWN) { const m = re.exec(o); if (m) return bad(why + ' (' + m[0].replace(/[\s.,:/-]+$/, '').trim().slice(0, 30) + ')'); }
-  const shown = clean(parts.join(' '));
+  // 4. Ce que le client doit savoir (point bloquant, pièces à envoyer, données anciennes) est ajouté s'il manque.
+  const missing = inserted.length ? (ctx.mustShow || []).filter(id => ids.has(id) && !seen.has(id)) : [];
+  if (missing.length) parts.push(...(seen.has('P20') ? [] : [{ id: 'P20' }]), ...missing.map(id => ({ id })));
+  parts.filter(p => ids.has(p.id)).forEach(p => use(p.id));
+  const shown = parts.map(p => (ids.has(p.id) ? sayOf(ids.get(p.id)) : PHRASE.get(p.id).text)).join(' ');
   return { ok: true, value: { answer: shown, cites, action: ai.action, canAnswer: ai.can_answer, topic: ai.topic } };
 }
 
@@ -196,6 +245,7 @@ export function aiAnswerOf(ws, ctx, v, { question, model, ms }) {
   const blocks = v.cites.map(id => { const { id: cite, ...b } = ids.get(id); return { ...b, cite }; });
   let action = v.canAnswer ? ACTIONS[v.action] : { handoff: true };
   if (action && action.go && ctx.cancelled) action = null;
+  if (action && action.go === 'prep' && !ctx.canPrep) action = null;
   // Une question hors des sujets connus mais à laquelle Claude répond n'est pas une abstention.
   const intent = v.canAnswer ? TOPIC_INTENT[v.topic] || 'other' : null;
   return {
