@@ -4,8 +4,9 @@
 import { buildWorkspace, startOfDay, H, DAY, CAP_DAYS, extendCapacity, isWorkingDay } from './seed.js';
 import * as D from './domain.js';
 import { AppError, SYS, byId, getOrder, audit, emit, notify, addMessage, openBlocker, resolveBlocker, openBlockers, transition } from './domain.js';
-import { STATE_INFO, BLOCKER_TYPES, ROLES, DOC_TYPES, REPORT_TYPES, APPT_STATES, PAYMENT_STATES, ZONES, CHECKLIST_TECH, stateRank, ORDER_STATES, OFFERS, SHOP_ZONES, DOSSIER_DOCS, TECH_DOCS, SLOT_HOURS, PREP_CHECKLIST, hourLabel, AUDIT_LABELS, CONFIG_LABELS } from './model.js';
-import { estimate, risk, assistantAnswer, summarize, evaluate, fmtDate, fmtDateTime } from './ai.js';
+import { STATE_INFO, BLOCKER_TYPES, ROLES, DOC_TYPES, REPORT_TYPES, APPT_STATES, PAYMENT_STATES, ZONES, CHECKLIST_TECH, stateRank, ORDER_STATES, OFFERS, SHOP_ZONES, DOSSIER_DOCS, TECH_DOCS, SLOT_HOURS, PREP_CHECKLIST, hourLabel, AUDIT_LABELS, CONFIG_LABELS, ISSUE_LABEL } from './model.js';
+import { estimate, risk, assistantAnswer, guardQuestion, summarize, evaluate, fmtDate, fmtDateTime } from './ai.js';
+import { AI_MODEL, aiContext, aiPayloadItems, checkAiAnswer, aiAnswerOf, aiModelName, aiMs, checkPhotoReview, genAiOn } from './genai.js';
 import { SCENARIOS, runScenarioSetup } from './scenarios.js';
 import { techAnswer } from './techhelp.js';
 import { smsReply, ussdScreen, SHORT_CODE } from './lowtech.js';
@@ -358,12 +359,27 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
     return m;
   }, { order: true, scope: 'messages' });
 
+  // Réponse de l'IA générative (args.ai, rapportée par le navigateur) : vérifiée ici avec l'état réel du dossier.
+  // Si elle ne passe pas le garde-fou, ou si l'administrateur a coupé l'IA, le client reçoit la réponse par règles.
   cmd('assistant.ask', ['client', 'representant'], ({ ws, user, order, args }) => {
     if (ws.sim.degraded) throw new AppError('degrade', 'Mode dégradé : l’assistant est suspendu. Vos informations de dossier restent visibles, et un conseiller peut vous répondre.');
     const q = String(args.question || '').slice(0, 500);
-    const ans = assistantAnswer(ws, order, q, ws.docs.filter(d => d.scope === 'public'));
-    (ws.assistantLog ||= []).push({ id: 'AI' + (++ws.seq), orderId: order && order.id, userId: user.id, q, at: ws.clock, intent: ans.trace.intent, refused: ans.trace.refused, blocks: ans.blocks.map(b => b.kind) });
-    audit(ws, user, 'ia.assistant', order ? order.ref : '—', (ans.trace.refused ? 'REFUS : ' : (ans.trace.intent || 'abstention') + ' : ') + q.slice(0, 80), { ai: true });
+    const delegate = user.role === 'representant';
+    let ans = null, rejected = null;
+    const model = args.ai ? aiModelName(args.ai.model) : null;
+    if (args.ai && order && genAiOn(ws) && !guardQuestion(q, order)) {
+      const ctx = aiContext(ws, order, { delegate, rdv: canSee(ws, user, order, 'rdv') });
+      const chk = checkAiAnswer(ctx, args.ai);
+      if (chk.ok) ans = aiAnswerOf(ws, ctx, chk.value, { question: q, model, ms: aiMs(args.ai.ms) });
+      else rejected = chk.why;
+    }
+    if (!ans) {
+      ans = assistantAnswer(ws, order, q, ws.docs.filter(d => d.scope === 'public'), { delegate });
+      if (rejected) ans.trace.aiRejected = rejected;
+    }
+    (ws.assistantLog ||= []).push({ id: 'AI' + (++ws.seq), orderId: order && order.id, userId: user.id, q, at: ws.clock, intent: ans.trace.intent, refused: ans.trace.refused, blocks: ans.blocks.map(b => b.kind), ai: ans.ai ? model : null, aiRejected: rejected, ms: ans.ai ? ans.ai.ms : null, trap: model === 'claude-test-piege' || undefined });
+    const how = ans.ai ? 'Claude, ' : rejected ? 'IA écartée (' + rejected + '), règles, ' : '';
+    audit(ws, user, 'ia.assistant', order ? order.ref : '—', (ans.trace.refused ? 'REFUS : ' : how + (ans.trace.intent || 'abstention') + ' : ') + q.slice(0, 80), { ai: true });
     return ans;
   }, { order: true, scope: 'messages' });
   // Suivi sans smartphone : SMS à mots-clés et code USSD (simulés). Même dossier que l'application, réservé au client lui-même.
@@ -724,6 +740,19 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
     audit(ws, user, 'piece.' + args.decision, order.ref, doc.name);
   };
   cmd('doc.review', ['conseiller'], reviewDoc);
+  // Avis de l'IA générative sur une photo, demandé par la conseillère et rapporté par son navigateur. Il aide, la conseillère décide.
+  cmd('doc.aiReview', ['conseiller'], ({ ws, user, args }) => {
+    const doc = byId(ws.documents, args.docId); if (!doc) throw new AppError('introuvable', 'Pièce introuvable.');
+    const order = scopedOrder(ws, user, doc.orderId);
+    if (!genAiOn(ws)) throw new AppError('ia', 'L’IA générative est coupée par l’administrateur.');
+    if (!String(doc.mime || '').startsWith('image/') || !doc.img) throw new AppError('etat', 'Cette pièce n’a pas de photo à analyser.');
+    if (!['analyse', 'a_valider'].includes(doc.status)) throw new AppError('etat', 'Cette pièce est déjà traitée.');
+    const r = checkPhotoReview(args.ai);
+    if (!r) throw new AppError('valeur', 'Réponse de l’IA illisible : rien n’est enregistré.');
+    doc.ai = { ...r, model: aiModelName(args.ai.model), ms: aiMs(args.ai.ms), at: ws.clock, by: user.name };
+    audit(ws, user, 'ia.photo', order.ref, DOC_TYPES[doc.type].label + ' : ' + { lisible: 'lisible', a_refaire: 'à refaire', incertain: 'incertain' }[r.verdict] + (r.issues.length ? ' (' + r.issues.map(i => ISSUE_LABEL[i]).join(', ') + ')' : ''), { ai: true });
+    return doc.ai;
+  });
   // « Suivre l'avis » : applique l'avis automatique (recalculé ici, jamais celui d'un écran périmé). La conseillère reste l'auteure des décisions.
   cmd('dossier.followAdvice', ['conseiller'], ({ ws, user, order, args }) => {
     const adv = D.dossierAdvice(ws, order);
@@ -1112,6 +1141,12 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
     for (const m of ws.models) m.active = args.version != null && m.version === args.version;
     audit(ws, user, 'ia.modele.' + (args.version ? 'activer' : 'desactiver'), args.version || 'Tous les modèles', txt(args.reason, 200), { ai: true });
   });
+  // Couper ou rallumer l'IA générative (Claude) : sans elle, l'assistant répond par règles et les photos gardent l'avis automatique.
+  cmd('genai.set', ['admin'], ({ ws, user, args }) => {
+    if (typeof args.on !== 'boolean') throw new AppError('valeur', 'Choisissez : activer ou couper.');
+    ws.config.genAi = args.on;
+    audit(ws, user, 'ia.generative.' + (args.on ? 'activer' : 'couper'), 'Claude', txt(args.reason, 200), { ai: true });
+  });
   cmd('kb.update', ['admin'], ({ ws, user, args }) => {
     const d = byId(ws.docs, args.id); if (!d) throw new AppError('introuvable', 'Procédure inconnue.');
     const [maj, min] = String(d.version).split('.').map(Number); d.version = (maj || 1) + '.' + ((min || 0) + 1); d.expires = ws.clock + 90 * DAY; d.updatedBy = user.name;
@@ -1482,11 +1517,13 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
   const stripImg = x => (x && typeof x === 'object' ? { ...x, thumb: null, img: null } : x);
   const noImages = v => {
     const out = { ...v };
-    if (out.documents) out.documents = out.documents.map(stripImg);
+    if (out.documents) out.documents = out.documents.map(d => ({ ...stripImg(d), ai: d.ai ? { ...d.ai, note: '' } : d.ai }));
     if (out.mission && out.mission.report) out.mission = { ...out.mission, report: { ...out.mission.report, photos: (out.mission.report.photos || []).map(stripImg) } };
     if (out.internal && out.internal.workOrder) out.internal = { ...out.internal, workOrder: { ...out.internal.workOrder, photos: (out.internal.workOrder.photos || []).map(stripImg), help: (out.internal.workOrder.help || []).map(h => (h && h.photo ? { ...h, photo: stripImg(h.photo) } : h)) } };
     return out;
   };
+  // Une pièce telle que le client la voit : jamais l'avis interne de l'IA ni le nom de la conseillère.
+  const clientDoc = d => ({ id: d.id, type: d.type, name: d.name, mime: d.mime, status: d.status, reason: d.reason, at: d.at, thumb: d.thumb, img: d.img, scanNote: d.scanNote, check: d.check });
   const normTxt = x => String(x == null ? '' : x).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
   const publicEvent = e => ({ seq: e.seq, type: e.type, at: e.effectiveAt, receivedAt: e.receivedAt, text: e.publicText, source: e.source, actorRole: e.role });
   function clientView(ws, user, o) {
@@ -1504,7 +1541,7 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
       hold: ws.holds.find(h => h.orderId === o.id && h.status === 'actif' && h.expiresReal > ws.lastReal) || null,
       mission: wo && wo.status !== 'annulee' ? { status: wo.status, techName: tech ? tech.name.split(' ')[0] + ' ' + tech.name.split(' ').slice(1).map(x => x[0] + '.').join(' ') : '—', company: team && team.contractor ? team.contractor + ' pour Moov' : 'Moov Africa', badge: 'MOOV-' + (tech ? tech.id.replace('U', '') : '') + '7' , times: wo.times, receptionCode: wo.receptionCode, reception: wo.reception, track: wo.track || null, woId: wo.id, report: wo.status === 'terminee' ? { checklist: CHECKLIST_TECH.map(c => ({ label: c.label, value: wo.checklist[c.id], unit: c.unit })), serial: wo.serial, photos: wo.photos.map(p => ({ id: p.id, name: p.name, thumb: p.thumb, img: p.img, at: p.at })), comment: wo.comment } : null, failure: wo.failure, signoff: wo.signoff || null } : null,
       activation: ws.activations.filter(a => a.orderId === o.id).map(a => ({ ref: a.ref, status: a.status, at: a.requestedAt, confirmedAt: a.confirmedAt })),
-      documents: ws.documents.filter(d => d.orderId === o.id).map(d => ({ id: d.id, type: d.type, name: d.name, mime: d.mime, status: d.status, reason: d.reason, at: d.at, thumb: d.thumb, img: d.img, scanNote: d.scanNote, check: d.check })),
+      documents: ws.documents.filter(d => d.orderId === o.id).map(clientDoc),
       messages: ws.messages.filter(m => m.orderId === o.id && m.visibility === 'public'),
       callbacks: ws.callbacks.filter(c => c.orderId === o.id),
       tickets: ws.tickets.filter(t => t.orderId === o.id && (t.type.startsWith('signalement') || t.type === 'question_assistant')).map(t => ({ id: t.id, type: t.type, status: t.status, at: t.at, text: t.text })),
@@ -1522,11 +1559,26 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
     };
   }
 
+  // Bilan de l'IA générative pour l'administration : combien de réponses de Claude, combien écartées par le garde-fou, et pourquoi.
+  function genAiStats(ws) {
+    const log = ws.assistantLog || [];
+    const ai = log.filter(a => a.ai), rej = log.filter(a => a.aiRejected);
+    const photos = ws.documents.filter(d => d.ai);
+    const ms = ai.map(a => a.ms).filter(x => Number.isFinite(x));
+    return {
+      on: genAiOn(ws), model: AI_MODEL,
+      answers: ai.length, rejected: rej.length, rules: log.filter(a => !a.ai && !a.refused).length, refused: log.filter(a => a.refused).length,
+      lastRejected: rej.slice(-5).reverse().map(a => ({ id: a.id, q: a.q, why: a.aiRejected, at: a.at })),
+      photos: photos.length, photoVerdicts: ['lisible', 'a_refaire', 'incertain'].map(v => [v, photos.filter(d => d.ai.verdict === v).length]),
+      avgMs: ms.length ? Math.round(ms.reduce((x, y) => x + y, 0) / ms.length) : null,
+    };
+  }
+
   const DOSSIER_ORDER = { a_verifier: 0, incomplet: 1, verifie: 2, en_retard: 3, a_completer: 4 };
   const queries = {
     me: { fn: ({ ws, user, s }) => ({
       user: { id: user.id, name: user.name, role: user.role, phone: user.phone, prefs: user.prefs, zones: user.zones, contractor: user.contractor },
-      ws: { id: ws.id, name: ws.name, env: ws.env, generation: ws.generation, expiresAt: ws.expiresAt, clock: ws.clock, seed: ws.seed, degraded: ws.sim.degraded, integrations: ws.integrations, holdMinutes: ws.config.holdMinutes, lastReal: ws.lastReal, travelMin: ws.config.travelMin || 4, autoValidateMin: ws.config.autoValidateMin || 60, dossierDeadlineH: ws.config.dossierDeadlineH || 24 },
+      ws: { id: ws.id, name: ws.name, env: ws.env, generation: ws.generation, expiresAt: ws.expiresAt, clock: ws.clock, seed: ws.seed, degraded: ws.sim.degraded, integrations: ws.integrations, holdMinutes: ws.config.holdMinutes, lastReal: ws.lastReal, travelMin: ws.config.travelMin || 4, autoValidateMin: ws.config.autoValidateMin || 60, dossierDeadlineH: ws.config.dossierDeadlineH || 24, genAi: genAiOn(ws) },
       owner: !!s.owner,
       unread: ws.notifications.filter(n => n.userId === user.id && !n.read).length,
       users: s.owner ? ws.users.map(u => ({ id: u.id, name: u.name, role: u.role, active: u.active })) : null,
@@ -1534,7 +1586,19 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
     'client.orders': { roles: CLIENTISH, fn: ({ ws, user }) => ws.orders.filter(o => canSee(ws, user, o)).map(o => ({ id: o.id, ref: o.ref, state: o.state, address: o.address, cancelled: o.cancelled, updatedAt: o.updatedAt, dossier: o.dossier ? (D.dossierState(ws, o) || {}).status || null : null, scopes: user.role === 'representant' ? ws.delegations.filter(d => d.orderId === o.id && d.delegateId === user.id && !d.revoked).flatMap(d => d.scopes) : null })) },
     'client.order': { roles: CLIENTISH, fn: ({ ws, user, args }) => { const o = scopedOrder(ws, user, args.orderId); const v = clientView(ws, user, o); return user.role === 'representant' ? forDelegate(v, delegateScopes(ws, user, o.id)) : v; } },
     'client.availability': { roles: CLIENTISH, fn: ({ ws, user, args }) => D.availability(ws, scopedOrder(ws, user, args.orderId, 'rdv')) },
-    'client.document': { roles: ['client'], fn: ({ ws, user, args }) => { const d = byId(ws.documents, args.docId); if (!d) throw new AppError('introuvable', 'Pièce introuvable ou non autorisée.'); scopedOrder(ws, user, d.orderId); return d; } },
+    // Ce que le navigateur envoie à l'IA générative pour cette question : rien si l'IA est coupée, si le service est
+    // dégradé, ou si la question est une tentative de détournement (l'assistant par règles la refuse lui-même).
+    'assistant.context': { roles: CLIENTISH, fn: ({ ws, user, args }) => {
+      const o = scopedOrder(ws, user, args.orderId, 'messages');
+      const q = String(args.question || '').slice(0, 500);
+      if (!genAiOn(ws)) return { skip: 'coupee' };
+      if (ws.sim.degraded) return { skip: 'degrade' };
+      if (!q.trim()) return { skip: 'vide' };
+      if (guardQuestion(q, o)) return { skip: 'garde' };
+      const ctx = aiContext(ws, o, { delegate: user.role === 'representant', rdv: canSee(ws, user, o, 'rdv') });
+      return { ref: ctx.ref, items: aiPayloadItems(ctx) };
+    } },
+    'client.document': { roles: ['client'], fn: ({ ws, user, args }) => { const d = byId(ws.documents, args.docId); if (!d) throw new AppError('introuvable', 'Pièce introuvable ou non autorisée.'); scopedOrder(ws, user, d.orderId); return clientDoc(d); } },
     notifications: { fn: ({ ws, user }) => ws.notifications.filter(n => n.userId === user.id).slice(-60).reverse() },
     // Chaque personne ne voit que ses propres SMS, même dans l'espace de démo de son propriétaire.
     outbox: { fn: ({ ws, user }) => ws.outbox.filter(o => o.userId === user.id).slice(-60).reverse() },
@@ -1571,7 +1635,10 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
       const cv = clientView(ws, user, o);
       const noImg = ['admin', 'auditeur'].includes(user.role);
       const dups = ws.orders.filter(x => x.id !== o.id && (x.contactPhone === o.contactPhone || (x.address.street === o.address.street && x.zone === o.zone)) && canSee(ws, user, x)).map(x => ({ id: x.id, ref: x.ref, why: x.contactPhone === o.contactPhone ? 'même téléphone' : 'même adresse', state: x.state }));
-      const full = { ...cv, internal: {
+      // L'avis de l'IA sur les photos est une aide interne : la conseillère le voit, pas le client.
+      // Si l'administrateur coupe l'IA, ses avis enregistrés ne sont plus montrés (ils reviennent si on la rallume).
+      const withAi = cv.documents.map(d => ({ ...d, ai: (genAiOn(ws) && (byId(ws.documents, d.id) || {}).ai) || null }));
+      const full = { ...cv, documents: withAi, internal: {
         events: ws.events.filter(e => e.orderId === o.id),
         notes: ws.messages.filter(m => m.orderId === o.id && m.visibility === 'interne'),
         blockers: ws.blockers.filter(b => b.orderId === o.id).map(b => ({ ...b, ownerName: (byId(ws.users, b.ownerUserId) || {}).name || null, label: BLOCKER_TYPES[b.type].label })),
@@ -1583,6 +1650,12 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
         advice: D.dossierAdvice(ws, o),
       } };
       return noImg ? noImages(full) : full;
+    } },
+    // État actuel d'une pièce, relu juste avant d'envoyer sa photo à l'IA (un écran peut être périmé).
+    'ops.doc': { roles: ['conseiller'], fn: ({ ws, user, args }) => {
+      const d = byId(ws.documents, args.docId); if (!d) throw new AppError('introuvable', 'Pièce introuvable.');
+      scopedOrder(ws, user, d.orderId);
+      return { id: d.id, type: d.type, mime: d.mime, img: d.img, status: d.status, ai: !!d.ai, genAi: genAiOn(ws) };
     } },
     // Droit de voir une image (pièce ou photo) : même règle que le dossier, technicien seulement sur sa mission ouverte.
     // Un identifiant d'image connu ne suffit pas (R-11).
@@ -1696,7 +1769,7 @@ export function createBackend({ storage, realNow = () => Date.now(), lock = null
       if (args.ai) a = a.filter(e => e.ai);
       return a.sort((p, q2) => (q2.at - p.at) || (q2.seq - p.seq)).slice(0, 300);
     } },
-    'admin.models': { roles: ['admin', 'auditeur', 'superviseur'], fn: ({ ws }) => { ws._eval ||= evaluate(ws.seed); const done = ws.predictions.filter(p => p.actualH != null); return { models: ws.models, evaluation: ws._eval, live: { predictions: ws.predictions.length, withOutcome: done.length, mae: done.length ? done.reduce((s, p) => s + Math.abs(p.medianH - p.actualH), 0) / done.length : null, coverage: done.length ? done.filter(p => p.actualH >= p.loH && p.actualH <= p.hiH).length / done.length : null }, assistant: (ws.assistantLog || []).slice(-50).reverse(), seed: ws.seed }; } },
+    'admin.models': { roles: ['admin', 'auditeur', 'superviseur'], fn: ({ ws }) => { ws._eval ||= evaluate(ws.seed); const done = ws.predictions.filter(p => p.actualH != null); return { models: ws.models, evaluation: ws._eval, live: { predictions: ws.predictions.length, withOutcome: done.length, mae: done.length ? done.reduce((s, p) => s + Math.abs(p.medianH - p.actualH), 0) / done.length : null, coverage: done.length ? done.filter(p => p.actualH >= p.loH && p.actualH <= p.hiH).length / done.length : null }, assistant: (ws.assistantLog || []).slice(-50).reverse(), seed: ws.seed, genAi: genAiStats(ws) }; } },
     'admin.health': { roles: ['admin', 'superviseur', 'auditeur'], fn: ({ ws }) => ({ integrations: ws.integrations, degraded: ws.sim.degraded, backups: ws.backups, jobs: { pending: ws.jobs.filter(j => !j.done).length, dropped: ws.jobs.filter(j => j.dropped).length }, deliveries: { pending: ws.deliveries.filter(d => d.status === 'en_attente').length, dead: ws.deliveries.filter(d => d.status === 'abandon').length }, storageKb: Math.round((storage.get(K.ws(ws.id)) || '').length / 1024) }) },
     'admin.refunds': { roles: ['admin', 'superviseur', 'conseiller', 'auditeur'], fn: ({ ws, user }) => ({ refunds: ws.refunds.filter(r => canSee(ws, user, byId(ws.orders, r.orderId))).map(r => ({ ...r, ref: byId(ws.orders, r.orderId).ref })), payments: ws.orders.filter(o => canSee(ws, user, o)).map(o => ({ id: o.id, ...o.payment, orderRef: o.ref, state: o.state })), approvals: (ws.approvals || []).filter(a => canSee(ws, user, byId(ws.orders, a.orderId))).map(a => ({ ...a, ref: byId(ws.orders, a.orderId).ref })) }) },
     'labo.state': { ownerOk: true, fn: ({ ws, s }) => {
